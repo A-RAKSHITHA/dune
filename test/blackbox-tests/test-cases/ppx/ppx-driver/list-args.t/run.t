@@ -1,7 +1,7 @@
 Test the argument syntax with list expansion allowed (dune > 3.2)
 
-  $ dune build
-  .ppx/454728df5270ab91f8a5af6b5e860eb0/ppx.exe
+  $ dune build 2>&1 | censor
+  .ppx/$DIGEST/ppx.exe
   -arg1
   -arg2
   -arg3=Oreo

@@ -15,7 +15,6 @@ end
 val return : 'a -> 'a t
 val bind : 'a t -> f:('a -> 'b t) -> 'b t
 val map : 'a t -> f:('a -> 'b) -> 'b t
-val map2 : 'a t -> 'b t -> f:('a -> 'b -> 'c) -> 'c t
 val both : 'a t -> 'b t -> ('a * 'b) t
 val all : 'a t list -> 'a list t
 val all_unit : unit t list -> unit t
@@ -75,7 +74,7 @@ module Expert : sig
       setting up the rules that copy files from the source to the build directory. *)
   val record_dep_on_source_file_exn
     :  'a
-    -> ?loc:(unit -> Loc.t option Memo.t)
+    -> loc:(unit -> Loc.t option Memo.t)
     -> Path.Source.t
     -> 'a t
 end

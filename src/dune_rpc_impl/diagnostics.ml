@@ -1,6 +1,6 @@
 open Import
 module Diagnostic = Dune_rpc.Diagnostic
-module Compound_user_error = Dune_engine.Compound_user_error
+module Compound_user_error = Dune_rpc.Compound_user_error
 
 let absolutize_paths ~dir (loc : Loc.t) =
   let make_path name =
@@ -14,7 +14,7 @@ let absolutize_paths ~dir (loc : Loc.t) =
   |> Loc.to_lexbuf_loc
 ;;
 
-let diagnostic_of_error : Build_system_error.t -> Dune_rpc_private.Diagnostic.t =
+let diagnostic_of_error : Build_system_error.t -> Dune_rpc.Diagnostic.t =
   fun m ->
   let dir =
     let dir = Build_system_error.dir m in
@@ -24,12 +24,12 @@ let diagnostic_of_error : Build_system_error.t -> Dune_rpc_private.Diagnostic.t 
     let dir = Option.value ~default:Path.root dir in
     absolutize_paths ~dir loc
   in
-  let message, related =
+  let message, related, severity =
     match Build_system_error.description m with
     | `Exn e ->
-      (* CR-someday jeremiedimino: Use [Report_error.get_user_message] here. *)
-      User_message.make [ Pp.text (Printexc.to_string e.exn) ], []
-    | `Diagnostic { Compound_user_error.main = message; related } -> message, related
+      User_message.make [ Pp.text (Printexc.to_string e.exn) ], [], Some Diagnostic.Error
+    | `Diagnostic { Compound_user_error.main = message; related; severity } ->
+      message, related, Some severity
   in
   let loc = Option.map message.loc ~f:make_loc in
   let id =
@@ -47,7 +47,7 @@ let diagnostic_of_error : Build_system_error.t -> Dune_rpc_private.Diagnostic.t 
   in
   let related =
     List.map related ~f:(fun (related : User_message.t) ->
-      { Dune_rpc_private.Diagnostic.Related.message = Pp.concat related.paragraphs
+      { Dune_rpc.Diagnostic.Related.message = Pp.concat related.paragraphs
       ; loc = make_loc (Option.value_exn related.loc)
       })
   in
@@ -65,7 +65,7 @@ let diagnostic_of_error : Build_system_error.t -> Dune_rpc_private.Diagnostic.t 
     in
     List.map paragraphs ~f:Pp.box |> Pp.concat ~sep:Pp.cut |> Pp.vbox
   in
-  { Dune_rpc_private.Diagnostic.severity = Some Dune_rpc_private.Diagnostic.Error
+  { Dune_rpc.Diagnostic.severity
   ; id
   ; targets = []
   ; message

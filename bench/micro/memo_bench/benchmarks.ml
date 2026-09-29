@@ -21,7 +21,7 @@ module Memo = struct
   ;;
 
   let memoize t =
-    let l = Memo.lazy_ ~cutoff:(fun _ _ -> false) (fun () -> t) in
+    let l = Memo.lazy_ ~name:"memoize" ~cutoff:(fun _ _ -> false) (fun () -> t) in
     Memo.of_thunk (fun () -> Memo.Lazy.force l)
   ;;
 
@@ -37,13 +37,17 @@ let run tenacious = Memo.exec tenacious
 module Var = struct
   type 'a t =
     { value : 'a ref
-    ; cell : (unit, 'a) Memo.Cell.t
+    ; cell : (unit, 'a) Memo.Node.t
     }
 
   let create value =
     let value = ref value in
     { value
-    ; cell = Memo.lazy_cell ~cutoff:(fun _ _ -> false) (fun () -> Memo.return !value)
+    ; cell =
+        Memo.lazy_node
+          ~name:"var"
+          ~cutoff:(fun _ _ -> false)
+          (fun () -> Memo.return !value)
     }
   ;;
 
@@ -52,10 +56,10 @@ module Var = struct
     invalidation_acc
     := Memo.Invalidation.combine
          !invalidation_acc
-         (Memo.Cell.invalidate ~reason:Memo.Invalidation.Reason.Test t.cell)
+         (Memo.Node.invalidate ~reason:Memo.Invalidation.Reason.Test t.cell)
   ;;
 
-  let read t = Memo.of_thunk (fun () -> Memo.Cell.read t.cell)
+  let read t = Memo.of_thunk (fun () -> Memo.Node.read t.cell)
   let peek t = !(t.value)
 end
 

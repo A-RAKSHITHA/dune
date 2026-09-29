@@ -1,5 +1,4 @@
-open! Stdune
-open Dune_sexp
+open Import
 open Pp.O
 module Format = Stdlib.Format
 
@@ -26,10 +25,7 @@ let print_wrapped_list ~version x =
   let inner = Pp.concat_map ~sep:Pp.space ~f:pp_simple x in
   if version < (2, 8)
   then Pp.char '(' ++ Pp.hovbox ~indent:1 inner ++ Pp.char ')'
-  else
-    (if version < (3, 19) then Pp.hvbox else Pp.hovbox)
-      ~indent:1
-      (Pp.char '(' ++ inner ++ Pp.char ')')
+  else Pp.hvbox ~indent:1 (Pp.char '(' ++ inner ++ Pp.char ')')
 ;;
 
 let pp_comment_line l = Pp.char ';' ++ Pp.verbatim l
@@ -73,12 +69,14 @@ let format_string ~version input =
   | Sexps sexps -> Format.asprintf "%a%!" Pp.to_fmt (pp_top_sexps ~version sexps)
 ;;
 
-let format_action ~version ~src ~dst =
-  let dst = Path.build dst in
+let format_to_channel ~version ~src oc =
   match Io.with_lexbuf_from_file src ~f:parse with
-  | OCaml_syntax _ -> Io.copy_file ~src ~dst ()
+  | OCaml_syntax _ -> Io.with_file_in src ~f:(fun ic -> Io.copy_channels ic oc)
   | Sexps sexps ->
-    Io.with_file_out dst ~f:(fun oc ->
-      let oc = Format.formatter_of_out_channel oc in
-      Format.fprintf oc "%a%!" Pp.to_fmt (pp_top_sexps ~version sexps))
+    let oc = Format.formatter_of_out_channel oc in
+    Format.fprintf oc "%a%!" Pp.to_fmt (pp_top_sexps ~version sexps)
+;;
+
+let format_action ~version ~src ~dst =
+  Path.build dst |> Io.with_file_out ~f:(format_to_channel ~version ~src)
 ;;

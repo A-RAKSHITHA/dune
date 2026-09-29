@@ -36,25 +36,12 @@ let and_ = function
   | _ :: _ :: _ as xs -> And xs
 ;;
 
-let map t ~f =
-  let rec loop = function
-    | True -> True
-    | False -> False
-    | Element a -> Element (f a)
-    | Not a -> Not (loop a)
-    | Standard -> Standard
-    | Or xs -> Or (List.map ~f:loop xs)
-    | And xs -> And (List.map ~f:loop xs)
-  in
-  loop t
-;;
-
 let rec decode_one =
   let not_or a = not (Or a) in
   fun f ->
     let open Decoder in
-    let bool_ops () =
-      sum [ "or", many f or_ []; "and", many f and_ []; "not", many f not_or [] ]
+    let bool_ops =
+      lazy (sum [ "or", many f or_ []; "and", many f and_ []; "not", many f not_or [] ])
     in
     let elt =
       let+ e = f in
@@ -79,7 +66,7 @@ let rec decode_one =
          User_error.raise
            ~loc
            [ Pp.text ":include isn't supported in the predicate language" ]
-       | "or" | "and" | "not" -> bool_ops ()
+       | "or" | "and" | "not" -> Lazy.force bool_ops
        | s when s <> "" && s.[0] <> '-' && s.[0] <> ':' ->
          User_error.raise
            ~loc
@@ -113,6 +100,34 @@ let rec encode f =
   | Standard -> string ":standard"
   | Or xs -> constr "or" (list (encode f)) xs
   | And xs -> constr "and" (list (encode f)) xs
+;;
+
+let repr elt =
+  Repr.fix (fun repr ->
+    Repr.variant
+      "predicate-lang"
+      [ Repr.case0 "True" ~test:(function
+          | True -> true
+          | False | Element _ | Not _ | Standard | Or _ | And _ -> false)
+      ; Repr.case0 "False" ~test:(function
+          | False -> true
+          | True | Element _ | Not _ | Standard | Or _ | And _ -> false)
+      ; Repr.case "Element" elt ~proj:(function
+          | Element a -> Some a
+          | True | False | Not _ | Standard | Or _ | And _ -> None)
+      ; Repr.case "Not" repr ~proj:(function
+          | Not a -> Some a
+          | True | False | Element _ | Standard | Or _ | And _ -> None)
+      ; Repr.case0 "Standard" ~test:(function
+          | Standard -> true
+          | True | False | Element _ | Not _ | Or _ | And _ -> false)
+      ; Repr.case "Or" (Repr.list repr) ~proj:(function
+          | Or xs -> Some xs
+          | True | False | Element _ | Not _ | Standard | And _ -> None)
+      ; Repr.case "And" (Repr.list repr) ~proj:(function
+          | And xs -> Some xs
+          | True | False | Element _ | Not _ | Standard | Or _ -> None)
+      ])
 ;;
 
 let rec to_dyn f =
@@ -163,24 +178,58 @@ let rec compare f x y =
   | False, False -> Eq
 ;;
 
+module Repr_derived = Repr.Make1 (struct
+    type nonrec 'a t = 'a t
+
+    let repr = repr
+  end)
+
 module Glob = struct
-  module Glob = Dune_glob.V1
+  module Glob = Dune_rpc.Private.Glob
 
   module Element = struct
+    module Proxy = struct
+      type t =
+        { repr : string
+        ; hash : int
+        }
+
+      let equal (x : t) (y : t) = x == y
+      let hash t = t.hash
+      let to_dyn = Dyn.opaque
+      let table = Table.create (module String) 10
+
+      let of_string =
+        let create repr = { repr; hash = String.hash repr } in
+        fun s -> Table.find_or_add table s ~f:create
+      ;;
+    end
+
+    let table = Table.create (module Proxy) 10
+    let unproxy = Table.find_or_add table ~f:(fun x -> Glob.of_string x.repr)
+
     type t =
-      | Glob of Glob.t
+      | Glob of Proxy.t
       | Literal of string
+
+    let repr =
+      let glob_repr =
+        Repr.view Repr.string ~to_:(fun glob -> Glob.to_string (unproxy glob))
+      in
+      Repr.variant
+        "glob-element"
+        [ Repr.case "Glob" glob_repr ~proj:(function
+            | Glob glob -> Some glob
+            | Literal _ -> None)
+        ; Repr.case "Literal" Repr.string ~proj:(function
+            | Literal string -> Some string
+            | Glob _ -> None)
+        ]
+    ;;
 
     let to_dyn = function
       | Literal s -> Dyn.variant "Literal" [ Dyn.string s ]
-      | Glob g -> Dyn.variant "Glob" [ Glob.to_dyn g ]
-    ;;
-
-    (* CR-someday amokhov: The [_exn] suffix is here because [Glob.to_string] can actually
-       raise. We should clean this all up, at least use the [_exn] suffix consistently. *)
-    let digest_exn = function
-      | Literal s -> Dune_digest.generic (0, s)
-      | Glob g -> Dune_digest.generic (1, Glob.to_string g)
+      | Glob g -> Dyn.variant "Glob" [ Glob.to_dyn (unproxy g) ]
     ;;
 
     let encode t =
@@ -188,12 +237,12 @@ module Glob = struct
       @@
       match t with
       | Literal s -> s
-      | Glob g -> Glob.to_string g
+      | Glob g -> Glob.to_string (unproxy g)
     ;;
 
     let compare x y =
       match x, y with
-      | Glob x, Glob y -> Glob.compare x y
+      | Glob x, Glob y -> Glob.compare (unproxy x) (unproxy y)
       | Glob _, _ -> Lt
       | _, Glob _ -> Gt
       | Literal x, Literal y -> String.compare x y
@@ -202,21 +251,40 @@ module Glob = struct
     let test t s =
       match t with
       | Literal s' -> String.equal s s'
-      | Glob g -> Glob.test g s
+      | Glob g -> Glob.test (unproxy g) s
     ;;
 
     let decode =
       let open Dune_sexp.Decoder in
-      let+ glob = Decoder.plain_string (fun ~loc x -> Glob.of_string_exn loc x) in
+      let+ glob =
+        Decoder.plain_string (fun ~loc x ->
+          let proxy = Proxy.of_string x in
+          let (_ : Glob.t) =
+            try unproxy proxy with
+            | _ ->
+              let (_ : Glob.t) = Glob.of_string_exn loc x in
+              assert false
+          in
+          proxy)
+      in
       Glob glob
     ;;
   end
 
   type nonrec t = Element.t t
 
+  let repr = repr Element.repr
   let to_dyn t = to_dyn Element.to_dyn t
   let test (t : t) ~standard elem = test t ~standard ~test:Element.test elem
-  let of_glob g = Element (Element.Glob g)
+
+  let of_glob g =
+    let proxy =
+      let repr = Glob.to_string g in
+      Element.Proxy.of_string repr
+    in
+    Element (Element.Glob proxy)
+  ;;
+
   let of_string_list s = Or (List.rev_map s ~f:(fun x -> Element (Element.Literal x)))
 
   let of_string_set s =
@@ -228,5 +296,5 @@ module Glob = struct
   let hash t = Poly.hash t
   let decode = decode Element.decode
   let encode t = encode Element.encode t
-  let digest_exn t = map t ~f:Element.digest_exn |> Dune_digest.generic
+  let digest t = Dune_digest.repr repr t
 end

@@ -1,4 +1,4 @@
-include Dune_sexp
+include Stdune.Dune_sexp
 module Lib_name = Lib_name
 module Alias = Alias
 module Format = Format
@@ -37,8 +37,40 @@ module Toggle = Toggle
 module Site = Site
 module Warning = Warning
 module Source_kind = Source_kind
+module Url = Url
 module Package_info = Package_info
 module Section = Section
 module Package = Package
 module Dune_project_name = Dune_project_name
+module Compilation_mode = Compilation_mode
 module Dialect = Dialect
+module Lib_mode = Lib_mode
+module Melange = Melange
+module Module_name = Module_name
+module Module_reference = Module_reference
+module Pin_stanza = Pin_stanza
+module Preprocess = Preprocess
+module Link_flags = Link_flags
+module Dune_project = Dune_project
+module File_binding = File_binding
+module Foreign_language = Foreign_language
+module Ocaml_flags = Ocaml_flags
+module Rocq_env = Rocq_env
+module Menhir_env = Menhir_env
+module Dune_env = Dune_env
+module Js_of_ocaml = Js_of_ocaml
+module Menhir = Menhir
+module Rule_mode = Rule_mode
+module Rule_mode_decoder = Rule_mode_decoder
+module Mode_conf = Mode_conf
+module Oxcaml = Oxcaml
+module Modules_settings = Modules_settings
+module Stanza_pkg = Stanza_pkg
+module Package_mask = Package_mask
+module Unreleased = Unreleased
+
+(* CR-someday rgrinberg: perhaps wrap these under [Stanzas]? *)
+module Copy_files = Copy_files
+module Enabled_if = Enabled_if
+module Alias_conf = Alias_conf
+module Include_subdirs = Include_subdirs

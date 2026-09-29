@@ -1,6 +1,10 @@
 open Stdune
 include Cmdliner.Arg
 
+let info ?deprecated ?absent ?docs ?docv ~doc ?env names =
+  Cmdliner.Arg.info ?deprecated ?absent ?docs ?docv ?doc ?env names
+;;
+
 include struct
   open Dune_lang
   module Stanza = Stanza
@@ -41,6 +45,7 @@ module Dep = struct
 
   type t = Dep_conf.t
 
+  let equal = Dep_conf.equal
   let file s = Dep_conf.File (String_with_vars.make_text Loc.none s)
 
   let make_alias_sw ~dir s =
@@ -56,7 +61,7 @@ module Dep = struct
   let alias_rec ~dir s = Dep_conf.Alias_rec (make_alias_sw ~dir s)
 
   let parse_alias s =
-    if not (String.is_prefix s ~prefix:"@")
+    if not (String.starts_with ~prefix:"@" s)
     then None
     else (
       let pos, recursive =
@@ -66,14 +71,7 @@ module Dep = struct
       Some (if recursive then Dep_conf.Alias_rec s else Dep_conf.Alias s))
   ;;
 
-  let dep_parser =
-    Dune_lang.Syntax.set
-      Stanza.syntax
-      (Active Stanza.latest_version)
-      (String_with_vars.set_decoding_env
-         (Pform.Env.initial Stanza.latest_version)
-         Dep_conf.decode)
-  ;;
+  let dep_parser = Dep_conf.command_line_parser ~stanza_version:Stanza.latest_version
 
   let parser s =
     match parse_alias s with
@@ -115,6 +113,16 @@ module Dep = struct
 
   let conv = conv' (parser, printer)
   let to_string_maybe_quoted t = String.maybe_quoted (Format.asprintf "%a" printer t)
+
+  let alias_arg =
+    let parse x = Ok (Dep_conf.Alias (String_with_vars.make_text Loc.none x)) in
+    conv' (parse, printer)
+  ;;
+
+  let alias_rec_arg =
+    let parse x = Ok (Dep_conf.Alias_rec (String_with_vars.make_text Loc.none x)) in
+    conv' (parse, printer)
+  ;;
 end
 
 let dep = Dep.conv
@@ -133,10 +141,6 @@ let bytes =
   in
   let pp_print_int64 state i = Format.pp_print_string state (Int64.to_string i) in
   conv (decode, pp_print_int64)
-;;
-
-let graph_format : Dune_graph.Graph.File_format.t conv =
-  conv Dune_graph.Graph.File_format.conv
 ;;
 
 let context_name : Context_name.t conv = conv Context_name.conv

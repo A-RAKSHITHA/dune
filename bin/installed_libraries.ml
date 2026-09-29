@@ -11,10 +11,10 @@ let term =
       & flag
       & info
           [ "na"; "not-available" ]
-          ~doc:"List libraries that are not available and explain why")
+          ~doc:(Some "List libraries that are not available and explain why"))
   in
   let common, config = Common.init builder in
-  Scheduler.go
+  Scheduler_setup.go_with_rpc_server
     ~common
     ~config
     (let run () =

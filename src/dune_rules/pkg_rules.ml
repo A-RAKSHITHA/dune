@@ -3,14 +3,15 @@ open Memo.O
 
 include struct
   open Dune_pkg
-  module Sys_poll = Sys_poll
   module Package_variable = Package_variable
   module Substs = Substs
   module Checksum = Checksum
   module Source = Source
   module Build_command = Lock_dir.Build_command
-  module Display = Dune_engine.Display
   module Pkg_info = Lock_dir.Pkg_info
+  module Depexts = Lock_dir.Depexts
+  module Digest_feed = Dune_digest.Feed
+  module Dune_dep = Dune_dep
 end
 
 module Variable = struct
@@ -21,13 +22,22 @@ module Variable = struct
 
   type t = Package_variable_name.t * value
 
-  let dyn_of_value : value -> Dyn.t =
-    let open Dyn in
-    function
-    | B b -> variant "Bool" [ bool b ]
-    | S s -> variant "String" [ string s ]
-    | L xs -> variant "Strings" [ list string xs ]
+  let value_repr =
+    Repr.variant
+      "package-variable-value"
+      [ Repr.case "Bool" Repr.bool ~proj:(function
+          | B b -> Some b
+          | _ -> None)
+      ; Repr.case "String" Repr.string ~proj:(function
+          | S s -> Some s
+          | _ -> None)
+      ; Repr.case "Strings" (Repr.list Repr.string) ~proj:(function
+          | L xs -> Some xs
+          | _ -> None)
+      ]
   ;;
+
+  let repr = Repr.pair Package_variable_name.repr value_repr
 
   let dune_value : value -> Value.t list = function
     | B b -> [ String (Bool.to_string b) ]
@@ -41,47 +51,148 @@ module Variable = struct
     | [ x ] -> S x
     | xs -> L xs
   ;;
-
-  let to_dyn (name, value) =
-    Dyn.(pair Package_variable_name.to_dyn dyn_of_value (name, value))
-  ;;
 end
 
 module Package_universe = struct
-  (* A type of group of packages that are co-installed. Different
-     package universes are unaware of each other. For example the
-     dependencies of the project and the dependencies of one of the dev
-     tools don't need to be mutually co-installable as they are in
-     different universes. *)
+  (* A type of group of packages that are co-installed. Multiple different
+     versions of a package may be co-installed into the same universe.
+
+     Note that a dev tool universe just contains the package for the dev tool
+     itself and not its dependencies, which are installed into the
+     [Dependencies _] universe for the default context so they may be
+     shared with the project's dependencies. *)
   type t =
-    | Project_dependencies of Context_name.t
+    | Dependencies of Context_name.t
     | Dev_tool of Dune_pkg.Dev_tool.t
 
   let equal a b =
     match a, b with
-    | Project_dependencies a, Project_dependencies b -> Context_name.equal a b
+    | Dependencies a, Dependencies b -> Context_name.equal a b
     | Dev_tool a, Dev_tool b -> Dune_pkg.Dev_tool.equal a b
     | _ -> false
   ;;
 
+  let hash t =
+    match t with
+    | Dependencies context_name ->
+      Tuple.T2.hash Int.hash Context_name.hash (0, context_name)
+    | Dev_tool dev_tool -> Tuple.T2.hash Int.hash Dune_pkg.Dev_tool.hash (1, dev_tool)
+  ;;
+
   let context_name = function
-    | Project_dependencies context_name -> context_name
+    | Dependencies context_name -> context_name
     | Dev_tool _ ->
       (* Dev tools can only be built in the default context. *)
       Context_name.default
   ;;
 
-  let lock_dir t =
-    match t with
-    | Project_dependencies ctx -> Lock_dir.get_exn ctx
-    | Dev_tool dev_tool -> Lock_dir.of_dev_tool dev_tool
-  ;;
-
   let lock_dir_path t =
     match t with
-    | Project_dependencies ctx -> Lock_dir.get_path ctx
+    | Dependencies ctx -> Lock_dir.get_path ctx
     | Dev_tool dev_tool ->
-      Memo.return (Some (Dune_pkg.Lock_dir.dev_tool_lock_dir_path dev_tool))
+      Lock_dir.dev_tool_lock_dir dev_tool |> Option.some |> Memo.return
+  ;;
+
+  let lock_dir t =
+    match t with
+    | Dependencies ctx -> Lock_dir.get_exn ctx
+    | Dev_tool dev_tool -> Lock_dir.of_dev_tool dev_tool
+  ;;
+end
+
+module Pkg_digest = struct
+  module T = struct
+    type t =
+      { name : Package.Name.t
+      ; version : Package_version.t
+      ; lockfile_and_dependency_digest : Dune_digest.t
+        (* A hash of the package's lockfile as well as of the digests of all
+           the package's dependencies. *)
+      }
+
+    let equal { name; version; lockfile_and_dependency_digest } t =
+      Package.Name.equal name t.name
+      && Package_version.equal version t.version
+      && Dune_digest.equal lockfile_and_dependency_digest t.lockfile_and_dependency_digest
+    ;;
+
+    let compare { name; version; lockfile_and_dependency_digest } t =
+      let open Ordering.O in
+      let= () = Package.Name.compare name t.name in
+      let= () = Package_version.compare version t.version in
+      Dune_digest.compare lockfile_and_dependency_digest t.lockfile_and_dependency_digest
+    ;;
+
+    let to_dyn { name; version; lockfile_and_dependency_digest } =
+      Dyn.record
+        [ "name", Package.Name.to_dyn name
+        ; "version", Package_version.to_dyn version
+        ; ( "lockfile_and_dependency_digest"
+          , Dune_digest.to_dyn lockfile_and_dependency_digest )
+        ]
+    ;;
+
+    let hash { name; version; lockfile_and_dependency_digest } =
+      Tuple.T3.hash
+        Package.Name.hash
+        Package_version.hash
+        Dune_digest.hash
+        (name, version, lockfile_and_dependency_digest)
+    ;;
+
+    let digest_repr = Repr.view Repr.string ~to_:Dune_digest.to_string
+
+    let repr =
+      Repr.record
+        "pkg-digest"
+        [ Repr.field "name" Package.Name.repr ~get:(fun t -> t.name)
+        ; Repr.field "version" Package_version.repr ~get:(fun t -> t.version)
+        ; Repr.field "lockfile_and_dependency_digest" digest_repr ~get:(fun t ->
+            t.lockfile_and_dependency_digest)
+        ]
+    ;;
+  end
+
+  include T
+  include Comparable.Make (T)
+
+  let to_string { name; version; lockfile_and_dependency_digest } =
+    sprintf
+      "%s.%s-%s"
+      (Package.Name.to_string name)
+      (Package_version.to_string version)
+      (Dune_digest.to_string lockfile_and_dependency_digest)
+  ;;
+
+  let of_string s =
+    let parse_error msg =
+      User_error.raise [ Pp.textf "Failed to parse %S as a package pkg digest." s; msg ]
+    in
+    match String.lsplit2 s ~on:'.' with
+    | None -> parse_error (Pp.text "Missing '.' between name and version.")
+    | Some (name, rest) ->
+      (match String.rsplit2 rest ~on:'-' with
+       | None -> parse_error (Pp.text "Missing '-' between version and lockfile digest.")
+       | Some (version, lockfile_and_dependency_digest) ->
+         (match Dune_digest.from_hex lockfile_and_dependency_digest with
+          | None ->
+            parse_error
+              (Pp.textf "Failed to parse %S as digest" lockfile_and_dependency_digest)
+          | Some lockfile_and_dependency_digest ->
+            let name = Package.Name.of_string name in
+            let version = Package_version.of_string version in
+            { name; version; lockfile_and_dependency_digest }))
+  ;;
+
+  let create lockfile_pkg depends_pkg_digests =
+    let lockfile_and_dependency_digest =
+      Digest_feed.compute_digest
+        (Digest_feed.tuple2 Lock_dir.Pkg.digest_feed (Digest_feed.repr (Repr.list repr)))
+        (Dune_pkg.Lock_dir.Pkg.remove_locs lockfile_pkg, depends_pkg_digests)
+    in
+    let name = lockfile_pkg.info.name in
+    let version = lockfile_pkg.info.version in
+    { name; version; lockfile_and_dependency_digest }
   ;;
 end
 
@@ -137,20 +248,16 @@ module Paths = struct
     Path.Build.append_local t.extra_sources extra_source
   ;;
 
-  let make package_universe name =
-    let universe_root =
-      match (package_universe : Package_universe.t) with
+  let make pkg_digest universe =
+    let root =
+      match (universe : Package_universe.t) with
+      | Dependencies ctx ->
+        Path.Build.L.relative
+          Private_context.t.build_dir
+          [ Context_name.to_string ctx; ".pkg"; Pkg_digest.to_string pkg_digest ]
       | Dev_tool dev_tool -> Pkg_dev_tool.universe_install_path dev_tool
-      | Project_dependencies _ ->
-        let build_dir =
-          Path.Build.relative
-            Private_context.t.build_dir
-            (Context_name.to_string (Package_universe.context_name package_universe))
-        in
-        Path.Build.relative build_dir ".pkg"
     in
-    let root = Path.Build.relative universe_root (Package.Name.to_string name) in
-    of_root name ~root
+    of_root pkg_digest.name ~root
   ;;
 
   let make_install_cookie target_dir ~relative = relative target_dir "cookie"
@@ -188,32 +295,40 @@ module Install_cookie = struct
      don't have to know anything about the installation procedure.
   *)
 
-  type t =
-    { files : Path.t list Section.Map.t
-    ; variables : Variable.t list
-    }
+  module Gen = struct
+    type 'files t =
+      { files : 'files
+      ; variables : Variable.t list
+      }
 
-  let to_dyn { files; variables } =
-    let open Dyn in
-    record
-      [ "files", Section.Map.to_dyn (list Path.to_dyn) files
-      ; "variables", list Variable.to_dyn variables
-      ]
-  ;;
+    let repr files_repr =
+      Repr.record
+        "install-cookie"
+        [ Repr.field "files" files_repr ~get:(fun t -> t.files)
+        ; Repr.field "variables" (Repr.list Variable.repr) ~get:(fun t -> t.variables)
+        ]
+    ;;
+  end
 
-  include Dune_util.Persistent.Make (struct
-      type nonrec t = t
+  type t = Path.t list Section.Map.t Gen.t
 
+  module Persistent = Persistent.Make (struct
+      type nonrec t = (Section.t * Path.t list) list Gen.t
+
+      let sharing = false
       let name = "INSTALL-COOKIE"
-      let version = 1
-      let to_dyn = to_dyn
-      let test_example () = { files = Section.Map.empty; variables = [] }
+      let version = 4
+      let repr = Gen.repr (Repr.list (Repr.pair Section.repr (Repr.list Path.repr)))
     end)
 
   let load_exn f =
-    match load f with
-    | Some f -> f
+    match Persistent.load f with
+    | Some f -> { f with files = Section.Map.of_list_exn f.files }
     | None -> User_error.raise ~loc:(Loc.in_file f) [ Pp.text "unable to load" ]
+  ;;
+
+  let dump path (t : t) =
+    Persistent.dump path { t with files = Section.Map.to_list t.files }
   ;;
 end
 
@@ -223,8 +338,11 @@ module Value_list_env = struct
      string (in the style of the PATH variable). *)
   type t = Value.t list Env.Map.t
 
-  let parse_strings s = Bin.parse s |> List.map ~f:(fun s -> Value.String s)
-  let of_env env : t = Env.to_map env |> Env.Map.map ~f:parse_strings
+  let global : t Lazy.t =
+    let parse_strings s = Bin.parse s |> List.map ~f:(fun s -> Value.String s) in
+    let of_env env : t = Env.to_map env |> Env.Map.map ~f:parse_strings in
+    lazy (of_env (Global.env ()))
+  ;;
 
   (* Concatenate a list of values in the style of lists found in
      environment variables, such as PATH *)
@@ -290,7 +408,11 @@ module Env_update = struct
     else (
       match kind with
       | `Colon ->
-        let old_v = Option.value ~default:[] old_v in
+        let old_v =
+          match old_v with
+          | None | Some [] -> [ Value.String "" ]
+          | Some v -> v
+        in
         Some (f ~old_v ~new_v)
       | `Plus ->
         (match old_v with
@@ -328,11 +450,14 @@ module Pkg = struct
     ; build_command : Build_command.t option
     ; install_command : Dune_lang.Action.t option
     ; depends : t list
-    ; depexts : string list
+    ; depends_on_dune : bool
+      (* whether the package declares a dependency on Dune, even if Dune is stripped from [depends] *)
+    ; depexts : Depexts.t list
     ; info : Pkg_info.t
     ; paths : Path.t Paths.t
     ; write_paths : Path.Build.t Paths.t
     ; files_dir : Path.Build.t
+    ; pkg_digest : Pkg_digest.t
     ; mutable exported_env : string Env_update.t list
     }
 
@@ -358,36 +483,36 @@ module Pkg = struct
       | ".hg" | ".git" | "_darcs" | "_opam" | "_build" | "_esy" -> true
       | _ -> false
     in
-    let skip_file = String.is_prefix ~prefix:".#" in
+    let skip_file = String.starts_with ~prefix:".#" in
     let rec loop root acc path =
-      let full_path = Path.External.append_local root path in
-      Fs_memo.dir_contents (External full_path)
+      let full_path = Path.Outside_build_dir.append_local root path in
+      Fs_memo.dir_contents full_path
       >>= function
       | Error e ->
         User_error.raise
           ~loc
-          [ Pp.textf "Unable to read %s" (Path.External.to_string_maybe_quoted full_path)
+          [ Pp.textf
+              "Unable to read %s"
+              (Path.Outside_build_dir.to_string_maybe_quoted full_path)
           ; Unix_error.Detailed.pp e
           ]
       | Ok contents ->
         let files, dirs =
-          let contents = Fs_cache.Dir_contents.to_list contents in
+          let contents = Fs_memo.Dir_contents.to_list contents in
           List.rev_filter_partition_map contents ~f:(fun (name, kind) ->
             (* TODO handle links and cycles correctly *)
+            let name_s = Filename.to_string name in
+            let relative = Path.Local.relative_fname path name in
             match kind with
-            | S_DIR -> if skip_dir name then Skip else Right name
-            | _ -> if skip_file name then Skip else Left name)
+            | S_DIR -> if skip_dir name_s then Skip else Right relative
+            | _ -> if skip_file name_s then Skip else Left relative)
         in
-        let acc =
-          Path.Local.Set.of_list_map files ~f:(Path.Local.relative path)
-          |> Path.Local.Set.union acc
-        in
-        let+ dirs =
-          Memo.parallel_map dirs ~f:(fun dir ->
-            let dir = Path.Local.relative path dir in
-            loop root Path.Local.Set.empty dir)
-        in
-        Path.Local.Set.union_all (acc :: dirs)
+        let acc = Path.Local.Set.of_list files |> Path.Local.Set.union acc in
+        Memo.map_reduce
+          dirs
+          ~f:(fun dir -> loop root Path.Local.Set.empty dir)
+          ~empty:acc
+          ~combine:Path.Local.Set.union
     in
     (match t.info.source with
      | None -> Memo.return None
@@ -408,6 +533,17 @@ module Pkg = struct
     |> List.fold_left ~init:Dep.Set.empty ~f:(fun acc t -> dep t |> Dep.Set.add acc)
   ;;
 
+  let install_roots t =
+    let default_install_roots = Paths.install_roots t.paths in
+    match Pkg_toolchain.is_compiler_package_with_toolchains_enabled t.info.name with
+    | false -> default_install_roots
+    | true ->
+      (* Compiler packages store their libraries in a subdirectory named "ocaml". *)
+      { default_install_roots with
+        lib_root = Path.relative default_install_roots.lib_root "ocaml"
+      }
+  ;;
+
   (* Given a list of packages, construct an env containing variables
      set by each package. Variables containing delimited lists of
      paths (e.g. PATH) which appear in multiple package's envs are
@@ -418,7 +554,7 @@ module Pkg = struct
   let build_env_of_deps ts =
     List.fold_left ts ~init:Env.Map.empty ~f:(fun env t ->
       let env =
-        let roots = Paths.install_roots t.paths in
+        let roots = install_roots t in
         let init = Value_list_env.add_path env Env_path.var roots.bin in
         let vars = Install.Roots.to_env_without_path roots ~relative:Path.relative in
         List.fold_left vars ~init ~f:(fun acc (var, path) ->
@@ -435,12 +571,14 @@ module Pkg = struct
   let base_env t =
     Env.Map.of_list_exn
       [ Opam_switch.opam_switch_prefix_var_name, [ Value.Path t.paths.target_dir ]
-      ; "CDPATH", [ Value.String "" ]
-      ; "MAKELEVEL", [ Value.String "" ]
-      ; "OPAM_PACKAGE_NAME", [ Value.String (Package.Name.to_string t.info.name) ]
-      ; ( "OPAM_PACKAGE_VERSION"
+      ; Env.Var.of_string "CDPATH", [ Value.String "" ]
+      ; Env.Var.of_string "MAKELEVEL", [ Value.String "" ]
+      ; ( Env.Var.of_string "OPAM_PACKAGE_NAME"
+        , [ Value.String (Package.Name.to_string t.info.name) ] )
+      ; ( Env.Var.of_string "OPAM_PACKAGE_VERSION"
         , [ Value.String (Package_version.to_string t.info.version) ] )
-      ; "OPAMCLI", [ Value.String "2.0" ]
+      ; Env.Var.of_string "OPAMCLI", [ Value.String "2.0" ]
+      ; Env.Var.of_string "OPAMSWITCH", [ Value.String "dune" ]
       ]
   ;;
 
@@ -455,7 +593,7 @@ module Pkg = struct
        for build actions to run successfully, such as $PATH on systems where the
        shell's default $PATH variable doesn't include the location of standard
        programs or build tools (e.g. NixOS). *)
-    Value_list_env.extend_concat_path (Value_list_env.of_env (Global.env ())) package_env
+    Value_list_env.extend_concat_path (Lazy.force Value_list_env.global) package_env
   ;;
 
   let exported_env t = Value_list_env.to_env @@ exported_value_env t
@@ -464,7 +602,7 @@ end
 module Pkg_installed = struct
   type t = { cookie : Install_cookie.t Action_builder.t }
 
-  let of_paths (paths : _ Paths.t) =
+  let of_paths (paths : Path.t Paths.t) =
     let cookie =
       let open Action_builder.O in
       let path = Paths.install_cookie paths in
@@ -485,7 +623,7 @@ module Expander0 = struct
     ; depends :
         (Variable.value Package_variable_name.Map.t * Path.t Paths.t) Package.Name.Map.t
           Memo.t
-    ; depexts : string list
+    ; depexts : Depexts.t list
     ; context : Context_name.t
     ; version : Package_version.t
     ; env : Value.t list Env.Map.t
@@ -524,20 +662,55 @@ module Substitute = struct
       }
 
     let name = "substitute"
-    let version = 2
+    let version = 4
+    let runs_process = false
+    let can_run_in_action_runner = false
     let bimap t f g = { t with src = f t.src; dst = g t.dst }
     let is_useful_to ~memoize = memoize
+
+    let variable_value_repr =
+      Repr.variant
+        "pkg-variable-value"
+        [ Repr.case "B" Bool.repr ~proj:(function
+            | Variable.B x -> Some x
+            | _ -> None)
+        ; Repr.case "S" String.repr ~proj:(function
+            | Variable.S x -> Some x
+            | _ -> None)
+        ; Repr.case
+            "L"
+            Repr.(list String.repr)
+            ~proj:(function
+              | Variable.L x -> Some x
+              | _ -> None)
+        ]
+    ;;
+
+    let variable_map_repr =
+      Repr.view
+        Repr.(list (pair Package_variable_name.repr variable_value_repr))
+        ~to_:Package_variable_name.Map.to_list
+    ;;
+
+    let paths_repr = Repr.T3.repr Path.repr Path.repr Package.Name.repr
+
+    let hash_input_repr =
+      Repr.T4.repr
+        paths_repr
+        Repr.(list (pair Filename.repr Path.repr))
+        Repr.(list (pair variable_map_repr paths_repr))
+        Package_version.repr
+    ;;
 
     let encode { expander; depends; artifacts; src; dst } input output : Sexp.t =
       let e =
         let paths (p : Path.t Paths.t) = p.source_dir, p.target_dir, p.name in
-        ( paths expander.paths
-        , artifacts
-        , Package.Name.Map.to_list_map depends ~f:(fun _ (m, p) -> m, paths p)
-        , expander.version
-        , expander.context
-        , expander.env )
-        |> Digest.generic
+        Digest.repr
+          hash_input_repr
+          ( paths expander.paths
+          , Filename.Map.to_list artifacts
+          , Package.Name.Map.to_list_map depends ~f:(fun _ (m, p) -> m, paths p)
+          , expander.version )
         |> Digest.to_string_raw
       in
       List [ Atom e; input src; output dst ]
@@ -642,10 +815,10 @@ module Action_expander = struct
     let expand_pkg (paths : Path.t Paths.t) (pform : Pform.Var.Pkg.t) =
       match pform with
       | Switch -> Memo.return [ Value.String "dune" ]
-      | Os -> sys_poll_var (fun { os; _ } -> os)
-      | Os_version -> sys_poll_var (fun { os_version; _ } -> os_version)
-      | Os_distribution -> sys_poll_var (fun { os_distribution; _ } -> os_distribution)
-      | Os_family -> sys_poll_var (fun { os_family; _ } -> os_family)
+      | Os Os -> sys_poll_var (fun { os; _ } -> os)
+      | Os Os_version -> sys_poll_var (fun { os_version; _ } -> os_version)
+      | Os Os_distribution -> sys_poll_var (fun { os_distribution; _ } -> os_distribution)
+      | Os Os_family -> sys_poll_var (fun { os_family; _ } -> os_family)
       | Sys_ocaml_version ->
         sys_poll_var (fun { sys_ocaml_version; _ } -> sys_ocaml_version)
       | Build -> Memo.return [ Value.Dir paths.source_dir ]
@@ -693,6 +866,11 @@ module Action_expander = struct
          | "enable" ->
            Memo.return @@ Ok [ Value.String (if present then "enable" else "disable") ]
          | "installed" -> Memo.return @@ Ok [ Value.String (Bool.to_string present) ]
+         | "build-id" ->
+           (* build-id is used by some packages (e.g., relocatable-compiler) for
+              caching across opam switches. Since dune doesn't do this, we use a
+              fixed dummy value that won't collide with real opam build-ids. *)
+           Memo.return @@ Ok [ Value.String "d00ed00ed00ed00ed00ed00ed00ed00e" ]
          | _ ->
            (match paths with
             | None -> Memo.return (Error (`Undefined_pkg_var variable_name))
@@ -754,6 +932,34 @@ module Action_expander = struct
             ])
     ;;
 
+    let slang_expander t sw =
+      String_expander.Memo.expand_result_deferred_concat sw ~mode:Many ~f:(expand_pform t)
+    ;;
+
+    let eval_blang t blang =
+      Slang_expand.eval_blang blang ~dir:t.paths.source_dir ~f:(slang_expander t)
+    ;;
+
+    let eval_slangs_located t slangs =
+      let slangs =
+        List.map slangs ~f:(fun slang ->
+          Slang.map_loc slang ~f:Dune_pkg.Lock_dir.loc_in_source_tree)
+      in
+      Slang_expand.eval_multi_located slangs ~dir:t.paths.source_dir ~f:(slang_expander t)
+    ;;
+
+    let filtered_depexts t =
+      Memo.List.filter_map t.depexts ~f:(fun (depexts : Depexts.t) ->
+        let+ enabled =
+          match depexts.enabled_if with
+          | `Always -> Memo.return true
+          | `Conditional condition -> eval_blang t condition
+        in
+        if enabled then Some depexts.external_package_names else None)
+      >>| List.concat
+      >>| List.sort_uniq ~compare:String.compare
+    ;;
+
     let expand_exe_value t value ~loc =
       let+ prog =
         match value with
@@ -771,40 +977,35 @@ module Action_expander = struct
              let dir = t.paths.source_dir in
              Memo.return @@ Ok (Path.relative dir program)
            | In_path ->
-             let* artifacts = t.artifacts in
-             (match Filename.Map.find artifacts program with
-              | Some s -> Memo.return @@ Ok s
-              | None ->
-                (let path = Global.env () |> Env_path.path in
-                 Which.which ~path program)
-                >>| (function
-                 | Some p -> Ok p
+             (match program with
+              | "dune" ->
+                let dune = Path.of_string Sys.executable_name in
+                Memo.return @@ Ok dune
+              | program ->
+                let program = Filename.of_string_exn program in
+                let* artifacts = t.artifacts in
+                (match Filename.Map.find artifacts program with
+                 | Some s -> Memo.return @@ Ok s
                  | None ->
-                   let hint =
-                     Run_with_path.depexts_hint t.depexts
-                     |> Option.map ~f:(fun pp -> Format.asprintf "%a" Pp.to_fmt pp)
-                   in
-                   Error
-                     (Action.Prog.Not_found.create
-                        ?hint
-                        ~program
-                        ~context:t.context
-                        ~loc:(Some loc)
-                        ()))))
+                   (let path = Global.env () |> Env_path.path in
+                    Which.which ~path program)
+                   >>= (function
+                    | Some p -> Memo.return (Ok p)
+                    | None ->
+                      let+ depexts = filtered_depexts t in
+                      let hint =
+                        Run_with_path.depexts_hint depexts
+                        |> Option.map ~f:(fun pp -> Format.asprintf "%a" Pp.to_fmt pp)
+                      in
+                      Error
+                        (Action.Prog.Not_found.create
+                           ?hint
+                           ~program
+                           ~context:t.context
+                           ~loc:(Some loc)
+                           ())))))
       in
       Result.map prog ~f:(map_exe t)
-    ;;
-
-    let slang_expander t sw =
-      String_expander.Memo.expand_result_deferred_concat sw ~mode:Many ~f:(expand_pform t)
-    ;;
-
-    let eval_blang t blang =
-      Slang_expand.eval_blang blang ~dir:t.paths.source_dir ~f:(slang_expander t)
-    ;;
-
-    let eval_slangs_located t slangs =
-      Slang_expand.eval_multi_located slangs ~dir:t.paths.source_dir ~f:(slang_expander t)
     ;;
   end
 
@@ -818,6 +1019,7 @@ module Action_expander = struct
          let loc =
            let loc = function
              | Slang.Nil -> None
+             | Slang.Undefined -> None
              | Literal sw -> Some (String_with_vars.loc sw)
              | Form (loc, _) -> Some loc
            in
@@ -838,7 +1040,7 @@ module Action_expander = struct
          let+ exe =
            let prog = Value.Deferred_concat.force prog ~dir in
            Expander.expand_exe_value expander prog ~loc:prog_loc
-         in
+         and+ depexts = Expander.filtered_depexts expander in
          let args =
            Array.Immutable.of_list_map args ~f:(fun (_loc, arg) ->
              Value.Deferred_concat.parts arg
@@ -849,7 +1051,7 @@ module Action_expander = struct
          in
          let ocamlfind_destdir = (Lazy.force expander.paths.install_roots).lib_root in
          Run_with_path.action
-           ~depexts:expander.depexts
+           ~depexts
            ~pkg:(expander.name, prog_loc)
            exe
            args
@@ -858,9 +1060,10 @@ module Action_expander = struct
       let+ args = Memo.parallel_map t ~f:(expand ~expander) in
       Action.Progn args
     | System arg ->
-      Expander.expand_pform_gen ~mode:Single expander arg
-      >>| Value.to_string ~dir
-      >>| System.action
+      let+ arg =
+        Expander.expand_pform_gen ~mode:Single expander arg >>| Value.to_string ~dir
+      in
+      Action.System arg
     | Patch p ->
       let+ patch =
         Expander.expand_pform_gen ~mode:Single expander p >>| Value.to_path ~dir
@@ -930,7 +1133,7 @@ module Action_expander = struct
       expand action ~expander
     in
     List.fold_left updates ~init:action ~f:(fun action (k, v) ->
-      Action.Setenv (k, v, action))
+      Action.Setenv (Env.Var.to_string k, v, action))
   ;;
 
   module Artifacts_and_deps = struct
@@ -948,7 +1151,7 @@ module Action_expander = struct
         let cookie = (Pkg_installed.of_paths pkg.paths).cookie in
         Action_builder.evaluate_and_collect_facts cookie
         |> Memo.map ~f:(fun ((cookie : Install_cookie.t), _) -> pkg, cookie))
-      |> Memo.map ~f:(fun cookies ->
+      |> Memo.map ~f:(fun (cookies : (Pkg.t * Install_cookie.t) list) ->
         List.fold_left
           cookies
           ~init:empty
@@ -956,7 +1159,11 @@ module Action_expander = struct
             let binaries =
               Section.Map.Multi.find cookie.files Bin
               |> List.fold_left ~init:binaries ~f:(fun acc bin ->
-                Filename.Map.set acc (Path.basename bin) bin)
+                Filename.Map.set
+                  acc
+                  (Filename.of_string_exn
+                     (Bin.strip_exe (Path.basename bin |> Filename.to_string)))
+                  bin)
             in
             let dep_info =
               let variables =
@@ -973,6 +1180,7 @@ module Action_expander = struct
   let expander context (pkg : Pkg.t) =
     let closure =
       Memo.lazy_
+        ~name:"package-dependency-closure"
         ~human_readable_description:(fun () ->
           Pp.textf
             "Computing closure for package %S"
@@ -981,11 +1189,14 @@ module Action_expander = struct
     in
     let env = Pkg.exported_value_env pkg in
     let depends =
-      Memo.Lazy.map closure ~f:(fun { Artifacts_and_deps.dep_info; _ } ->
-        Package.Name.Map.add_exn
-          dep_info
-          pkg.info.name
-          (Pkg_info.variables pkg.info, pkg.paths))
+      Memo.Lazy.map
+        ~name:"package-dependency-info"
+        closure
+        ~f:(fun { Artifacts_and_deps.dep_info; _ } ->
+          Package.Name.Map.add_exn
+            dep_info
+            pkg.info.name
+            (Pkg_info.variables pkg.info, pkg.paths))
       |> Memo.Lazy.force
     in
     let artifacts =
@@ -1018,17 +1229,18 @@ module Action_expander = struct
   ;;
 
   let dune_exe context =
-    Which.which ~path:(Env_path.path Env.initial) "dune"
+    Which.which ~path:(Env_path.path Env.initial) Filename.dune
     >>| function
     | Some s -> Ok s
-    | None -> Error (Action.Prog.Not_found.create ~loc:None ~context ~program:"dune" ())
+    | None ->
+      Error (Action.Prog.Not_found.create ~loc:None ~context ~program:Filename.dune ())
   ;;
 
   let build_command context (pkg : Pkg.t) =
     Option.map pkg.build_command ~f:(function
       | Action action -> expand context pkg action
       | Dune ->
-        (* CR-rgrinberg: respect [dune subst] settings. *)
+        (* CR-someday rgrinberg: respect [dune subst] settings. *)
         Command.run_dyn_prog
           (Action_builder.of_memo (dune_exe context))
           ~dir:pkg.paths.source_dir
@@ -1050,86 +1262,374 @@ module Action_expander = struct
 end
 
 module DB = struct
+  let default_system_provided = Package.Name.Set.singleton Dune_pkg.Dune_dep.name
+
+  module Pkg_table = struct
+    module Pkg = Lock_dir.Pkg
+
+    type dep =
+      { dep_pkg : Pkg.t
+      ; dep_loc : Loc.t
+      ; dep_pkg_digest : Pkg_digest.t
+      }
+
+    type entry =
+      { pkg : Pkg.t
+      ; deps : dep list
+      ; has_dune_dep : bool
+      ; pkg_digest : Pkg_digest.t
+      }
+
+    let entries_by_name_of_lock_dir
+          (lock_dir : Dune_pkg.Lock_dir.t)
+          ~platform
+          ~system_provided
+      =
+      let pkgs_by_name = Dune_pkg.Lock_dir.packages_on_platform lock_dir ~platform in
+      let cache =
+        (* Cache so that the digest of each package is only computed once *)
+        Package.Name.Table.create 10
+      in
+      let rec compute_entry (pkg : Pkg.t) ~seen_set ~seen_list =
+        if Package.Name.Set.mem seen_set pkg.info.name
+        then
+          User_error.raise
+            [ Pp.textf "Dependency cycle between packages:"
+            ; Pp.chain
+                (List.rev (pkg :: seen_list))
+                ~f:(fun (pkg : Pkg.t) ->
+                  Pp.textf
+                    "%s.%s"
+                    (Package.Name.to_string pkg.info.name)
+                    (Package_version.to_string pkg.info.version))
+            ];
+        Package.Name.Table.find_or_add cache pkg.info.name ~f:(fun name ->
+          let seen_set = Package.Name.Set.add seen_set name in
+          let seen_list = pkg :: seen_list in
+          let has_dune_dep, deps =
+            Dune_pkg.Lock_dir.Conditional_choice.choose_for_platform pkg.depends ~platform
+            |> Option.value ~default:[]
+            |> List.fold_right
+                 ~init:(false, [])
+                 ~f:
+                   (fun
+                     { Dune_pkg.Lock_dir.Dependency.name; loc = dep_loc }
+                     (has_dune_dep, acc)
+                   ->
+                   match
+                     ( Dune_lang.Package_name.equal name Dune_dep.name
+                     , Package.Name.Set.mem system_provided name )
+                   with
+                   | true, _ -> true, acc
+                   | false, true -> has_dune_dep, acc
+                   | _, false ->
+                     let dep_pkg = Package.Name.Map.find_exn pkgs_by_name name in
+                     let dep_entry = compute_entry dep_pkg ~seen_set ~seen_list in
+                     ( has_dune_dep
+                     , { dep_pkg; dep_loc; dep_pkg_digest = dep_entry.pkg_digest } :: acc
+                     ))
+          in
+          let pkg_digest =
+            Pkg_digest.create
+              pkg
+              (List.map deps ~f:(fun { dep_pkg_digest; _ } -> dep_pkg_digest))
+          in
+          { pkg; deps; has_dune_dep; pkg_digest })
+      in
+      Package.Name.Map.map
+        pkgs_by_name
+        ~f:(compute_entry ~seen_set:Package.Name.Set.empty ~seen_list:[])
+    ;;
+
+    (* Associate each package's digest with the package and its dependencies. *)
+    type t = entry Pkg_digest.Map.t
+
+    let of_lock_dir lock_dir ~platform ~system_provided =
+      entries_by_name_of_lock_dir lock_dir ~platform ~system_provided
+      |> Package.Name.Map.values
+      |> Pkg_digest.Map.of_list_map_exn ~f:(fun entry -> entry.pkg_digest, entry)
+    ;;
+
+    (* Helper which is called when both tables have an entry with the same
+       digest. This happens when two lock directories have a package in common
+       and the transitive dependency closure of the package is identical in both
+       lock directories. Here we assert that the packages and their immediate
+       dependencies are identical as a sanity check. *)
+    let union_check
+          pkg_digest
+          ({ pkg = pkg_a; deps = deps_a; has_dune_dep = _; pkg_digest = _ } as entry)
+          { pkg = pkg_b; deps = deps_b; has_dune_dep = _; pkg_digest = _ }
+      =
+      if not (Pkg.equal (Pkg.remove_locs pkg_a) (Pkg.remove_locs pkg_b))
+      then
+        Code_error.raise
+          "Two packages with the same pkg digest differ in their fields"
+          [ "pkg_digest", Pkg_digest.to_dyn pkg_digest
+          ; "pkg_a", Pkg.to_dyn pkg_a
+          ; "pkg_b", Pkg.to_dyn pkg_b
+          ];
+      List.combine deps_a deps_b
+      |> List.iter ~f:(fun (dep_a, dep_b) ->
+        if not (Pkg.equal (Pkg.remove_locs dep_a.dep_pkg) (Pkg.remove_locs dep_b.dep_pkg))
+        then
+          Code_error.raise
+            "Two packages with the same pkg digest differ in their dependencies"
+            [ "pkg_digest", Pkg_digest.to_dyn pkg_digest
+            ; "pkg_a", Pkg.to_dyn pkg_a
+            ; "pkg_b", Pkg.to_dyn pkg_b
+            ; "dep_of_a", Pkg.to_dyn dep_a.dep_pkg
+            ; "dep_of_b", Pkg.to_dyn dep_b.dep_pkg
+            ]);
+      Some entry
+    ;;
+
+    let empty = Pkg_digest.Map.empty
+    let union = Pkg_digest.Map.union ~f:union_check
+    let union_all = Pkg_digest.Map.union_all ~f:union_check
+
+    let of_dev_tool_deps_if_lock_dir_exists dev_tool ~platform ~system_provided =
+      let+ lock_dir_opt = Lock_dir.of_dev_tool_if_lock_dir_exists dev_tool in
+      Option.map lock_dir_opt ~f:(of_lock_dir ~platform ~system_provided)
+    ;;
+
+    let all_existing_dev_tools =
+      Memo.lazy_ ~name:"all-existing-dev-tools" (fun () ->
+        let* platform = Lock_dir.Sys_vars.solver_env in
+        let+ xs =
+          Memo.List.map
+            Pkg_dev_tool.all
+            ~f:
+              (of_dev_tool_deps_if_lock_dir_exists
+                 ~platform
+                 ~system_provided:default_system_provided)
+        in
+        List.filter_opt xs |> union_all)
+    ;;
+  end
+
+  module Id = Id.Make ()
+
   type t =
-    { all : Lock_dir.Pkg.t Package.Name.Map.t
+    { id : Id.t
+    ; pkg_digest_table : Pkg_table.t
     ; system_provided : Package.Name.Set.t
     }
 
-  let equal t { all; system_provided } =
-    Package.Name.Map.equal ~equal:Lock_dir.Pkg.equal t.all all
-    && Package.Name.Set.equal t.system_provided system_provided
+  let equal x y = Id.equal x.id y.id
+
+  let create ~pkg_digest_table ~system_provided =
+    { id = Id.gen (); pkg_digest_table; system_provided }
   ;;
 
-  let get package_universe =
-    let dune = Package.Name.Set.singleton (Package.Name.of_string "dune") in
-    let+ all = Package_universe.lock_dir package_universe in
-    { all = all.packages; system_provided = dune }
+  let pkg_digest_of_name lock_dir platform pkg_name ~system_provided =
+    let entries_by_name =
+      Pkg_table.entries_by_name_of_lock_dir lock_dir ~platform ~system_provided
+    in
+    let entry = Package.Name.Map.find_exn entries_by_name pkg_name in
+    entry.pkg_digest
+  ;;
+
+  let of_ctx =
+    let of_ctx_memo =
+      Memo.create
+        "pkg-db"
+        ~input:
+          (module struct
+            type t = Context_name.t * bool
+
+            let to_dyn = Tuple.T2.to_dyn Context_name.to_dyn Dyn.bool
+            let hash = Tuple.T2.hash Context_name.hash Bool.hash
+            let equal = Tuple.T2.equal Context_name.equal Bool.equal
+          end)
+        (fun (ctx, allow_sharing) ->
+           Per_context.valid ctx
+           >>= function
+           | false ->
+             Code_error.raise "invalid context" [ "context", Context_name.to_dyn ctx ]
+           | true ->
+             (* Dev tools are built in the default context, so allow their
+                dependencies to be shared with the project's if it too is being
+                built in the default context. *)
+             let allow_sharing = allow_sharing && Context_name.is_default ctx in
+             (* Is this value anything other than [default_system_provided]? *)
+             let system_provided = default_system_provided in
+             let+ pkg_digest_table =
+               let* lock_dir = Lock_dir.get_exn ctx
+               and* platform = Lock_dir.Sys_vars.solver_env in
+               (if allow_sharing
+                then Memo.Lazy.force Pkg_table.all_existing_dev_tools
+                else Memo.return Pkg_table.empty)
+               >>| Pkg_table.union
+                     (Pkg_table.of_lock_dir lock_dir ~platform ~system_provided)
+             in
+             create ~pkg_digest_table ~system_provided)
+    in
+    fun ctx ~allow_sharing -> Memo.exec of_ctx_memo (ctx, allow_sharing)
+  ;;
+
+  (* Returns the db for the given context and the digest of the given package
+     within that context. *)
+  let of_project_pkg ctx pkg_name =
+    let* lock_dir = Lock_dir.get_exn ctx
+    and* platform = Lock_dir.Sys_vars.solver_env in
+    let+ t = of_ctx ctx ~allow_sharing:true in
+    t, pkg_digest_of_name lock_dir platform pkg_name ~system_provided:t.system_provided
+  ;;
+
+  (* Returns the db for all dev tools combined with the default context, and
+     the digest for the dev tool's package. *)
+  let of_dev_tool =
+    let system_provided = default_system_provided in
+    let inactive_lockdir =
+      Memo.lazy_ ~name:"inactive-lockdir-package-db" (fun () ->
+        let+ pkg_digest_table = Memo.Lazy.force Pkg_table.all_existing_dev_tools in
+        create ~pkg_digest_table ~system_provided)
+    in
+    let of_dev_tool_memo =
+      Memo.create "pkg-db-dev-tool" ~input:(module Dune_pkg.Dev_tool)
+      @@ fun dev_tool ->
+      let+ lock_dir = Lock_dir.of_dev_tool dev_tool
+      and+ platform = Lock_dir.Sys_vars.solver_env in
+      pkg_digest_of_name
+        lock_dir
+        platform
+        (Pkg_dev_tool.package_name dev_tool)
+        ~system_provided
+    in
+    fun dev_tool ->
+      let+ db =
+        Lock_dir.lock_dir_active Context_name.default
+        >>= function
+        | false -> Memo.Lazy.force inactive_lockdir
+        | true -> of_ctx Context_name.default ~allow_sharing:true
+      and+ pkg_digest = Memo.exec of_dev_tool_memo dev_tool in
+      db, pkg_digest
   ;;
 end
 
 module rec Resolve : sig
-  val resolve
-    :  DB.t
-    -> Loc.t * Package.Name.t
-    -> Package_universe.t
-    -> [ `Inside_lock_dir of Pkg.t | `System_provided ] Memo.t
+  val resolve : DB.t -> Loc.t -> Pkg_digest.t -> Package_universe.t -> Pkg.t Memo.t
 end = struct
   open Resolve
 
   module Input = struct
     type t =
       { db : DB.t
-      ; package : Package.Name.t
+      ; pkg_digest : Pkg_digest.t
       ; universe : Package_universe.t
       }
 
-    let equal { db; package; universe } t =
-      DB.equal db t.db
-      && Package.Name.equal package t.package
+    let equal { db; pkg_digest; universe } t =
+      Pkg_digest.equal pkg_digest t.pkg_digest
       && Package_universe.equal universe t.universe
+      && DB.equal db t.db
     ;;
 
-    let hash { db; package; universe } =
-      Poly.hash (Poly.hash db, Package.Name.hash package, Poly.hash universe)
+    let hash { db = _; pkg_digest; universe } =
+      Tuple.T2.hash Pkg_digest.hash Package_universe.hash (pkg_digest, universe)
     ;;
 
     let to_dyn = Dyn.opaque
   end
 
-  let resolve_impl { Input.db; package = name; universe = package_universe } =
-    match Package.Name.Map.find db.all name with
+  let relocate action =
+    let string_with_vars =
+      String_with_vars.map_loc ~f:Dune_pkg.Lock_dir.loc_in_source_tree
+    in
+    let slang = Slang.map_loc ~f:Dune_pkg.Lock_dir.loc_in_source_tree in
+    let blang = Slang.Blang.map_loc ~f:Dune_pkg.Lock_dir.loc_in_source_tree in
+    Dune_lang.Action.map action ~string_with_vars ~slang ~blang
+  ;;
+
+  let relocate_build b =
+    match (b : Build_command.t) with
+    | Dune -> Build_command.Dune
+    | Action a -> Build_command.Action (relocate a)
+  ;;
+
+  let is_relocatable_compiler_marker name =
+    let relocatable_compiler = Package.Name.of_string "relocatable-compiler" in
+    let relocatable = Package.Name.of_string "relocatable" in
+    Package.Name.equal name relocatable_compiler || Package.Name.equal name relocatable
+  ;;
+
+  let has_relocatable_compiler_marker (info : Pkg_info.t) depends =
+    is_relocatable_compiler_marker info.name
+    || Pkg.top_closure depends
+       |> List.exists ~f:(fun (pkg : Pkg.t) ->
+         is_relocatable_compiler_marker pkg.info.name)
+  ;;
+
+  let is_compiler_version_relocatable (info : Pkg_info.t) =
+    Pkg_toolchain.is_compiler_package_with_toolchains_enabled info.name
+    &&
+    match Package_version.compare info.version (Package_version.of_string "5.5.0") with
+    | Lt -> false
+    | Eq | Gt -> true
+  ;;
+
+  let resolve_impl { Input.db; pkg_digest; universe = package_universe } =
+    match Pkg_digest.Map.find db.pkg_digest_table pkg_digest with
     | None -> Memo.return None
     | Some
-        ({ Lock_dir.Pkg.build_command
-         ; install_command
-         ; depends
-         ; info
-         ; exported_env
-         ; depexts
-         } as pkg) ->
-      assert (Package.Name.equal name info.name);
+        { pkg =
+            { Lock_dir.Pkg.build_command
+            ; install_command
+            ; depends = _
+            ; info
+            ; exported_env
+            ; depexts
+            ; enabled_on_platforms = _
+            } as pkg
+        ; deps
+        ; has_dune_dep
+        ; pkg_digest = _
+        } ->
+      assert (Package.Name.equal pkg_digest.name info.name);
+      let* platform = Lock_dir.Sys_vars.solver_env in
+      let choose_for_current_platform field =
+        Dune_pkg.Lock_dir.Conditional_choice.choose_for_platform field ~platform
+      in
       let* depends =
-        Memo.parallel_map depends ~f:(fun name ->
-          resolve db name package_universe
-          >>| function
-          | `Inside_lock_dir pkg -> Some pkg
-          | `System_provided -> None)
-        >>| List.filter_opt
+        Memo.parallel_map
+          deps
+          ~f:(fun { DB.Pkg_table.dep_pkg = _; dep_loc; dep_pkg_digest } ->
+            let package_universe =
+              match package_universe with
+              | Dev_tool _ ->
+                (* The dependencies of dev tools are installed into the default
+                 context so they may be shared with the project's
+                 dependencies. *)
+                Package_universe.Dependencies Context_name.default
+              | _ -> package_universe
+            in
+            resolve db dep_loc dep_pkg_digest package_universe)
       and+ files_dir =
-        let+ lock_dir =
+        let+ lock_dir_path =
           Package_universe.lock_dir_path package_universe >>| Option.value_exn
+        and+ lock_dir = Package_universe.lock_dir package_universe in
+        let version =
+          Option.some_if (Dune_pkg.Lock_dir.uses_versioned_paths lock_dir) info.version
         in
-        Path.Build.append_source
-          (Context_name.build_dir (Package_universe.context_name package_universe))
-          (Dune_pkg.Lock_dir.Pkg.files_dir info.name ~lock_dir)
+        Dune_pkg.Lock_dir.Pkg.files_dir info.name version ~lock_dir:lock_dir_path
+        |> Path.as_in_build_dir_exn
       in
       let id = Pkg.Id.gen () in
-      let write_paths = Paths.make package_universe name ~relative:Path.Build.relative in
-      let* paths, build_command, install_command =
+      let write_paths =
+        Paths.make pkg_digest package_universe ~relative:Path.Build.relative
+      in
+      let install_command = choose_for_current_platform install_command in
+      let install_command = Option.map install_command ~f:relocate in
+      let build_command = choose_for_current_platform build_command in
+      let build_command = Option.map build_command ~f:relocate_build in
+      let paths =
         let paths = Paths.map_path write_paths ~f:Path.build in
-        match Pkg_toolchain.is_compiler_and_toolchains_enabled info.name with
-        | false -> Memo.return (paths, build_command, install_command)
-        | true ->
+        if
+          (not (Pkg_toolchain.is_compiler_package_with_toolchains_enabled info.name))
+          || is_compiler_version_relocatable info
+          || has_relocatable_compiler_marker info depends
+        then paths
+        else (
           (* Modify the environment as well as build and install commands for
              the compiler package. The specific changes are:
              - setting the prefix in the build environment to inside the user's
@@ -1140,45 +1640,30 @@ end = struct
                toolchain directory
              - if a matching version of the compiler is
                already installed in the user's toolchain directory then the
-               build and install commands are replaced with no-ops *)
-          let pkg_dir = Pkg_toolchain.pkg_dir pkg in
-          let suffix = Path.basename (Path.outside_build_dir pkg_dir) in
-          let prefix = Pkg_toolchain.installation_prefix ~pkg_dir in
+               build and install commands are replaced with no-ops
+             *)
+          let prefix = Pkg_toolchain.installation_prefix pkg in
           let install_roots =
             Pkg_toolchain.install_roots ~prefix
             |> Install.Roots.map ~f:Path.outside_build_dir
           in
-          let* build_command =
-            match build_command with
-            | None | Some Dune -> Memo.return build_command
-            | Some (Action action) ->
-              let+ action = Pkg_toolchain.modify_build_action ~prefix action in
-              Some (Build_command.Action action)
-          in
-          let+ install_command =
-            match install_command with
-            | None -> Memo.return None
-            | Some install_command ->
-              Pkg_toolchain.modify_install_action ~prefix ~suffix install_command
-              >>| Option.some
-          in
-          ( { paths with
-              prefix = Path.outside_build_dir prefix
-            ; install_roots = Lazy.from_val install_roots
-            }
-          , build_command
-          , install_command )
+          { paths with
+            prefix = Path.outside_build_dir prefix
+          ; install_roots = Lazy.from_val install_roots
+          })
       in
       let t =
         { Pkg.id
         ; build_command
         ; install_command
         ; depends
+        ; depends_on_dune = has_dune_dep
         ; depexts
         ; paths
         ; write_paths
         ; info
         ; files_dir
+        ; pkg_digest
         ; exported_env = []
         }
       in
@@ -1198,29 +1683,27 @@ end = struct
         "pkg-resolve"
         ~input:(module Input)
         ~human_readable_description:(fun t ->
-          Pp.textf "- package %s" (Package.Name.to_string t.package))
+          Pp.textf "- package %s" (Package.Name.to_string t.pkg_digest.name)
+          |> Option.some)
         resolve_impl
     in
-    fun (db : DB.t) (loc, name) package_universe ->
-      if Package.Name.Set.mem db.system_provided name
-      then Memo.return `System_provided
-      else
-        Memo.exec memo { db; package = name; universe = package_universe }
-        >>| function
-        | Some s -> `Inside_lock_dir s
-        | None ->
-          User_error.raise
-            ~loc
-            [ Pp.textf "Unknown package %S" (Package.Name.to_string name) ]
+    fun (db : DB.t) loc pkg_digest package_universe ->
+      Memo.exec memo { db; pkg_digest; universe = package_universe }
+      >>| function
+      | Some s -> s
+      | None ->
+        User_error.raise
+          ~loc
+          [ Pp.textf "Unknown package %S" (Package.Name.to_string pkg_digest.name) ]
   ;;
 end
 
 module Install_action = struct
   (* The install action does the following:
 
-     1. Runs the install action in the lock file (if exists)
+     1. Runs the install action in the lock file (if it exists)
      2. Reads the .install file produced by the build command
-     3. Discoves all the files produced by 1.
+     3. Discovers all the files produced by 1.
      4. Combines the set of files in 2. and 3. to produce a "cookie" file
   *)
 
@@ -1248,6 +1731,8 @@ module Install_action = struct
 
     let name = "install-file-run"
     let version = 1
+    let runs_process = false
+    let can_run_in_action_runner = false
 
     let bimap
           ({ install_file
@@ -1306,6 +1791,7 @@ module Install_action = struct
           let package =
             Path.basename install_file
             |> Filename.remove_extension
+            |> Filename.to_string
             |> Package.Name.of_string
           in
           let roots =
@@ -1320,34 +1806,21 @@ module Install_action = struct
       dst
     ;;
 
-    let readdir path =
-      match Path.Untracked.readdir_unsorted_with_kinds path with
-      | Error _ -> [], []
-      | Ok listing ->
-        List.partition_map listing ~f:(fun (basename, kind) ->
-          let path = Path.relative path basename in
-          match kind with
-          | S_DIR -> Right path
-          | _ -> Left path)
-    ;;
-
-    let rec collect paths acc =
-      match paths with
-      | [] -> acc
-      | path :: paths ->
-        let files, dirs = readdir path in
-        let acc = List.rev_append files acc in
-        collect (List.rev_append dirs paths) acc
-    ;;
-
-    let skip path skip =
-      List.iter skip ~f:(fun s -> assert (Path.equal path (Path.parent_exn s)));
-      let files, dirs = readdir path in
-      let dirs =
-        List.filter_map dirs ~f:(fun path ->
-          if List.mem skip path ~equal:Path.equal then None else Some path)
-      in
-      files, dirs
+    let collect_files ~root ~skip_dirs =
+      List.iter skip_dirs ~f:(fun s -> assert (Path.equal root (Path.parent_exn s)));
+      let path_of ~dir fname = Path.relative_fname (Path.relative root dir) fname in
+      Fpath.traverse
+        ~dir:(Path.to_string root)
+        ~init:[]
+        ~on_file:(fun ~dir fname acc -> path_of ~dir fname :: acc)
+        ~enter_dir:(fun ~dir fname ->
+          let path = path_of ~dir fname in
+          not (List.mem skip_dirs path ~equal:Path.equal))
+        ~on_error:
+          (`Call
+              (fun ~dir error acc ->
+                if dir = "" then acc else Unix_error.Detailed.raise error))
+        ()
     ;;
 
     let maybe_drop_sandbox_dir path =
@@ -1356,7 +1829,7 @@ module Install_action = struct
       | Some (sandbox, source) ->
         let ctx =
           let name = Path.basename sandbox in
-          Path.relative (Path.build Path.Build.root) name
+          Path.relative_fname (Path.build Path.Build.root) name
         in
         Path.append_source ctx source
     ;;
@@ -1368,13 +1841,14 @@ module Install_action = struct
       let get = Install.Paths.get install_paths in
       List.concat_map installable_sections ~f:(fun section ->
         let path = get section in
-        let acc, dirs =
+        let files =
           match section with
-          | Lib_root -> skip path [ get Toplevel; get Stublibs; get Lib ]
-          | Share_root -> skip path [ get Share ]
-          | _ -> [], [ path ]
+          | Lib_root ->
+            collect_files ~root:path ~skip_dirs:[ get Toplevel; get Stublibs; get Lib ]
+          | Share_root -> collect_files ~root:path ~skip_dirs:[ get Share ]
+          | _ -> collect_files ~root:path ~skip_dirs:[]
         in
-        collect dirs acc
+        files
         |> List.rev_map ~f:(fun file ->
           let section =
             match
@@ -1385,8 +1859,10 @@ module Install_action = struct
             with
             | None -> section
             | Some section' ->
-              let perm = (Path.Untracked.stat_exn file).st_perm in
-              if Path.Permissions.(test execute perm) then section' else section
+              let perm =
+                (Unix.stat (Path.to_string file)).st_perm |> Permissions.Mode.of_int
+              in
+              if Permissions.(test execute perm) then section' else section
           in
           section, maybe_drop_sandbox_dir file))
       |> Section.Map.of_list_multi
@@ -1396,21 +1872,22 @@ module Install_action = struct
       match Section.should_set_executable_bit section with
       | false -> ()
       | true ->
+        let dst = Path.to_string dst in
         let permission =
-          let perm = (Path.Untracked.stat_exn dst).st_perm in
-          Path.Permissions.(add execute) perm
+          let perm = (Unix.stat dst).st_perm |> Permissions.Mode.of_int in
+          Permissions.(add execute) perm |> Permissions.Mode.to_int
         in
-        Path.chmod dst ~mode:permission
+        Unix.chmod dst permission
     ;;
 
     let read_variables config_file =
-      match Path.Untracked.exists config_file with
+      match Fpath.exists (Path.to_string config_file) with
       | false -> []
       | true ->
         let config =
           let filename = Path.to_string config_file in
           match
-            Io.read_file config_file
+            Io.read_file_exn config_file
             |> OpamFile.Dot_config.read_from_string
                  ~filename:(OpamFile.make (OpamFilename.of_string filename))
           with
@@ -1420,7 +1897,7 @@ module Install_action = struct
               Option.map
                 pos
                 ~f:(fun { OpamParserTypes.FullPos.filename = _; start; stop } ->
-                  let file_contents = Io.read_file config_file in
+                  let file_contents = Io.read_file_exn config_file in
                   let bols = ref [ 0 ] in
                   String.iteri file_contents ~f:(fun i ch ->
                     if ch = '\n' then bols := (i + 1) :: !bols);
@@ -1442,22 +1919,47 @@ module Install_action = struct
                  to be deleted, so we don't be able to fetch the part of the
                  file that's bad *)
               let open Pp.O in
-              let error = Pp.textf "Error parsing %s" (Path.basename config_file) in
+              let error =
+                Pp.textf
+                  "Error parsing %s"
+                  (Path.basename config_file |> Filename.to_string)
+              in
               match loc with
               | None -> error
               | Some loc ->
                 (Loc.pp loc |> Pp.map_tags ~f:(fun Loc.Loc -> User_message.Style.Loc))
                 ++ error
             in
-            User_error.raise
-              [ message_with_loc; Pp.seq (Pp.text "Reason: ") (Pp.text message) ]
+            User_error.raise [ message_with_loc; User_error.reason (Pp.verbatim message) ]
         in
         OpamFile.Dot_config.bindings config
         |> List.map ~f:(fun (name, value) -> Package_variable_name.of_opam name, value)
     ;;
 
-    let install_entry ~src ~install_file ~target_dir (entry : Path.t Install.Entry.t) =
-      match Path.Untracked.exists src, entry.optional with
+    (* On Windows, .install files may omit .exe for bin/sbin entries.
+       Try the .exe variant if the original doesn't exist, mirroring opam. *)
+    let maybe_add_exe src (entry : Path.t Install.Entry.Expanded.t) =
+      match
+        match Sys.win32, entry.section with
+        | true, (Bin | Sbin) when not (Fpath.exists (Path.to_string src)) ->
+          let src_exe_str = Bin.add_exe (Path.to_string src) in
+          if Fpath.exists src_exe_str then Some src_exe_str else None
+        | _ -> None
+      with
+      | None -> src, entry
+      | Some src_exe_str ->
+        ( Path.of_string src_exe_str
+        , Install.Entry.map_dst entry ~f:Install.Entry.Dst.maybe_add_exe )
+    ;;
+
+    let install_entry
+          ~src
+          ~install_file
+          ~target_dir
+          (entry : Path.t Install.Entry.Expanded.t)
+      =
+      let src, entry = maybe_add_exe src entry in
+      match Fpath.exists (Path.to_string src), entry.optional with
       | false, true -> None
       | false, false ->
         User_error.raise
@@ -1481,6 +1983,40 @@ module Install_action = struct
          Io.portable_hardlink ~src ~dst);
         maybe_set_executable entry.section dst;
         Some (entry.section, dst)
+    ;;
+
+    let resolve_symlinks_in root =
+      let on_symlink ~dir fname () =
+        let path = Filename.concat root (Filename.append dir fname) in
+        match Fpath.follow_symlink path with
+        | Error (Unix_error e) -> Unix_error.Detailed.raise e
+        | Error Not_a_symlink ->
+          Code_error.raise
+            "resolve_symlinks_in: not a symlink"
+            [ "path", Dyn.string path ]
+        | Error Max_depth_exceeded ->
+          User_error.raise
+            [ Pp.textf
+                "Unable to resolve symlink %s: too many levels of symbolic links"
+                path
+            ]
+        | Ok resolved ->
+          (match Unix.lstat resolved with
+           | { Unix.st_kind = S_REG; _ } ->
+             (* CR-someday rgrinberg: pass chmod:true here? *)
+             Fpath.unlink_exn path;
+             Io.portable_hardlink
+               ~src:(Path.of_string resolved)
+               ~dst:(Path.of_string path)
+           | _ -> ());
+          (), None
+      in
+      Fpath.traverse
+        ~dir:root
+        ~init:()
+        ~on_other:`Ignore
+        ~on_symlink:(`Call on_symlink)
+        ()
     ;;
 
     let action
@@ -1525,14 +2061,14 @@ module Install_action = struct
           (* Read all the artifacts from the .install file produced by
              the build command. This is the happy path where we don't guess
              anything. *)
-          Async.async (fun () -> Path.Untracked.exists install_file)
+          Async.async (fun () -> Fpath.exists (Path.to_string install_file))
           >>= function
           | false -> Fiber.return Section.Map.empty
           | true ->
             let* map =
               let install_entries =
                 let dir = Path.parent_exn install_file in
-                Install.Entry.load_install_file install_file (fun local ->
+                Install.Entry.Expanded.load_install_file install_file (fun local ->
                   Path.append_local dir local)
               in
               let by_src =
@@ -1554,7 +2090,11 @@ module Install_action = struct
                 section, file)
               |> Section.Map.of_list_multi
             in
-            let+ () = Async.async (fun () -> Path.unlink_exn install_file) in
+            let+ () =
+              Async.async (fun () ->
+                (* CR-someday rgrinberg: pass chmod:true here? *)
+                Fpath.unlink_exn (Path.to_string install_file))
+            in
             map
         in
         (* Combine the artifacts declared in the .install, and the ones we discovered
@@ -1562,14 +2102,20 @@ module Install_action = struct
         (* TODO we should make sure that overwrites aren't allowed *)
         Section.Map.union from_install_action from_install_file ~f:(fun _ x y ->
           Some (x @ y))
+        |> Section.Map.map ~f:(List.sort ~compare:Path.compare)
       in
       let* cookies =
         let+ variables = Async.async (fun () -> read_variables config_file) in
-        { Install_cookie.files; variables }
+        { Install_cookie.Gen.files; variables }
       in
-      (* Produce the cookie file in the standard path *)
-      let cookie_file = Path.build @@ Paths.install_cookie' target_dir in
       Async.async (fun () ->
+        (* Resolve symlinks in target_dir so that the cache can store them. The
+         dune cache doesn't support symlinks, so we replace them with hardlinks
+         to their targets. *)
+        if Fpath.exists (Path.Build.to_string target_dir)
+        then resolve_symlinks_in (Path.Build.to_string target_dir);
+        (* Produce the cookie file in the standard path *)
+        let cookie_file = Path.build @@ Paths.install_cookie' target_dir in
         cookie_file |> Path.parent_exn |> Path.mkdir_p;
         Install_cookie.dump cookie_file cookies)
     ;;
@@ -1623,13 +2169,24 @@ let source_rules (pkg : Pkg.t) =
          Memo.return (Dep.Set.of_files [ pkg.paths.source_dir ], [ loc, fetch ])
        | `Local (`Directory, source_root) ->
          let+ source_files, rules =
-           let source_root = Path.external_ source_root in
+           let source_root = Path.outside_build_dir source_root in
            Pkg.source_files pkg ~loc
            >>| Path.Local.Set.fold ~init:([], []) ~f:(fun file (source_files, rules) ->
              let src = Path.append_local source_root file in
-             let dst = Path.Build.append_local pkg.write_paths.source_dir file in
-             let copy = loc, Action_builder.copy ~src ~dst in
-             Path.build dst :: source_files, copy :: rules)
+             if Path.is_broken_symlink src
+             then
+               (* Don't copy broken symlinks into the build directory. Note
+                  that this only works for packages sourced from local
+                  directories. Packages whose source is extracted from an
+                  archive (possibly fetched over the web) have broken symlinks
+                  explicitly deleted immediately after the archive is
+                  extracted. This logic is implemented in
+                  [Fetch.resolve_directory_symlinks]. *)
+               source_files, rules
+             else (
+               let dst = Path.Build.append_local pkg.write_paths.source_dir file in
+               let copy = loc, Action_builder.copy ~src ~dst in
+               Path.build dst :: source_files, copy :: rules))
          in
          Dep.Set.of_files source_files, rules)
   in
@@ -1655,35 +2212,82 @@ let source_rules (pkg : Pkg.t) =
   source_deps, Memo.parallel_iter copy_rules ~f:(fun (loc, copy) -> rule ~loc copy)
 ;;
 
+let rec scan_contents p =
+  let module P = Path.Build in
+  let dir_contents =
+    match Readdir.read_directory_with_kinds (P.to_string p) with
+    | Error (Unix.ENOENT, _, _) ->
+      (* Directory doesn't exist - package has no extra files *)
+      []
+    | Ok dir_contents -> dir_contents
+    | Error e ->
+      Code_error.raise
+        "Failure to enumerate files"
+        [ "error", Unix_error.Detailed.to_dyn e ]
+  in
+  List.fold_left
+    dir_contents
+    ~init:(P.Set.empty, P.Set.empty)
+    ~f:(fun (files, empty_directories) (file_name, file_kind) ->
+      let p = P.relative_fname p file_name in
+      match (file_kind : Unix.file_kind) with
+      | S_REG -> P.Set.add files p, empty_directories
+      | S_DIR ->
+        let recursive_files, recursive_empty_dir = scan_contents p in
+        (match P.Set.is_empty recursive_files, P.Set.is_empty recursive_empty_dir with
+         | true, true ->
+           recursive_files, P.Set.union empty_directories recursive_empty_dir
+         | true, false -> files, P.Set.union empty_directories recursive_empty_dir
+         | false, _ -> P.Set.union files recursive_files, empty_directories)
+      | otherwise ->
+        Code_error.raise
+          "Unsupported directory content"
+          [ "path", P.to_dyn p; "file_kind", File_kind.to_dyn otherwise ])
+;;
+
+let files path =
+  let files, empty_directories = scan_contents path in
+  let to_path_set set =
+    Path.Build.Set.fold
+      set
+      ~f:(fun e acc -> Path.Set.add acc (Path.build e))
+      ~init:Path.Set.empty
+  in
+  let files = to_path_set files in
+  let empty_directories = to_path_set empty_directories in
+  Dep.Set.of_source_files ~files ~empty_directories, files
+;;
+
+let dune_dep =
+  lazy (Sys.executable_name |> Path.External.of_string |> Path.external_ |> Dep.file)
+;;
+
 let build_rule context_name ~source_deps (pkg : Pkg.t) =
   let+ build_action =
     let+ copy_action, build_action, install_action =
       let+ copy_action =
         let+ copy_action =
-          Fs_memo.dir_exists
-            (In_source_dir (Path.Build.drop_build_context_exn pkg.files_dir))
-          >>= function
-          | false -> Memo.return []
-          | true ->
-            let+ deps, source_deps = Source_deps.files (Path.build pkg.files_dir) in
-            let open Action_builder.O in
-            [ Action_builder.with_no_targets
-              @@ (Action_builder.deps deps
-                  >>> (Path.Set.to_list_map source_deps ~f:(fun src ->
-                         let dst =
-                           let local_path =
-                             Path.drop_prefix_exn src ~prefix:(Path.build pkg.files_dir)
-                           in
-                           Path.Build.append_local pkg.write_paths.source_dir local_path
-                         in
-                         Action.progn
-                           [ Action.mkdir (Path.Build.parent_exn dst)
-                           ; Action.copy src dst
-                           ])
-                       |> Action.concurrent
-                       |> Action.Full.make
-                       |> Action_builder.return))
-            ]
+          let+ () = Memo.return () in
+          let open Action_builder.O in
+          [ Action_builder.with_no_targets
+            @@ (Action_builder.of_memo
+                  (Memo.of_thunk (fun () ->
+                     let deps, source_deps = files pkg.files_dir in
+                     Memo.return (source_deps, deps)))
+                |> Action_builder.dyn_deps
+                >>= fun source_deps ->
+                Path.Set.to_list_map source_deps ~f:(fun src ->
+                  let dst =
+                    let prefix = Path.build pkg.files_dir in
+                    let local_path = Path.drop_prefix_exn src ~prefix in
+                    Path.Build.append_local pkg.write_paths.source_dir local_path
+                  in
+                  Action.progn
+                    [ Action.mkdir (Path.Build.parent_exn dst); Action.copy src dst ])
+                |> Action.concurrent
+                |> Action.Full.make
+                |> Action_builder.return)
+          ]
         in
         copy_action
         @ List.map pkg.info.extra_sources ~f:(fun (local, _) ->
@@ -1750,19 +2354,26 @@ let build_rule context_name ~source_deps (pkg : Pkg.t) =
       |> Action_builder.return
       |> Action_builder.with_no_targets
     in
-    Action_builder.progn
-      (copy_action
-       @ [ progress_building ]
-       @ build_action
-       @ install_action
-       @ [ install_file_action ])
+    [ copy_action
+    ; [ progress_building ]
+    ; build_action
+    ; install_action
+    ; [ install_file_action ]
+    ]
+    |> List.concat
+    |> Action_builder.progn
   in
-  let deps = Dep.Set.union source_deps (Pkg.package_deps pkg) in
   let open Action_builder.With_targets.O in
-  Action_builder.deps deps
-  |> Action_builder.with_no_targets
+  (let deps =
+     let deps = Dep.Set.union source_deps (Pkg.package_deps pkg) in
+     match pkg.depends_on_dune with
+     | false -> deps
+     | true -> Dep.Set.add deps (Lazy.force dune_dep)
+   in
+   Action_builder.deps deps |> Action_builder.with_no_targets)
   (* TODO should we add env deps on these? *)
   >>> add_env (Pkg.exported_env pkg) build_action
+  |> Action_builder.With_targets.map ~f:Action.Full.disable_sandbox_policy
   |> Action_builder.With_targets.add_directories
        ~directory_targets:[ pkg.write_paths.target_dir ]
 ;;
@@ -1800,24 +2411,28 @@ let setup_pkg_install_alias =
     (* Fetching the package target implies that we will also fetch the extra
        sources. *)
     let open Action_builder.O in
-    let project_deps : Package_universe.t = Project_dependencies ctx_name in
-    let* lock_dir = Action_builder.of_memo (Package_universe.lock_dir project_deps) in
-    Dune_lang.Package_name.Map.keys lock_dir.packages
-    |> List.map ~f:(fun pkg ->
-      Paths.make ~relative:Path.Build.relative project_deps pkg
+    let* pkg_digests =
+      Action_builder.of_memo
+        (let open Memo.O in
+         let+ db = DB.of_ctx ctx_name ~allow_sharing:true in
+         Pkg_digest.Map.values db.pkg_digest_table
+         |> List.map ~f:(fun { DB.Pkg_table.pkg_digest; _ } -> pkg_digest))
+    in
+    List.map pkg_digests ~f:(fun pkg_digest ->
+      Paths.make ~relative:Path.Build.relative pkg_digest (Dependencies ctx_name)
       |> Paths.target_dir
       |> Path.build)
     |> Action_builder.paths
   in
   fun ~dir ctx_name ->
-    let rule =
-      (* We only need to build when the build_dir is the root of the context *)
-      match
-        let build_dir = Context_name.build_dir ctx_name in
-        Path.Build.equal dir build_dir
-      with
-      | false -> Memo.return Rules.empty
-      | true ->
+    (* We only need to build when the build_dir is the root of the context *)
+    match
+      let build_dir = Context_name.build_dir ctx_name in
+      Path.Build.equal dir build_dir
+    with
+    | false -> Gen_rules.no_rules
+    | true ->
+      let rule =
         let* active = Lock_dir.lock_dir_active ctx_name in
         let alias = Alias.make ~dir Alias0.pkg_install in
         Rules.collect_unit (fun () ->
@@ -1827,27 +2442,14 @@ let setup_pkg_install_alias =
             | false -> pkg_alias_disabled
           in
           Rules.Produce.Alias.add_deps alias deps)
-    in
-    Gen_rules.rules_for ~dir ~allowed_subdirs:Filename.Set.empty rule
-    |> Gen_rules.rules_here
+      in
+      Gen_rules.rules_for ~dir ~allowed_subdirs:Filename.Set.empty rule
+      |> Gen_rules.rules_here
 ;;
 
-let setup_package_rules ~package_universe ~dir ~pkg_name : Gen_rules.result Memo.t =
-  let name = User_error.ok_exn (Package.Name.of_string_user_error (Loc.none, pkg_name)) in
-  let* db = DB.get package_universe in
-  let* pkg =
-    Resolve.resolve db (Loc.none, name) package_universe
-    >>| function
-    | `Inside_lock_dir pkg -> pkg
-    | `System_provided ->
-      User_error.raise
-        (* TODO loc *)
-        [ Pp.textf
-            "There are no rules for %S because it's set as provided by the system"
-            (Package.Name.to_string name)
-        ]
-  in
-  let paths = Paths.make package_universe name ~relative:Path.Build.relative in
+let setup_package_rules db ~package_universe ~dir ~pkg_digest : Gen_rules.result Memo.t =
+  let* pkg = Resolve.resolve db Loc.none pkg_digest package_universe in
+  let paths = Paths.make pkg.pkg_digest package_universe ~relative:Path.Build.relative in
   let+ directory_targets =
     let map =
       let target_dir = paths.target_dir in
@@ -1877,32 +2479,31 @@ let setup_rules ~components ~dir ctx =
      the value of [Pkg_dev_tool.install_path_base_dir_name]. *)
   assert (String.equal Pkg_dev_tool.install_path_base_dir_name ".dev-tool");
   match Context_name.is_default ctx, components with
-  | true, [ ".dev-tool"; pkg_name; pkg_dep_name ] ->
-    setup_package_rules
-      ~package_universe:
-        (Dev_tool (Package.Name.of_string pkg_name |> Dune_pkg.Dev_tool.of_package_name))
-      ~dir
-      ~pkg_name:pkg_dep_name
-  | true, [ ".dev-tool" ] ->
-    Gen_rules.make
-      ~build_dir_only_sub_dirs:
-        (Gen_rules.Build_only_sub_dirs.singleton ~dir Subdir_set.all)
-      (Memo.return Rules.empty)
-    |> Memo.return
-  | _, [ ".pkg" ] ->
-    Gen_rules.make
-      ~build_dir_only_sub_dirs:
-        (Gen_rules.Build_only_sub_dirs.singleton ~dir Subdir_set.all)
-      (Memo.return Rules.empty)
-    |> Memo.return
-  | _, [ ".pkg"; pkg_name ] ->
-    setup_package_rules ~package_universe:(Project_dependencies ctx) ~dir ~pkg_name
+  | true, [ ".dev-tool"; dev_tool_package_name ] ->
+    let pkg_name = Package.Name.of_string dev_tool_package_name in
+    let dev_tool = Pkg_dev_tool.of_package_name pkg_name in
+    let* db, pkg_digest = DB.of_dev_tool (Dune_pkg.Dev_tool.of_package_name pkg_name) in
+    setup_package_rules db ~package_universe:(Dev_tool dev_tool) ~dir ~pkg_digest
+  | true, [ ".dev-tool" ] -> Gen_rules.make_empty ~dir Subdir_set.all |> Memo.return
+  | _, [ ".pkg" ] -> Gen_rules.make_empty ~dir Subdir_set.all |> Memo.return
+  | _, [ ".pkg"; pkg_digest_string ] ->
+    (* Only generate pkg rules if there is a lock dir for that context *)
+    let* lock_dir_active = Lock_dir.lock_dir_active ctx in
+    (match lock_dir_active with
+     | false -> Memo.return @@ Gen_rules.make (Memo.return Rules.empty)
+     | true ->
+       let pkg_digest = Pkg_digest.of_string pkg_digest_string in
+       let* db = DB.of_ctx ctx ~allow_sharing:true in
+       setup_package_rules db ~package_universe:(Dependencies ctx) ~dir ~pkg_digest)
   | _, ".pkg" :: _ :: _ ->
     Memo.return @@ Gen_rules.redirect_to_parent Gen_rules.Rules.empty
   | true, ".dev-tool" :: _ :: _ :: _ ->
     Memo.return @@ Gen_rules.redirect_to_parent Gen_rules.Rules.empty
   | is_default, [] ->
-    let sub_dirs = ".pkg" :: (if is_default then [ ".dev-tool" ] else []) in
+    let sub_dirs =
+      Filename.pkg_dir_basename
+      :: (if is_default then [ Filename.dev_tool_dir_basename ] else [])
+    in
     let build_dir_only_sub_dirs =
       Gen_rules.Build_only_sub_dirs.singleton ~dir @@ Subdir_set.of_list sub_dirs
     in
@@ -1910,11 +2511,9 @@ let setup_rules ~components ~dir ctx =
   | _ -> Memo.return @@ Gen_rules.rules_here Gen_rules.Rules.empty
 ;;
 
-let db_project context = DB.get (Project_dependencies context)
-
-let resolve_pkg_project context pkg =
-  let* db = db_project context in
-  Resolve.resolve db pkg (Project_dependencies context)
+let resolve_pkg_dep context (loc, package_name) =
+  let* db, pkg_digest = DB.of_project_pkg context package_name in
+  Resolve.resolve db loc pkg_digest (Dependencies context)
 ;;
 
 let ocaml_toolchain context =
@@ -1923,13 +2522,11 @@ let ocaml_toolchain context =
       "Loading OCaml toolchain from Lock directory for context %S"
       (Context_name.to_string context))
   @@ fun () ->
-  (let* lock_dir = Lock_dir.get_exn context in
-   match lock_dir.ocaml with
-   | None -> Memo.return `System_provided
-   | Some ocaml -> resolve_pkg_project context ocaml)
-  >>| function
-  | `System_provided -> None
-  | `Inside_lock_dir pkg ->
+  let* lock_dir = Lock_dir.get_exn context in
+  match lock_dir.ocaml with
+  | None -> Memo.return None
+  | Some ocaml ->
+    let+ pkg = resolve_pkg_dep context ocaml in
     let toolchain =
       let open Action_builder.O in
       let transitive_deps = pkg :: Pkg.deps_closure pkg in
@@ -1954,29 +2551,34 @@ let ocaml_toolchain context =
     Some (Action_builder.memoize "ocaml_toolchain" toolchain)
 ;;
 
-let all_packages context =
-  let* db = db_project context in
-  Dune_lang.Package_name.Map.values db.all
-  |> Memo.parallel_map ~f:(fun (package : Lock_dir.Pkg.t) ->
-    let package = package.info.name in
-    resolve_pkg_project context (Loc.none, package)
-    >>| function
-    | `Inside_lock_dir pkg -> Some pkg
-    | `System_provided -> None)
-  >>| List.filter_opt
+let all_deps universe =
+  let* db =
+    match (universe : Package_universe.t) with
+    | Dependencies ctx ->
+      (* Disallow sharing so that the only packages in the DB are the ones from
+         the universe's respective lock directory. *)
+      DB.of_ctx ctx ~allow_sharing:false
+    | Dev_tool tool -> DB.of_dev_tool tool >>| fst
+  in
+  Pkg_digest.Map.values db.pkg_digest_table
+  |> Memo.parallel_map ~f:(fun { DB.Pkg_table.pkg_digest; _ } ->
+    Resolve.resolve db Loc.none pkg_digest universe)
   >>| Pkg.top_closure
 ;;
+
+let all_project_deps context = all_deps (Dependencies context)
 
 let which context =
   let artifacts_and_deps =
     Memo.lazy_
+      ~name:"lock-directory-binaries"
       ~human_readable_description:(fun () ->
         Pp.textf
           "Loading all binaries in the lock directory for %S"
           (Context_name.to_string context))
       (fun () ->
          let+ { binaries; dep_info = _ } =
-           all_packages context >>= Action_expander.Artifacts_and_deps.of_closure
+           all_project_deps context >>= Action_expander.Artifacts_and_deps.of_closure
          in
          binaries)
   in
@@ -1985,9 +2587,9 @@ let which context =
     Filename.Map.find artifacts program)
 ;;
 
-let ocamlpath context =
-  let+ all_packages = all_packages context in
-  let env = Pkg.build_env_of_deps all_packages in
+let ocamlpath universe =
+  let+ all_project_deps = all_deps universe in
+  let env = Pkg.build_env_of_deps all_project_deps in
   Env.Map.find env Dune_findlib.Config.ocamlpath_var
   |> Option.value ~default:[]
   |> List.map ~f:(function
@@ -1995,6 +2597,8 @@ let ocamlpath context =
     | String s -> Path.of_filename_relative_to_initial_cwd s)
 ;;
 
+let project_ocamlpath context = ocamlpath (Dependencies context)
+let dev_tool_ocamlpath dev_tool = ocamlpath (Dev_tool dev_tool)
 let lock_dir_active = Lock_dir.lock_dir_active
 let lock_dir_path = Lock_dir.get_path
 
@@ -2005,20 +2609,17 @@ let dev_tool_env tool =
       "lock directory environment for dev tools %S"
       (Package.Name.to_string package_name))
   @@ fun () ->
-  let universe : Package_universe.t = Dev_tool tool in
-  let* db = DB.get universe in
-  Resolve.resolve db (Loc.none, package_name) universe
-  >>| function
-  | `System_provided -> assert false
-  | `Inside_lock_dir pkg -> Pkg.exported_env pkg
+  let* db, pkg_digest = DB.of_dev_tool tool in
+  let+ pkg = Resolve.resolve db Loc.none pkg_digest (Dev_tool tool) in
+  Pkg.exported_env pkg
 ;;
 
 let exported_env context =
   Memo.push_stack_frame ~human_readable_description:(fun () ->
     Pp.textf "lock directory environment for context %S" (Context_name.to_string context))
   @@ fun () ->
-  let+ all_packages = all_packages context in
-  let env = Pkg.build_env_of_deps all_packages in
+  let+ all_project_deps = all_project_deps context in
+  let env = Pkg.build_env_of_deps all_project_deps in
   let vars = Env.Map.map env ~f:Value_list_env.string_of_env_values in
   Env.extend Env.empty ~vars
 ;;
@@ -2028,12 +2629,65 @@ let find_package ctx pkg =
   >>= function
   | false -> Memo.return None
   | true ->
-    resolve_pkg_project ctx (Loc.none, pkg)
-    >>| (function
-     | `System_provided -> Action_builder.return ()
-     | `Inside_lock_dir pkg ->
-       let open Action_builder.O in
-       let+ _cookie = (Pkg_installed.of_paths pkg.paths).cookie in
-       ())
-    >>| Option.some
+    let+ pkg = resolve_pkg_dep ctx (Loc.none, pkg) in
+    Some (Action_builder.deps (Dep.Set.add (Pkg.package_deps pkg) (Pkg.dep pkg)))
+;;
+
+let package_prefixes ctx =
+  lock_dir_active ctx
+  >>= function
+  | false -> Memo.return []
+  | true ->
+    all_project_deps ctx
+    >>| List.map ~f:(fun { Pkg.info = { name; _ }; paths = { Paths.prefix; _ }; _ } ->
+      prefix, name)
+;;
+
+let resolve_installed_file ~loc ~context_name ~pkg_name ~section ~file =
+  let open Action_builder.O in
+  let* { paths; _ } =
+    Action_builder.of_memo (resolve_pkg_dep context_name (loc, pkg_name))
+  in
+  let* { files; _ } = (Pkg_installed.of_paths paths).cookie in
+  let section_dir =
+    let install_paths = Lazy.force paths.install_paths in
+    Install.Paths.get install_paths section
+  in
+  let path = Path.append_local section_dir file in
+  let installed = Section.Map.find files section |> Option.value ~default:[] in
+  match List.exists installed ~f:(Path.equal path) with
+  | true ->
+    let+ () = Action_builder.path path in
+    path
+  | false ->
+    let file_str = Path.Local.to_string file in
+    let candidates =
+      List.filter_map installed ~f:(Path.drop_prefix ~prefix:section_dir)
+      |> List.map ~f:Path.Local.to_string
+    in
+    User_error.raise
+      ~loc
+      ~hints:(User_message.did_you_mean file_str ~candidates)
+      [ Pp.textf
+          "File %s not found in section %s of package %s"
+          file_str
+          (Section.to_string section)
+          (Package.Name.to_string pkg_name)
+      ]
+;;
+
+let all_filtered_depexts context =
+  let* all_project_deps = all_project_deps context in
+  Memo.List.map all_project_deps ~f:(fun (pkg : Pkg.t) ->
+    let expander = Action_expander.expander context pkg in
+    Action_expander.Expander.filtered_depexts expander)
+  >>| List.concat
+  >>| List.sort_uniq ~compare:String.compare
+;;
+
+let pkg_digest_of_project_dependency ctx package_name =
+  let+ db = DB.of_ctx ctx ~allow_sharing:false in
+  Pkg_digest.Map.keys db.pkg_digest_table
+  |> List.find ~f:(fun (pkg_digest : Pkg_digest.t) ->
+    Package.Name.equal pkg_digest.name package_name)
 ;;

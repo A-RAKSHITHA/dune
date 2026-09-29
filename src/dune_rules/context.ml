@@ -61,7 +61,7 @@ module Env_nodes = struct
          let+ (env : Dune_env.config) = env >>= Dune_env.find_opt ~profile in
          env.env_vars)
     in
-    Env.extend_env (make context) (make workspace)
+    Env.extend_env (make workspace) (make context)
   ;;
 end
 
@@ -69,15 +69,16 @@ type builder =
   { profile : Profile.t
   ; merlin : bool
   ; instrument_with : Lib_name.t list
-  ; fdo_target_exe : Path.t option
   ; dynamically_linked_foreign_archives : bool
   ; env_nodes : Env_nodes.t
   ; name : Context_name.t
   ; env : Env.t Memo.t
   ; implicit : bool
   ; findlib_toolchain : Context_name.t option
+  ; target_exec : (string * string list) option
   ; for_host : (Context_name.t * t Memo.t) option
   ; path : Path.t list
+  ; cms_cmt_dependency : Workspace.Context.Cms_cmt_dependency.t
   }
 
 and t =
@@ -91,6 +92,13 @@ and t =
   ; which : Filename.t -> Path.t option Memo.t
   }
 
+let default_target_exec ~target_exec toolchain =
+  match target_exec, !Clflags.target_exec, Context_name.to_string toolchain with
+  | _, Some (name, prog, args), toolchain when name = toolchain -> Some (prog, args)
+  | Some target_exec, _, _ -> Some target_exec
+  | _ -> None
+;;
+
 module Builder = struct
   type t = builder
 
@@ -98,15 +106,16 @@ module Builder = struct
     { profile = Profile.Dev
     ; merlin = false
     ; instrument_with = []
-    ; fdo_target_exe = None
     ; dynamically_linked_foreign_archives = false
     ; env_nodes = Env_nodes.empty
     ; name = Context_name.default
     ; env = Memo.return Env.empty
     ; implicit = false
     ; findlib_toolchain = None
+    ; target_exec = None
     ; for_host = None
     ; path = []
+    ; cms_cmt_dependency = Workspace.Context.Cms_cmt_dependency.No_dependency
     }
   ;;
 
@@ -115,7 +124,7 @@ module Builder = struct
       let f (var, t) =
         let parse ~loc:_ s = s in
         let standard = Env_path.path env |> List.map ~f:Path.to_string in
-        var, Ordered_set_lang.eval t ~parse ~standard ~eq:String.equal
+        Env.Var.of_string var, Ordered_set_lang.eval t ~parse ~standard ~eq:String.equal
       in
       List.map ~f t
     in
@@ -139,10 +148,10 @@ module Builder = struct
         ; toolchain
         ; paths
         ; loc = _
-        ; fdo_target_exe
         ; dynamically_linked_foreign_archives
         ; instrument_with
         ; merlin
+        ; cms_cmt_dependency
         }
     =
     let env =
@@ -157,10 +166,11 @@ module Builder = struct
     ; profile
     ; dynamically_linked_foreign_archives
     ; instrument_with
-    ; fdo_target_exe
     ; name
     ; env = Memo.return env
     ; findlib_toolchain = toolchain
+    ; target_exec = None
+    ; cms_cmt_dependency
     }
   ;;
 end
@@ -183,10 +193,10 @@ let dynamically_linked_foreign_archives t =
     Ocaml_config.supports_shared_libraries ocaml.ocaml_config
 ;;
 
-let fdo_target_exe t = t.builder.fdo_target_exe
 let instrument_with t = t.builder.instrument_with
 let merlin t = t.builder.merlin
 let profile t = t.builder.profile
+let cms_cmt_dependency t = t.builder.cms_cmt_dependency
 let equal x y = Context_name.equal x.builder.name y.builder.name
 let hash t = Context_name.hash t.builder.name
 let build_context t = t.build_context
@@ -205,13 +215,11 @@ let host t =
 
 let to_dyn t : Dyn.t =
   let open Dyn in
-  let path = Path.to_dyn in
   record
     [ "name", Context_name.to_dyn t.builder.name
     ; "kind", Kind.to_dyn t.kind
     ; "profile", Profile.to_dyn t.builder.profile
     ; "merlin", Bool t.builder.merlin
-    ; "fdo_target_exe", option path t.builder.fdo_target_exe
     ; "build_dir", Path.Build.to_dyn t.build_dir
     ; "instrument_with", (list Lib_name.to_dyn) t.builder.instrument_with
     ]
@@ -224,7 +232,7 @@ module Opam : sig
 end = struct
   let opam =
     Memo.Lazy.create ~name:"context-opam" (fun () ->
-      Which.which ~path:(Env_path.path Env.initial) "opam"
+      Which.which ~path:(Env_path.path Env.initial) Filename.opam
       >>= function
       | None -> Utils.program_not_found "opam" ~loc:None
       | Some opam ->
@@ -283,6 +291,7 @@ end = struct
       in
       Dune_sexp.Parser.parse_string ~fname:"<opam output>" ~mode:Single s
       |> Dune_sexp.Decoder.(parse (enter (repeat (pair string string))) Univ_map.empty)
+      |> List.map ~f:(fun (var, value) -> Env.Var.of_string var, value)
       |> Env.Map.of_list_multi
       |> Env.Map.mapi ~f:(fun var values ->
         match List.rev values with
@@ -290,7 +299,9 @@ end = struct
         | [ x ] -> x
         | x :: _ ->
           User_warning.emit
-            [ Pp.textf "variable %S present multiple times in the output of:" var
+            [ Pp.textf
+                "variable %S present multiple times in the output of:"
+                (Env.Var.to_string var)
             ; Pp.tag
                 User_message.Style.Details
                 (Pp.text (String.quote_list_for_shell (Path.to_string opam :: args)))
@@ -401,6 +412,7 @@ let create (builder : Builder.t) ~(kind : Kind.t) =
     | Lock _ ->
       let env =
         Memo.lazy_
+          ~name:"context-base-env"
           ~human_readable_description:(fun () ->
             Pp.textf
               "base environment for context %S"
@@ -424,7 +436,7 @@ let create (builder : Builder.t) ~(kind : Kind.t) =
           ~human_readable_description:(fun () ->
             Pp.textf
               "looking up binary %S in context %S"
-              prog
+              (Filename.to_string prog)
               (Context_name.to_string builder.name))
           (fun () ->
              which prog
@@ -434,17 +446,19 @@ let create (builder : Builder.t) ~(kind : Kind.t) =
   in
   let ocamlpath =
     Memo.lazy_
+      ~name:"context-ocamlpath"
       ~human_readable_description:(fun () ->
         Pp.textf "loading OCAMLPATH for context %S" (Context_name.to_string builder.name))
       (fun () ->
          match kind with
-         | Lock _ -> Pkg_rules.ocamlpath builder.name
+         | Lock _ -> Pkg_rules.project_ocamlpath builder.name
          | Default | Opam _ ->
            let+ ocamlpath = builder.env >>| Findlib_config.ocamlpath_of_env in
            Kind.ocamlpath kind ~ocamlpath ~findlib_toolchain:builder.findlib_toolchain)
   in
   let findlib =
     Memo.lazy_
+      ~name:"context-findlib"
       ~human_readable_description:(fun () ->
         Pp.textf "loading findlib for context %S" (Context_name.to_string builder.name))
       (fun () ->
@@ -488,8 +502,6 @@ let create (builder : Builder.t) ~(kind : Kind.t) =
                 toolchain, `Lock)
          in
          Ocaml_toolchain.register_response_file_support ocaml;
-         if Option.is_some builder.fdo_target_exe
-         then Ocaml_toolchain.check_fdo_support ocaml builder.name;
          ocaml, env)
   in
   let default_ocamlpath =
@@ -511,6 +523,7 @@ let create (builder : Builder.t) ~(kind : Kind.t) =
   let builder =
     let installed_env =
       Memo.lazy_
+        ~name:"context-installed-env"
         ~human_readable_description:(fun () ->
           Pp.textf
             "creating installed environment for %S"
@@ -567,12 +580,16 @@ module Group = struct
       in
       List.filter_map targets ~f:(function
         | Native -> None
-        | Named findlib_toolchain ->
+        | Named { name = findlib_toolchain; target_exec } ->
           Some
             (Memo.Lazy.create ~name:"findlib_toolchain" (fun () ->
                let name = Context_name.target builder.name ~toolchain:findlib_toolchain in
                create
-                 { builder with name; findlib_toolchain = Some findlib_toolchain }
+                 { builder with
+                   name
+                 ; findlib_toolchain = Some findlib_toolchain
+                 ; target_exec = default_target_exec ~target_exec findlib_toolchain
+                 }
                  ~kind
                |> Memo.return)))
     in
@@ -606,12 +623,12 @@ module Group = struct
         [ Pp.textf
             "opam doesn't set the environment variable %s. I cannot create an opam build \
              context without opam setting this variable."
-            Opam_switch.opam_switch_prefix_var_name
+            (Env.Var.to_string Opam_switch.opam_switch_prefix_var_name)
         ];
     let path =
       match Env.Map.find vars Env_path.var with
       | None ->
-        (* CR rgrinberg: Is this even possible? *)
+        (* CR-someday rgrinberg: Is this even possible? *)
         Env_path.path env
       | Some s -> Bin.parse_path s
     in
@@ -665,7 +682,7 @@ module Group = struct
           | Some _ -> Memo.return builder
           | None ->
             let+ env = builder.env in
-            (match Env.get env "OCAMLFIND_TOOLCHAIN" with
+            (match Env.get env (Env.Var.of_string "OCAMLFIND_TOOLCHAIN") with
              | None -> builder
              | Some name ->
                { builder with
@@ -696,10 +713,7 @@ module DB = struct
           native :: targets)
       in
       let+ all = List.concat contexts |> Memo.parallel_map ~f:Memo.Lazy.force in
-      List.iter all ~f:(fun t ->
-        let open Pp.O in
-        Log.info
-          [ Pp.box ~indent:1 (Pp.text "Dune context:" ++ Pp.cut ++ Dyn.pp (to_dyn t)) ]);
+      List.iter all ~f:(fun t -> Log.info "Dune context" [ "context", to_dyn t ]);
       all
     in
     let memo = Memo.lazy_ ~name:"build-contexts" impl in
@@ -731,16 +745,34 @@ module DB = struct
   ;;
 end
 
-let map_exe (context : t) =
-  match context.builder.for_host with
-  | None -> fun exe -> exe
-  | Some (name, _) ->
-    fun exe ->
-      let build_dir = Context_name.build_dir name in
-      (match Path.extract_build_context_dir exe with
-       | Some (dir, exe) when Path.equal dir (Path.build context.build_dir) ->
-         Path.append_source (Path.build build_dir) exe
-       | _ -> exe)
+let map_exe ~force_host (context : t) =
+  match force_host, context.builder with
+  | false, { target_exec = Some (wrapper, wrapper_args); _ } ->
+    fun prog args ->
+      (match Path.extract_build_context_dir prog with
+       | Some (dir, _) when Path.equal dir (Path.build context.build_dir) ->
+         let args = wrapper_args @ (Path.to_absolute_filename prog :: args) in
+         let wrapper =
+           match Bin.which ~path:(Env_path.path Env.initial) wrapper with
+           | Some p -> p
+           | None ->
+             User_error.raise
+               [ Pp.textf "Target exec wrapper %s could not be found in the path!" wrapper
+               ]
+         in
+         prog, wrapper, args
+       | _ -> prog, prog, args)
+  | _, { for_host = None; _ } -> fun prog args -> prog, prog, args
+  | _, { for_host = Some (name, _); _ } ->
+    let build_dir = Context_name.build_dir name in
+    fun prog args ->
+      let prog =
+        match Path.extract_build_context_dir prog with
+        | Some (dir, prog) when Path.equal dir (Path.build context.build_dir) ->
+          Path.append_source (Path.build build_dir) prog
+        | _ -> prog
+      in
+      prog, prog, args
 ;;
 
 let roots =

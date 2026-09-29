@@ -60,6 +60,37 @@ let string_in_ocaml_syntax str =
                 @ [ escape_protect_first_space last ^ "\"" ]))))
 ;;
 
+external format_float : string -> float -> string = "caml_format_float"
+
+(* Float-to-string conversion that preserves round-trip accuracy.
+   Algorithm from sexplib0 (https://github.com/janestreet/sexplib0):
+   - %.17g is guaranteed to round-trip
+   - %.15g avoids ugly trailing digits (e.g. "3.1400000000000001") for floats
+     converted from decimals with <= 15 significant digits
+   - Try %.15g first; if it doesn't round-trip, use %.17g
+   - Adds "." if needed to make a valid float lexeme (from stdlib) *)
+let float_to_string =
+  let valid_float_lexeme s =
+    let l = String.length s in
+    let rec loop i =
+      if i >= l
+      then s ^ "."
+      else (
+        match s.[i] with
+        | '0' .. '9' | '-' -> loop (i + 1)
+        | _ -> s)
+    in
+    loop 0
+  in
+  fun x ->
+    match Float.classify_float x with
+    | FP_nan -> "nan"
+    | FP_infinite -> if x > 0. then "infinity" else "neg_infinity"
+    | FP_normal | FP_subnormal | FP_zero ->
+      let s = format_float "%.15g" x in
+      valid_float_lexeme @@ if float_of_string s = x then s else format_float "%.17g" x
+;;
+
 let pp_sequence start stop x ~f =
   let open Pp.O in
   match x with
@@ -81,14 +112,14 @@ let rec pp ?(in_arg = false) =
   | Opaque -> Pp.verbatim "<opaque>"
   | Unit -> Pp.verbatim "()"
   | Int i -> Pp.verbatim (string_of_int i)
-  | Int32 i -> Pp.verbatim (Int32.to_string i)
-  | Int64 i -> Pp.verbatim (Int64.to_string i)
-  | Nativeint i -> Pp.verbatim (Nativeint.to_string i)
+  | Int32 i -> Pp.verbatim (Int32.to_string i ^ "l")
+  | Int64 i -> Pp.verbatim (Int64.to_string i ^ "L")
+  | Nativeint i -> Pp.verbatim (Nativeint.to_string i ^ "n")
   | Bool b -> Pp.verbatim (string_of_bool b)
   | String s -> string_in_ocaml_syntax s
   | Bytes b -> string_in_ocaml_syntax (Bytes.to_string b)
-  | Char c -> Pp.char c
-  | Float f -> Pp.verbatim (string_of_float f)
+  | Char c -> Pp.verbatim (Printf.sprintf "%C" c)
+  | Float f -> Pp.verbatim (float_to_string f)
   | Option None -> pp ~in_arg (Variant ("None", []))
   | Option (Some x) -> pp ~in_arg (Variant ("Some", [ x ]))
   | List xs -> pp_sequence "[" "]" xs ~f:pp

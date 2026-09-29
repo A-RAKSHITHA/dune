@@ -1,5 +1,4 @@
 Build a package with make
-  $ . ./helpers.sh
 
   $ mkdir foo
   $ cat >foo/Makefile <<EOF
@@ -8,7 +7,7 @@ Build a package with make
   > foo: ; @echo running makefile
   > EOF
   $ make_lockdir
-  $ cat >dune.lock/foo.pkg <<EOF
+  $ make_lockpkg foo <<EOF
   > (version 0.0.1)
   > (build (run %{make}))
   > (source (copy $PWD/foo))

@@ -1,0 +1,4 @@
+(cram
+ (applies_to envs-and-contexts.t)
+ (enabled_if false)
+ (deps %{bin:opam}))

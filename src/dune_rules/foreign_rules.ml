@@ -12,28 +12,34 @@ let default_context_flags (ctx : Build_context.t) ocaml_config ~project =
   let cflags = Ocaml_config.ocamlc_cflags ocaml_config in
   let c, cxx =
     let cxxflags =
-      List.filter cflags ~f:(fun s -> not (String.is_prefix s ~prefix:"-std="))
+      List.filter cflags ~f:(fun s -> not (String.starts_with ~prefix:"-std=" s))
     in
     match Dune_project.use_standard_c_and_cxx_flags project with
     | None | Some false -> Action_builder.(return cflags, return cxxflags)
     | Some true ->
-      let fdiagnostics_color =
-        Cxx_flags.ccomp_type ctx |> Action_builder.map ~f:Cxx_flags.fdiagnostics_color
-      in
+      let cc_vendor = Cc_flags.cc_vendor ctx in
+      let fdiagnostics_color = Action_builder.map ~f:Cc_flags.fdiagnostics_color cc_vendor
+      and warnings = Action_builder.map ~f:Cc_flags.warnings cc_vendor in
       let open Action_builder.O in
       let c =
-        let+ fdiagnostics_color = fdiagnostics_color in
+        let+ fdiagnostics_color = fdiagnostics_color
+        and+ warnings = warnings in
         List.concat
-          [ cflags; Ocaml_config.ocamlc_cppflags ocaml_config; fdiagnostics_color ]
+          [ cflags
+          ; Ocaml_config.ocamlc_cppflags ocaml_config
+          ; warnings
+          ; fdiagnostics_color
+          ]
       in
       let cxx =
         let+ fdiagnostics_color = fdiagnostics_color
+        and+ warnings = warnings
         and+ db_flags =
-          Cxx_flags.get_flags
+          Cc_flags.get_flags
             ~for_:(Compile (Ocaml.Version.make (Ocaml_config.version ocaml_config)))
             ctx
         in
-        List.concat [ db_flags; cxxflags; fdiagnostics_color ]
+        List.concat [ db_flags; cxxflags; warnings; fdiagnostics_color ]
       in
       c, cxx
   in
@@ -137,16 +143,17 @@ let include_dir_flags ~expander ~dir ~include_dirs =
                User_error.raise
                  ~loc
                  [ Pp.textf "Unable to read the include directory."
-                 ; Pp.textf "Reason: %s." msg
+                 ; User_error.reason msg
                  ]
              in
              Action_builder.of_memo
              @@ Fs_memo.is_directory (Path.as_outside_build_dir_exn include_dir)
              >>| function
-             | Error msg -> error (Unix_error.Detailed.to_string_hum msg)
+             | Error msg -> error (Unix_error.Detailed.pp msg)
              | Ok true -> ()
              | Ok false ->
-               error (sprintf "%S is not a directory" (Path.to_string include_dir))
+               error
+                 (Pp.text (sprintf "%S is not a directory" (Path.to_string include_dir)))
            in
            let deps =
              File_selector.of_predicate_lang ~dir:include_dir Predicate_lang.true_
@@ -203,53 +210,88 @@ let include_dir_flags ~expander ~dir ~include_dirs =
      Command.Args.S (List.map include_dirs_expanded ~f:args_of_include_dir))
 ;;
 
-let build_c
-      ~(kind : Foreign_language.t)
-      ~sctx
-      ~dir
-      ~expander
-      ~include_flags
-      (loc, (src : Foreign.Source.t), dst)
-  =
+let base_flags ~(kind : Foreign_language.t) ~use_standard_flags ~ocaml_config =
+  match kind with
+  | Cxx -> []
+  | C ->
+    (match use_standard_flags with
+     | Some true -> []
+     | None | Some false ->
+       (* In dune < 2.8 flags from ocamlc_config are always added *)
+       List.concat
+         [ Ocaml_config.ocamlc_cflags ocaml_config
+         ; Ocaml_config.ocamlc_cppflags ocaml_config
+         ])
+;;
+
+let compilation_flags ~sctx ~dir ~expander ~loc ~(src : Foreign.Source.t) =
+  let open Action_builder.O in
+  let kind = Foreign.Source.language src in
   let ctx = Super_context.context sctx in
-  let* project = Dune_load.find_project ~dir in
-  let use_standard_flags = Dune_project.use_standard_c_and_cxx_flags project in
-  let* ocaml = Context.ocaml ctx in
-  let base_flags =
-    match kind with
-    | Cxx -> Fdo.cxx_flags ctx
-    | C ->
-      (match use_standard_flags with
-       | Some true -> Fdo.c_flags ctx
-       | None | Some false ->
-         (* In dune < 2.8 flags from ocamlc_config are always added *)
-         let cfg = ocaml.ocaml_config in
-         List.concat
-           [ Ocaml_config.ocamlc_cflags cfg
-           ; Ocaml_config.ocamlc_cppflags cfg
-           ; Fdo.c_flags ctx
-           ])
-  in
-  let* with_user_and_std_flags =
-    Memo.map ~f:(Action_builder.map ~f:(List.append base_flags))
-    @@
-    match src.kind with
+  let* project = Action_builder.of_memo (Dune_load.find_project ~dir) in
+  let* ocaml = Action_builder.of_memo (Context.ocaml ctx) in
+  let+ user_flags =
+    match Foreign.Source.kind src with
     | Ctypes field ->
-      Memo.return
-      @@
-        (match field.build_flags_resolver with
-        | Vendored { c_flags; c_library_flags = _ } ->
-          foreign_flags sctx ~dir ~expander ~flags:c_flags ~language:C
-        | Pkg_config ->
-          let open Action_builder.O in
-          let+ default_flags =
-            let dir = Path.Build.parent_exn dst in
-            default_foreign_flags ~dir ~language:C
-          and+ pkg_config_flags =
-            let lib = External_lib_name.to_string field.external_library_name in
-            Pkg_config.Query.read ~dir (Cflags lib) sctx
-          in
-          default_flags @ pkg_config_flags)
+      (match field.build_flags_resolver with
+       | Vendored { c_flags; c_library_flags = _ } ->
+         foreign_flags sctx ~dir ~expander ~flags:c_flags ~language:C
+       | Pkg_config ->
+         let+ default_flags = default_foreign_flags ~dir ~language:C
+         and+ pkg_config_flags =
+           Pkg_config.Query.read
+             ~loc
+             ~dir
+             (Cflags (External_lib_name.to_string field.external_library_name))
+             sctx
+         in
+         default_flags @ pkg_config_flags)
+    | Stubs { Foreign.Stubs.flags; _ } ->
+      foreign_flags sctx ~dir ~expander ~flags ~language:kind
+  in
+  base_flags
+    ~kind
+    ~use_standard_flags:(Dune_project.use_standard_c_and_cxx_flags project)
+    ~ocaml_config:ocaml.ocaml_config
+  @ user_flags
+;;
+
+let c_compile_args ~sctx ~dir ~expander ~loc ~src ~include_flags =
+  Command.Args.S
+    [ Dyn
+        (Action_builder.map
+           (compilation_flags ~sctx ~dir ~expander ~loc ~src)
+           ~f:(fun flags -> Command.Args.As flags))
+    ; Dyn
+        (let open Action_builder.O in
+         let+ ocaml =
+           Action_builder.of_memo (Context.ocaml (Super_context.context sctx))
+         in
+         Command.Args.S [ A "-I"; Path ocaml.lib_config.stdlib_dir ])
+    ; include_flags
+    ]
+;;
+
+let build_c ~sctx ~dir ~expander ~include_flags (loc, (src : Foreign.Source.t), dst) =
+  let env, sandbox =
+    match Foreign.Source.kind src with
+    | Stubs stubs ->
+      let env, _ =
+        Dep_conf_eval.unnamed
+          Sandbox_config.no_special_requirements
+          stubs.extra_deps
+          ~expander
+      in
+      env, Sandbox_config.no_sandboxing
+    | Ctypes ctypes ->
+      Dep_conf_eval.unnamed Sandbox_config.needs_sandboxing ctypes.deps ~expander
+  in
+  let ctx = Super_context.context sctx in
+  let* ocaml = Context.ocaml ctx in
+  (* Emit warning for Stubs case when standard flags are overridden *)
+  let* () =
+    match Foreign.Source.kind src with
+    | Ctypes _ -> Memo.return ()
     | Stubs { Foreign.Stubs.flags; _ } ->
       (* DUNE3 will have [use_standard_c_and_cxx_flags] enabled by default. To
          guide users toward this change we emit a warning when dune_lang is >=
@@ -257,6 +299,8 @@ let build_c
          [dune-project] file (thus defaulting to [true]), the [:standard] set of
          flags has been overridden and we are not in a vendored project *)
       let has_standard = Ordered_set_lang.Unexpanded.has_standard flags in
+      let* project = Dune_load.find_project ~dir in
+      let use_standard_flags = Dune_project.use_standard_c_and_cxx_flags project in
       let+ is_vendored =
         match Path.Build.drop_build_context dir with
         | Some src_dir -> Source_tree.is_vendored src_dir
@@ -279,20 +323,18 @@ let build_c
                Setting this option to `true` will effectively prevent Dune from silently \
                adding c-flags to the compiler arguments which is the new recommended \
                behaviour."
-          ];
-      foreign_flags sctx ~dir ~expander ~flags ~language:kind
+          ]
   in
   let output_param =
     match ocaml.lib_config.ccomp_type with
     | Msvc -> [ Command.Args.Concat ("", [ A "/Fo"; Target dst ]) ]
-    | Other _ -> [ A "-o"; Target dst ]
+    | Cc | Other _ -> [ A "-o"; Target dst ]
   in
   Super_context.add_rule
     sctx
     ~loc
     ~dir
-    (let open Action_builder.With_targets.O in
-     let src = Path.build (Foreign.Source.path src) in
+    (let src_path = Path.build (Foreign.Source.path src) in
      (* We have to execute the rule in the library directory as the .o is
         produced in the current directory *)
      let c_compiler =
@@ -302,41 +344,39 @@ let build_c
          sctx
          (Ocaml_config.c_compiler ocaml.ocaml_config)
      in
+     let stdlib_dir = ocaml.lib_config.stdlib_dir in
+     let caml_headers =
+       File_selector.of_glob ~dir:(Path.relative stdlib_dir "caml") (Glob.of_string "*.h")
+     in
      Command.run_dyn_prog
        ~dir:(Path.build dir)
+       ~env
+       ~sandbox
        c_compiler
-       ([ Command.Args.dyn with_user_and_std_flags
-        ; S [ A "-I"; Path ocaml.lib_config.stdlib_dir ]
-        ; include_flags
-        ]
-        @ output_param
-        @ [ A "-c"; Dep src ])
-     (* With sandboxing we get errors like: bar.c:2:19: fatal error: foo.cxx:
-        No such file or directory #include "foo.cxx". (These errors happen only
-        when compiling c files.) *)
-     >>| Action.Full.add_sandbox Sandbox_config.no_sandboxing)
+       [ c_compile_args ~sctx ~dir ~expander ~loc ~src ~include_flags
+       ; Hidden_deps (Dep.Set.singleton (Dep.file_selector caml_headers))
+       ; S output_param
+       ; A "-c"
+       ; Dep src_path
+       ])
 ;;
 
 (* TODO: [requires] is a confusing name, probably because it's too general: it
    looks like it's a list of libraries we depend on. *)
-let build_o_files
-      ~sctx
-      ~foreign_sources
-      ~(dir : Path.Build.t)
-      ~expander
-      ~requires
-      ~dir_contents
-  =
+let header_files dir_contents =
+  let header_ext = Filename.Extension.to_string Foreign_language.header_extension in
+  Dir_contents.dirs dir_contents
+  |> List.fold_left ~init:[] ~f:(fun acc dc ->
+    Dir_contents.text_files dc
+    |> Filename.Array.Set.fold ~init:acc ~f:(fun fn acc ->
+      if String.ends_with (Filename.to_string fn) ~suffix:header_ext
+      then Path.relative_fname (Path.build (Dir_contents.dir dc)) fn :: acc
+      else acc))
+;;
+
+let build_include_flags ~sctx ~dir ~expander ~dir_contents ~requires ~src =
   let includes =
-    let h_files =
-      Dir_contents.dirs dir_contents
-      |> List.fold_left ~init:[] ~f:(fun acc dc ->
-        Dir_contents.text_files dc
-        |> Filename.Set.fold ~init:acc ~f:(fun fn acc ->
-          if String.is_suffix fn ~suffix:Foreign_language.header_extension
-          then Path.relative (Path.build (Dir_contents.dir dc)) fn :: acc
-          else acc))
-    in
+    let h_files = header_files dir_contents in
     Command.Args.S
       [ Hidden_deps (Dep.Set.of_files h_files)
       ; Resolve.args
@@ -348,6 +388,20 @@ let build_o_files
              ])
       ]
   in
+  let extra_flags =
+    include_dir_flags ~expander ~dir ~include_dirs:(Foreign.Source.include_dirs src)
+  in
+  Command.Args.S [ includes; extra_flags ]
+;;
+
+let build_o_files
+      ~sctx
+      ~foreign_sources
+      ~(dir : Path.Build.t)
+      ~expander
+      ~requires
+      ~dir_contents
+  =
   let* ext_obj =
     let+ ocaml =
       let ctx = Super_context.context sctx in
@@ -360,38 +414,10 @@ let build_o_files
     ~f:(fun obj (loc, (src : Foreign.Source.t)) ->
       let+ build_file =
         let include_flags =
-          let extra_deps =
-            let extra_deps, sandbox =
-              match src.kind with
-              | Stubs stubs -> Dep_conf_eval.unnamed stubs.extra_deps ~expander
-              | Ctypes _ -> Action_builder.return (), Sandbox_config.default
-            in
-            (* We don't sandbox the C compiler, see comment in [build_file] about
-               this. *)
-            ignore sandbox;
-            Action_builder.map extra_deps ~f:(fun () -> Command.Args.empty)
-          in
-          let extra_flags =
-            include_dir_flags
-              ~expander
-              ~dir
-              ~include_dirs:
-                (match src.kind with
-                 | Stubs stubs -> stubs.include_dirs
-                 | Ctypes _ -> [])
-          in
-          Command.Args.S [ includes; extra_flags; Dyn extra_deps ]
+          build_include_flags ~sctx ~dir ~expander ~dir_contents ~requires ~src
         in
-        let dst = Path.Build.relative dir (obj ^ ext_obj) in
-        let+ () =
-          build_c
-            ~kind:(Foreign.Source.language src)
-            ~sctx
-            ~dir
-            ~expander
-            ~include_flags
-            (loc, src, dst)
-        in
+        let dst = Path.Build.relative dir (obj ^ Filename.Extension.to_string ext_obj) in
+        let+ () = build_c ~sctx ~dir ~expander ~include_flags (loc, src, dst) in
         dst
       in
       Foreign.Source.mode src, Path.build build_file)

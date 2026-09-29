@@ -1,8 +1,10 @@
 Testsuite for (mode plugin).
 
-  $ cat > dune-project <<EOF
-  > (lang dune 2.4)
-  > EOF
+  $ make_dune_project 2.4
+  $ build_dir=_build/default
+  $ plugin=a.cmxs
+  $ main=main/main.exe
+  $ main2=main2/main.exe
 
   $ cat > dune <<EOF
   > (executable
@@ -79,16 +81,21 @@ Testsuite for (mode plugin).
   >   Dynlink.loadfile (Dynlink.adapt_filename "b.cma")
   > EOF
 
-  $ dune build --display short @all 2>&1 | dune_cmd sanitize | grep cmxs | sort
-      ocamlopt a.cmxs
-      ocamlopt b.cmxs
-      ocamlopt foo/bar.cmxs
-      ocamlopt foo/foo.cmxs
+  $ dune build "$plugin" b.cmxs foo/foo.cmxs foo/bar.cmxs "$main" "$main2"
 
-  $ (cd _build/default && main/main.exe)
+  $ dune trace cat | jq_dune -c '
+  >   targetsMatchingFilter(test("\\.cmxs$"))
+  > | select(length > 0)
+  > ' | sort
+  {"target_files":["_build/default/a.cmxs"]}
+  {"target_files":["_build/default/b.cmxs"]}
+  {"target_files":["_build/default/foo/bar.cmxs"]}
+  {"target_files":["_build/default/foo/foo.cmxs"]}
+
+  $ (cd "$build_dir" && "$main")
   12
 
-  $ (cd _build/default && main2/main.exe)
+  $ (cd "$build_dir" && "$main2")
   12
 
   $ dune build @t
@@ -101,7 +108,7 @@ Testsuite for (mode plugin).
   >  (embed_in_plugin_libraries xxx))
   > EOF
 
-  $ dune build @all
+  $ dune build a.exe
   File "dune", line 4, characters 28-31:
   4 |  (embed_in_plugin_libraries xxx))
                                   ^^^
@@ -121,7 +128,7 @@ Testsuite for (mode plugin).
   >  (embed_in_plugin_libraries xxx))
   > EOF
 
-  $ dune build @all
+  $ dune build "$plugin"
 
   $ cat > dune <<EOF
   > (rule (with-stdout-to xxx.ml (echo "let () = print_endline \"Hello, xxx\"")))
@@ -139,7 +146,7 @@ Testsuite for (mode plugin).
   >  (embed_in_plugin_libraries xxx))
   > EOF
 
-  $ dune build @all
-  $ (cd _build/default && main/main.exe)
+  $ dune build "$plugin"
+  $ (cd "$build_dir" && "$main")
   Hello, xxx
   12

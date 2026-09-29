@@ -11,6 +11,11 @@ val to_list : 'a t -> 'a list
 val to_list_rev : 'a t -> 'a list
 val of_list : 'a list -> 'a t
 val concat : 'a t list -> 'a t
+val length : _ t -> int
+val iter : 'a t -> f:('a -> unit) -> unit
+val map : 'a t -> f:('a -> 'b) -> 'b t
+val to_immutable_array : 'a t -> 'a Array.Immutable.t
+val exists : 'a t -> f:('a -> bool) -> bool
 
 (** The current implementation is slow, don't use it on a hot path. *)
 val is_empty : _ t -> bool

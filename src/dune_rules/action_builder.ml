@@ -1,5 +1,6 @@
 open Import
 include Dune_engine.Action_builder
+open Action_types
 open O
 module With_targets = With_targets
 
@@ -23,7 +24,7 @@ let dyn_memo_deps deps =
   a
 ;;
 
-let deps d = dyn_memo_deps (Memo.return (d, ()))
+let deps d = Build_system.record_deps d
 let dep d = deps (Dep.Set.singleton d)
 
 let dyn_deps t =
@@ -35,7 +36,6 @@ let dyn_deps t =
 let path p = deps (Dep.Set.singleton (Dep.file p))
 let paths ps = deps (Dep.Set.of_files ps)
 let path_set ps = deps (Dep.Set.of_files_set ps)
-let dyn_paths paths = dyn_deps (paths >>| fun (x, paths) -> x, Dep.Set.of_files paths)
 let dyn_paths_unit paths = dyn_deps (paths >>| fun paths -> (), Dep.Set.of_files paths)
 let contents p = of_memo (Build_system.read_file p)
 let lines_of p = contents p >>| String.split_lines
@@ -52,20 +52,15 @@ let with_file_targets build ~file_targets : _ With_targets.t =
   { build; targets = Targets.Files.create (Path.Build.Set.of_list file_targets) }
 ;;
 
-let write_file ?(perm = Action.File_perm.Normal) fn s =
+let write_file ?(perm = File_perm.Normal) fn s =
   with_file_targets
     ~file_targets:[ fn ]
     (return (Action.Full.make (Action.Write_file (fn, perm, s))))
 ;;
 
-let write_file_dyn ?(perm = Action.File_perm.Normal) fn s =
-  with_file_targets
-    ~file_targets:[ fn ]
-    (let+ s = s in
-     Action.Full.make (Action.Write_file (fn, perm, s)))
-;;
+let write_file_dyn ?perm fn s = With_targets.write_file_dyn ?perm fn (with_no_targets s)
 
-let with_stdout_to ?(perm = Action.File_perm.Normal) fn t =
+let with_stdout_to ?(perm = File_perm.Normal) fn t =
   with_targets
     ~targets:(Targets.File.create fn)
     (let+ (act : Action.Full.t) = t in
@@ -75,6 +70,13 @@ let with_stdout_to ?(perm = Action.File_perm.Normal) fn t =
 let copy ~src ~dst =
   with_file_targets
     ~file_targets:[ dst ]
+    (path src >>> return (Action.Full.make (Action.Copy (src, dst))))
+;;
+
+let copy_dir ~src ~dst =
+  with_targets
+    ~targets:
+      (Targets.create ~files:Path.Build.Set.empty ~dirs:(Path.Build.Set.singleton dst))
     (path src >>> return (Action.Full.make (Action.Copy (src, dst))))
 ;;
 
@@ -118,7 +120,7 @@ let paths_matching g =
 let ignore x = map x ~f:ignore
 
 let paths_matching ~loc:_ g =
-  (* CR-rgrinberg: how about doing something with this location? Like pushing a
+  (* CR-someday rgrinberg: how about doing something with this location? Like pushing a
      stack frame with it for example *)
   let* () = return () in
   paths_matching g

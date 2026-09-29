@@ -1,6 +1,5 @@
 Demonstrate the generation of the lock directory in the presence of "|"
 
-  $ . ./helpers.sh
   $ mkrepo
 
   $ mkpkg a1 0.0.1 <<EOF
@@ -20,10 +19,11 @@ Demonstrate the generation of the lock directory in the presence of "|"
   - b.0.0.1
 Only a1 or a2 should appear but not both.
 
-  $ cat dune.lock/b.pkg
+  $ cat ${default_lock_dir}/b.0.0.1.pkg
   (version 0.0.1)
   
-  (depends a1)
+  (depends
+   (all_platforms (a1)))
 
 Release a new version of the second package in the disjunction to
 demonstrate that relative version numbers don't affect the
@@ -37,7 +37,6 @@ packages, so comparing their version numbers is meaningless.
   Solution for dune.lock:
   - a1.0.0.1
   - b.0.0.1
-
 
 Release a new version of b specifying version numers of deps. Note
 that only a2 exists with the specified version. If the solver chooses

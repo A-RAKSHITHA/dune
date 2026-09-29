@@ -1,8 +1,14 @@
 open Import
 
-val setup_emit_cmj_rules
+val setup_melange_sources_copy_rules
   :  sctx:Super_context.t
   -> dir:Path.Build.t
+  -> preprocess:Preprocess.With_instrumentation.t Preprocess.Per_module.t
+  -> Modules.t
+  -> unit Memo.t
+
+val setup_emit_cmj_rules
+  :  sctx:Super_context.t
   -> scope:Scope.t
   -> expander:Expander.t
   -> dir_contents:Dir_contents.t

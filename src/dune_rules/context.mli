@@ -51,16 +51,13 @@ val findlib_toolchain : t -> Context_name.t option
 val instrument_with : t -> Lib_name.t list
 val profile : t -> Profile.t
 val merlin : t -> bool
+val cms_cmt_dependency : t -> Workspace.Context.Cms_cmt_dependency.t
 val equal : t -> t -> bool
 val hash : t -> int
 val to_dyn : t -> Dyn.t
 val to_dyn_concise : t -> Dyn.t
 val name : t -> Context_name.t
 val which : t -> Filename.t -> Path.t option Memo.t
-
-(** [Some path/to/foo.exe] if this contexts is for feedback-directed
-    optimization of target path/to/foo.exe *)
-val fdo_target_exe : t -> Path.t option
 
 (** By default Dune builds and installs dynamically linked foreign
     archives (usually named [dll*.so]). It is possible to disable this by
@@ -90,11 +87,16 @@ val implicit : t -> bool
 (** Compare the context names *)
 val compare : t -> t -> Ordering.t
 
-(** [map_exe t exe] returns a version of [exe] that is suitable for being
-    executed on the current machine. For instance, if [t] is a cross-compilation
-    build context, [map_exe t exe] returns the version of [exe] that lives in
-    the host build context. Otherwise, it just returns [exe]. *)
-val map_exe : t -> Path.t -> Path.t
+(** [map_exe ~force_host t exe] returns a version of [exe] that is suitable for
+    being executed on the current machine. When [force_host] is true, always
+    runs as a native host binary, bypassing any target_exec wrapper. Returns:
+    [dependency, actual_program, actual_arguments] *)
+val map_exe
+  :  force_host:bool
+  -> t
+  -> Path.t
+  -> string list
+  -> Path.t * Path.t * string list
 
 (** Query where build artifacts should be installed if the user doesn't specify
     an explicit installation directory. *)

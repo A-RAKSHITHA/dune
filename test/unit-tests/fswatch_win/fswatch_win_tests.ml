@@ -1,7 +1,8 @@
 open Stdune
+module Fswatch_win = Dune_scheduler.For_tests.Fswatch_win
 
 let remove_dot_slash s = String.drop_prefix s ~prefix:".\\" |> Option.value ~default:s
-let create_file fn = Io.String_path.write_file fn ""
+let create_file fn = Io.String_path.write_file_exn fn ""
 let mkdir fn = Unix.mkdir fn 0o777
 
 type event =
@@ -256,18 +257,20 @@ let _ =
 ;;
 
 let run cmd =
-  match
-    snd
-      (Unix.waitpid
-         []
-         (Unix.create_process
-            (List.hd cmd)
-            (Array.of_list cmd)
-            Unix.stdin
-            Unix.stdout
-            Unix.stderr))
-  with
-  | WEXITED 0 -> ()
+  let argv0, args =
+    match cmd with
+    | argv0 :: args -> argv0, args
+    | [] -> Code_error.raise "empty command line" []
+  in
+  let prog =
+    Bin.which ~path:(Env_path.path Env.initial) argv0
+    |> Option.value_exn
+    |> Path.to_string
+  in
+  let args = Array.Immutable.of_list args in
+  let pid = Spawn.spawn ~prog ~argv0 ~args () in
+  match Proc.wait (Pid pid) [] with
+  | Some { status = WEXITED 0; _ } -> ()
   | _ -> assert false
 ;;
 

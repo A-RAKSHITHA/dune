@@ -8,7 +8,7 @@ let all = [ "sexp", Sexp; "csexp", Csexp ]
 
 let arg =
   let doc = Printf.sprintf "$(docv) must be %s" (Arg.doc_alts_enum all) in
-  Arg.(value & opt (enum all) Sexp & info [ "format" ] ~docv:"FORMAT" ~doc)
+  Arg.(value & opt (enum all) Sexp & info [ "format" ] ~docv:"FORMAT" ~doc:(Some doc))
 ;;
 
 let print_as_sexp dyn =
@@ -25,6 +25,27 @@ let print_as_sexp dyn =
   in
   let version = Dune_lang.Syntax.greatest_supported_version_exn Stanza.syntax in
   Pp.to_fmt Stdlib.Format.std_formatter (Dune_lang.Format.pp_top_sexps ~version [ cst ])
+;;
+
+let name_fields ~split_public_names ~names ~public_names =
+  let open Dyn in
+  if split_public_names
+  then (
+    let public_names =
+      match public_names with
+      | Some public_names -> public_names
+      | None -> List.map names ~f:(fun _ -> None)
+    in
+    [ "names", list string names; "public_names", list (option string) public_names ])
+  else (
+    let names =
+      match public_names with
+      | None -> names
+      | Some public_names ->
+        List.map2 names public_names ~f:(fun name public_name ->
+          Option.value public_name ~default:name)
+    in
+    [ "names", list string names ])
 ;;
 
 let print_dyn t dyn =

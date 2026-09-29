@@ -1,0 +1,18 @@
+(library
+ (name cram_tests)
+ (inline_tests)
+ (libraries
+  stdune
+  dune_engine
+  dune_rules
+  dune_tests_common
+  fiber
+  memo
+  ;; This is because of the (implicit_transitive_deps false)
+  ;; in dune-project
+  ppx_expect.config
+  ppx_expect.config_types
+  base
+  ppx_inline_test.config)
+ (preprocess
+  (pps ppx_expect)))

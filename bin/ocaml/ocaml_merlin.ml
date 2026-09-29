@@ -17,12 +17,29 @@ module Selected_context = struct
       & info
           [ "context" ]
           ~docv:"CONTEXT"
-          ~doc:"Select the Dune build context that will be used to return information")
+          ~doc:
+            (Some "Select the Dune build context that will be used to return information"))
   ;;
 end
 
+module Merlin = Dune_rules.Merlin
+
+module Output_format = struct
+  type t =
+    [ `Text
+    | `Json
+    ]
+
+  let all = [ "text", `Text; "json", `Json ]
+end
+
 module Server : sig
-  val dump : selected_context:Context_name.t -> string -> unit Fiber.t
+  val dump
+    :  selected_context:Context_name.t
+    -> format:Output_format.t
+    -> string
+    -> unit Fiber.t
+
   val dump_dot_merlin : selected_context:Context_name.t -> string -> unit Fiber.t
 
   (** Once started the server will wait for commands on stdin, read the
@@ -85,13 +102,13 @@ end = struct
      this directory. *)
   let get_merlin_files_paths dir =
     let merlin_path =
-      Path.Build.relative dir Dune_rules.Merlin_ident.merlin_folder_name
+      Path.Build.relative_fname dir Dune_rules.Merlin_ident.merlin_folder_name
     in
     Path.build merlin_path
     |> Path.readdir_unsorted
     |> Result.value ~default:[]
-    |> List.sort ~compare:String.compare
-    |> List.map ~f:(fun f -> Path.Build.relative merlin_path f |> Path.build)
+    |> List.sort ~compare:Filename.compare
+    |> List.map ~f:(fun f -> Path.Build.relative_fname merlin_path f |> Path.build)
   ;;
 
   module Merlin = Dune_rules.Merlin
@@ -174,11 +191,11 @@ end = struct
     >>| Merlin_conf.to_stdout
   ;;
 
-  let dump ~selected_context s =
+  let dump ~selected_context ~format s =
     to_local ~selected_context s
     >>| function
     | Error mess -> Printf.eprintf "%s\n%!" mess
-    | Ok path -> get_merlin_files_paths path |> List.iter ~f:Merlin.Processed.print_file
+    | Ok path -> get_merlin_files_paths path |> Merlin.Processed.print_files format
   ;;
 
   let dump_dot_merlin ~selected_context s =
@@ -206,6 +223,13 @@ end = struct
   ;;
 end
 
+let scheduler_config builder =
+  builder
+  |> Common.Builder.forbid_builds
+  |> Common.Builder.disable_log_file
+  |> Common.init
+;;
+
 module Dump_config = struct
   let info =
     Cmd.info
@@ -218,16 +242,18 @@ module Dump_config = struct
 
   let term =
     let+ builder = Common.Builder.term
-    and+ dir = Arg.(value & pos 0 dir "" & info [] ~docv:"PATH")
+    (* CR-someday Alizter: document this option *)
+    and+ dir = Arg.(value & pos 0 dir "" & info [] ~docv:"PATH" ~doc:None)
+    and+ format =
+      Arg.(
+        value
+        & opt (enum Output_format.all) `Text
+        & info [ "format" ] ~docv:"FORMAT" ~doc:(Some "Output format (text or json)."))
     and+ selected_context = Selected_context.arg in
-    let common, config =
-      let builder =
-        let builder = Common.Builder.forbid_builds builder in
-        Common.Builder.disable_log_file builder
-      in
-      Common.init builder
-    in
-    Scheduler.go ~common ~config (fun () -> Server.dump ~selected_context dir)
+    let _common, config = scheduler_config builder in
+    (* CR-soon rgrinberg: remove pointless args *)
+    Scheduler_setup.no_build_no_rpc ~config (fun () ->
+      Server.dump ~selected_context ~format dir)
   ;;
 
   let command = Cmd.v info term
@@ -251,14 +277,9 @@ let start_session_info name = Cmd.info name ~doc ~man
 let start_session_term =
   let+ builder = Common.Builder.term
   and+ selected_context = Selected_context.arg in
-  let common, config =
-    let builder =
-      let builder = Common.Builder.forbid_builds builder in
-      Common.Builder.disable_log_file builder
-    in
-    Common.init builder
-  in
-  Scheduler.go ~common ~config (Server.start ~selected_context)
+  let _common, config = scheduler_config builder in
+  (* CR-soon rgrinberg: remove pointless args *)
+  Scheduler_setup.no_build_no_rpc ~config (Server.start ~selected_context)
 ;;
 
 let command = Cmd.v (start_session_info "ocaml-merlin") start_session_term
@@ -290,17 +311,13 @@ module Dump_dot_merlin = struct
             []
             ~docv:"PATH"
             ~doc:
-              "The path to the folder of which the configuration should be printed. \
-               Defaults to the current directory.")
+              (Some
+                 "The path to the folder of which the configuration should be printed. \
+                  Defaults to the current directory."))
     and+ selected_context = Selected_context.arg in
-    let common, config =
-      let builder =
-        let builder = Common.Builder.forbid_builds builder in
-        Common.Builder.disable_log_file builder
-      in
-      Common.init builder
-    in
-    Scheduler.go ~common ~config (fun () ->
+    let _common, config = scheduler_config builder in
+    (* CR-soon rgrinberg: stop taking pointless args *)
+    Scheduler_setup.no_build_no_rpc ~config (fun () ->
       match path with
       | Some s -> Server.dump_dot_merlin ~selected_context s
       | None -> Server.dump_dot_merlin ~selected_context ".")

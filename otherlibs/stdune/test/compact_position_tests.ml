@@ -24,6 +24,22 @@ let%expect_test "round trip tests" =
   [%expect {| [PASS] |}];
   test { base with pos_cnum = 1_000; pos_lnum = 2_200; pos_bol = 300 };
   [%expect {| [PASS] |}];
+  test { base with pos_cnum = (1 lsl 21) - 1; pos_lnum = 2_200; pos_bol = 300 };
+  [%expect {| [PASS] |}];
+  test { base with pos_cnum = 1 lsl 21; pos_lnum = 2_200; pos_bol = 300 };
+  [%expect {| position too large |}];
+  test { base with pos_cnum = -1; pos_lnum = 2_200; pos_bol = 300 };
+  [%expect {| position too large |}];
   test { base with pos_cnum = 1 lsl 32; pos_lnum = 2_200; pos_bol = 300 };
   [%expect {| position too large |}]
+;;
+
+let%expect_test "same-line locations at the field boundary" =
+  let pos = { Position.none with pos_cnum = 1 lsl 15 } in
+  let loc = { Lexbuf.Loc.start = pos; stop = pos } in
+  (match Compact_position.of_loc loc with
+   | Same_line _ -> print_endline "same-line encoding overflowed"
+   | Loc _ -> print_endline "used the wider encoding"
+   | Loc_does_not_fit -> print_endline "location does not fit");
+  [%expect {| used the wider encoding |}]
 ;;

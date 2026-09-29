@@ -54,31 +54,15 @@ Here are the most common commands you'll be running:
    $ ./dune.exe build @foo
 
 
-Note that tests are currently written for version 5.1.1 of the OCaml compiler.
-Some tests depend on the specific wording of compilation errors which can change
-between compiler versions, so to reliably run the tests make sure that
-``ocaml.5.1.1`` is installed. The ``TEST_OCAMLVERSION`` in the ``Makefile`` at
-the root of the Dune repo contains the current compiler version for which tests
-are written.
-
 .. seealso:: :doc:`explanation/bootstrap`
 
 Writing Tests
 =============
 
-Most of our tests are written as expectation-style tests. While creating such
-tests, the developer writes some code and then lets the system insert the output
-produced during the code execution. The system puts it right next to the code in
-the source file.
-
-Once you write and commit a test, the system checks that the captured output
-matches the one produced by a fresh code execution. When the two don't match,
-the test fails. The system then displays a diff between what was expected and
-what the code produced.
-
-We write both our unit tests and integration tests in this way. For unit tests,
-we use the ppx_expect_ framework, where we introduce tests via
-``let%expect_test``, and ``[%expect ...]`` nodes capture expectations:
+Dune uses expectation-style tests for both unit tests and integration tests. For
+unit tests, we use the ppx_expect_ framework, where we introduce tests via
+``let%expect_test``, and where we use ``[%expect ...]`` nodes to capture
+expectations:
 
 .. code:: ocaml
 
@@ -89,15 +73,25 @@ we use the ppx_expect_ framework, where we introduce tests via
       |}]
 
 For integration tests, we use a system similar to `Cram tests
-<https://bitheap.org/cram/>`_ for testing shell commands and their behavior:
+<https://bitheap.org/cram/>`_ for testing shell commands and their behavior.
+
+Test the output of ``echo``:
 
 .. code:: console
 
    $ echo 'Hello, world!'
    Hello, world!
 
+Test a nonzero exit status:
+
+.. code:: console
+
    $ false
    [1]
+
+Test a multi-line shell invocation:
+
+.. code:: console
 
    $ cat <<EOF
    > multi
@@ -106,15 +100,42 @@ For integration tests, we use a system similar to `Cram tests
    multi
    line
 
+Cram tests run with ``sh`` by default. Use only portable shell syntax unless a
+:doc:`/reference/dune/cram` stanza selects ``(shell bash)`` for the test.
+
+These tests must be reproducible, so it is often necessary to filter command
+output to show only relevant parts. This also prevents tests from breaking due
+to unrelated changes and makes them easier to read.
+
+For tests that run on multiple platforms, use only commands available
+everywhere. When platform-specific functionality is needed, Cram tests can use
+``dune_cmd``, an OCaml tool that provides portable implementations of common
+operations: file statistics, waiting for files to appear, waiting for
+filesystem clocks to advance, and a subset of sed features with clearer syntax.
+
+The ``censor`` helper replaces hex digests and other values subject to change
+with stable labels. Distinct digests get distinct labels:
+
+.. code::
+
+   $ echo paths | censor
+   _build/.sandbox/$DIGEST1/foo.txt
+   _build/default/.ppx/$DIGEST2/ppx.exe
+
 .. _ppx_expect:      https://github.com/janestreet/ppx_expect
 
 .. seealso::
 
-   `actions_to_sh tests <https://github.com/ocaml/dune/blob/3.12.2/test/expect-tests/dune_engine/action_to_sh_tests.ml>`_
+   `timer tests`_
      An example of expect-tests.
 
-   `mdx-stanza/locks.t <https://github.com/ocaml/dune/blob/3.12.2/test/blackbox-tests/test-cases/mdx-stanza/locks.t>`_
-     An example of Cram test.
+   `Cram test examples`_
+     A collection of Cram tests.
+
+.. _timer tests:
+   https://github.com/ocaml/dune/blob/main/test/expect-tests/timer_tests.ml
+.. _Cram test examples:
+   https://github.com/ocaml/dune/tree/main/test/blackbox-tests/test-cases/cram
 
 When running Dune inside tests, the ``INSIDE_DUNE`` environment variable is set.
 This has the following effects:
@@ -128,6 +149,47 @@ This has the following effects:
 This list is not exhaustive and may change in the future. In order to find the
 exact behaviour, it is recommended to search for ``INSIDE_DUNE`` in the
 codebase.
+
+Inspecting Traces with jq
+-------------------------
+
+Dune writes trace events to ``_build/trace.csexp`` in canonical s-expression
+format. Use ``dune trace cat`` to read and convert these events to JSON (one
+object per line). The test suite includes a shared jq library at
+``test/blackbox-tests/dune.jq`` with helper functions for common patterns.
+
+.. code:: console
+
+   # Use the shared library with include
+   $ dune trace cat | jq 'include "dune"; processes'
+
+   # Filter events by category
+   $ dune trace cat | jq 'select(.cat == "cache")'
+
+Use the ``-s`` (slurp) flag when you need to collect all events into an array,
+for example when counting, sorting, or accessing first/last events:
+
+.. code:: console
+
+   $ dune trace cat | jq -s '[ .[] | select(.cat == "cache") ] | length'
+   $ dune trace cat | jq -s 'first | {name, cat}'
+
+Enable additional trace categories with ``DUNE_TRACE`` (see
+``src/dune_trace/category.ml`` for the full list):
+
+.. code:: console
+
+   $ export DUNE_TRACE=cache
+   $ dune build && dune trace cat | jq 'include "dune"; cacheMisses'
+
+For deterministic test output, use helpers like ``redactCommandTimes`` to
+replace timing values that vary between runs:
+
+.. code:: console
+
+   $ dune trace cat | jq 'include "dune"; select(.cat == "cram") | .args | redactCommandTimes'
+
+.. seealso:: :doc:`advanced/profiling-dune` for loading traces into chrome://tracing
 
 Guidelines
 ----------
@@ -171,15 +233,15 @@ are used when running the test suite.
 Running ``nix develop`` can take a while the first time, therefore it is
 advisable to save the state in a profile.
 
-```sh
-nix develop --profile nix/profiles/dune
-```
+.. code:: console
+
+   nix develop --profile nix/profiles/dune
 
 And to load the profile:
 
-```sh
-nix develop nix/profiles/dune
-```
+.. code:: console
+
+   nix develop nix/profiles/dune
 
 This profile might need to be updated from time to time, since the bootstrapped
 version of Dune may become stale. This can be done by running the first command.
@@ -191,9 +253,49 @@ We have the following shells for specific tasks:
 - ``nix develop .#slim-melange``: same as above, but additionally includes the
   ``melange`` and ``mel`` packages
 - Building documentation requires ``nix develop .#doc``.
-- For running the Coq tests, you can use ``nix develop .#coq``. NB: Coq native
-  is not currently installed; this will cause some of the tests to fail. It's
-  currently better to fallback to opam in this case.
+- For running the Rocq tests, you can use ``nix develop .#rocq``. There are
+  two classes of tests:
+
+  + ``make test-rocq``: these work well on a regular Dune opam dev switch
+  + ``make test-rocq-native``: these require the Rocq native compiler to run, and thus need OCaml 4.x
+
+Testing Reverse Dependencies
+============================
+
+You can test how changes to Dune affect reverse dependencies (packages that
+depend on Dune) using Nix. The ``revdeps`` flake output builds OCaml packages
+with a specified version of Dune.
+
+.. code:: console
+
+   # Build lwt with current version of dune
+   $ nix build .#revdeps.x86_64-linux.lwt --override-input revdeps-dune path:.
+
+   # Build base and core with dune 3.20.2
+   $ nix build .#revdeps.x86_64-linux.{base,core} --override-input revdeps-dune github:ocaml/dune/3.20.2
+
+   # Build all revdeps
+   $ nix build .#revdeps.x86_64-linux.all --override-input revdeps-dune path:.
+
+Bisecting Regressions
+---------------------
+
+To find which commit broke a reverse dependency, use ``git bisect`` with
+``--no-checkout`` to keep the current flake in place while varying the Dune
+source:
+
+.. code:: console
+
+   $ git bisect start --no-checkout
+   $ git bisect bad HEAD
+   $ git bisect good 3.16.0
+
+   $ git bisect run sh -c 'nix build .#revdeps.x86_64-linux.lwt --override-input revdeps-dune "github:ocaml/dune/$(git rev-parse BISECT_HEAD)"'
+
+The ``--no-checkout`` flag ensures that the working tree stays on the current
+branch (with the working ``revdeps`` output), while ``BISECT_HEAD`` points to
+the commit being tested. The Dune source is fetched from GitHub for each
+bisect step.
 
 Releasing Dune
 ==============
@@ -232,7 +334,7 @@ to add a new stanza is:
 - Extend ``Stanza.t`` with a new constructor to represent the new stanza
 - Modify ``Dune_file`` to parse the Dune language into this constructor
 - Modify the rules to interpret this stanza into rules, usually done in
-  ``Gen_rules```
+  ``Gen_rules``
 
 Versioning
 ----------
@@ -262,7 +364,7 @@ Sometimes, Dune's versioning policy is too strict. For example, it doesn't work
 in the following situations:
 
 - When most Dune independent extensions only exist inside Dune for development
-  convenience, e.g., build rules for Coq. Such extensions would like to impose
+  convenience, e.g., build rules for Rocq. Such extensions would like to impose
   their own versioning policy.
 
 - When experimental features cannot guarantee Dune's strict backwards
@@ -271,13 +373,13 @@ in the following situations:
 To handle both of these use cases, Dune allows the definition of new languages
 (with the same syntax). These languages have their own versioning scheme and
 their own stanzas (or fields). In Dune itself, ``Syntax.t`` represents such
-languages. Here's an example of how the Coq syntax is defined:
+languages. Here's an example of how the Rocq syntax is defined:
 
 .. code:: ocaml
 
-   let coq_syntax =
-     Dune_lang.Syntax.create ~name:"coq" ~desc:"the coq extension (experimental)"
-      [ ((0, 1), `Since (1, 9)); ((0, 2), `Since (2, 5)) ]
+   let rocq_syntax =
+     Dune_lang.Syntax.create ~name:"rocq" ~desc:"Rocq Prover build language"
+      [ ((0, 11), `Since (3, 21)); ((0, 12), `Since (3, 22)) ]
 
 The list provides which versions of the syntax are provided and which version of
 Dune introduced them.
@@ -286,8 +388,8 @@ Such languages must be enabled in the ``dune`` project file separately:
 
 .. code:: dune
 
-   (lang dune 3.18)
-   (using coq 0.8)
+   (lang dune {{latest}})
+   (using rocq 0.13)
 
 If such extensions are experimental, it's recommended that they pass
 ``~experimental:true``, and that their versions are below 1.0.
@@ -404,6 +506,7 @@ For links, prefer references that use ``:doc:`` (link to a whole document) or
 ``:term:`` (link to a definition in the glossary) to ``:ref:``.
 
 Use the right lexers:
+
 - ``dune`` for ``dune`` and related files
 - ``opam`` for opam files
 - ``console`` for shell sessions and commands (start with ``$``)
@@ -488,17 +591,17 @@ in particular with the team.
 - Parameter signatures should be self descriptive. Use labels when the types
   alone aren't sufficient to make the signature readable.
 
-Bad:
+  Bad:
 
-.. code:: ocaml
+  .. code:: ocaml
 
-   val display_name : string -> string -> _ Pp.t
+     val display_name : string -> string -> _ Pp.t
 
-Good:
+  Good:
 
-.. code:: ocaml
+  .. code:: ocaml
 
-   val display_name : first_name:string -> last_name:string -> _ Pp.t
+     val display_name : first_name:string -> last_name:string -> _ Pp.t
 
 - Avoid type aliases when possible. Yes, they might make some type signatures
   more readable, but they make the code harder to grep and make Merlin's
@@ -524,57 +627,57 @@ Good:
   annoying violator of this principle is the "logic-less chain of functions"
   helper. For example:
 
-.. code:: ocaml
+  .. code:: ocaml
 
-   let foo t = bar t |> baz
+     let foo t = bar t |> baz
 
-If ``bar`` and ``baz`` are already public, then there's no need to add yet
-another helper to save the caller a line of code.
+  If ``bar`` and ``baz`` are already public, then there's no need to add yet
+  another helper to save the caller a line of code.
 
 - Define bindings as close to their use site as possible. When they're far
   apart, reading code requires scrolling and IDE tools to understand the code.
 
-Bad:
+  Bad:
 
-.. code:: ocaml
+  .. code:: ocaml
 
-   let dir = .. in
-   (* 50 odd lines or so that don't use [dir] *)
-   f dir
+     let dir = .. in
+     (* 50 odd lines or so that don't use [dir] *)
+     f dir
 
-Good:
+  Good:
 
-.. code:: ocaml
+  .. code:: ocaml
 
-  let dir = .. in
-  f dir
+     let dir = .. in
+     f dir
 
 - A corollary to the previous guideline: keep the scope of bindings as small as
   possible.
 
-Bad:
+  Bad:
 
-.. code:: ocaml
+  .. code:: ocaml
 
-   let x1 = f foo in let x2 = f bar in
-   let y1 = g foo in let y2 = g bar in
-   let dx = x2 -. x1 in
-   let dy = y2 -. y1 in
-   dx^2 +. dy^2
-
-Good:
-
-.. code:: ocaml
-
-   let dx =
      let x1 = f foo in let x2 = f bar in
-     x2 -. x1
-   in
-   let dy =
      let y1 = g foo in let y2 = g bar in
-     y2 -. y1
-   in
-   dx^2 +. dy^2
+     let dx = x2 -. x1 in
+     let dy = y2 -. y1 in
+     dx^2 +. dy^2
+
+  Good:
+
+  .. code:: ocaml
+
+     let dx =
+       let x1 = f foo in let x2 = f bar in
+       x2 -. x1
+     in
+     let dy =
+       let y1 = g foo in let y2 = g bar in
+       y2 -. y1
+     in
+     dx^2 +. dy^2
 
 - Prefer ``Code_error.raise`` instead of ``assert false``. The reader often has
   no idea what invariant is broken by the ``assert false``. Kindly describe it
@@ -599,42 +702,42 @@ Good:
   Avoid it altogether if possible, or add a type annotation if
   necessary.
 
-Bad:
+  Bad:
 
-.. code:: ocaml
+  .. code:: ocaml
 
-    let result = A.b () in
-    match result.A.field with
-    | B.Constructor -> ...
+     let result = A.b () in
+     match result.A.field with
+     | B.Constructor -> ...
 
-Good:
+  Good:
 
-.. code:: ocaml
+  .. code:: ocaml
 
-    let result : A.t = A.b () in
-    match (result.field : B.t) with
-    | Constructor -> ...
+     let result : A.t = A.b () in
+     match (result.field : B.t) with
+     | Constructor -> ...
 
 - When constructing records, use the qualified names in in the record. Do not
   open the record. The local open syntax pulls in all kinds of names from the
   opened module and might shadow the values that you're trying to put into the
   record, leading to difficult debugging.
 
-Bad; if ``A.value`` exists, it will pick that over ``value``:
+  Bad; if ``A.value`` exists, it will pick that over ``value``:
 
-.. code:: ocaml
+  .. code:: ocaml
 
-    let value = 42 in
-    let record = A.{ field = value; other } in
-    ...
+     let value = 42 in
+     let record = A.{ field = value; other } in
+     ...
 
-Good:
+  Good:
 
-.. code:: ocaml
+  .. code:: ocaml
 
-    let value = 42 in
-    let record = { A.field = value; other } in
-    ...
+     let value = 42 in
+     let record = { A.field = value; other } in
+     ...
 
 - Stage functions explicitly with the ``Staged`` module.
 
@@ -645,36 +748,36 @@ Good:
   annotations to the ignored value ``let (_ : t) = ...``. We do this convention
   because:
 
- * We need to make sure we never ignore ``Fiber.t`` accidentally. Functions that
-   return ``Fiber.t`` are always free of side effects so we need to bind on the
-   result to force the side effect.
+  * We need to make sure we never ignore ``Fiber.t`` accidentally. Functions that
+    return ``Fiber.t`` are always free of side effects so we need to bind on the
+    result to force the side effect.
 
- * Whenever a function is changed to return an error via its return value, we
-   want the compiler to notify all the callers that need to be updated.
+  * Whenever a function is changed to return an error via its return value, we
+    want the compiler to notify all the callers that need to be updated.
 
 - To write a ``to_dyn`` function on a record type, use the following pattern. It
   ensures that the pattern matching will break when a field is added. To ignore
   a field, add ``; d = _``, not ``; _``.
 
-.. code:: ocaml
+  .. code:: ocaml
 
-    let to_dyn {a; b; c} =
-      Dyn.record
-        [ ("a", A.to_dyn a)
-        ; ("b", B.to_dyn b)
-        ; ("c", C.to_dyn c)
-        ]
+     let to_dyn {a; b; c} =
+       Dyn.record
+         [ ("a", A.to_dyn a)
+         ; ("b", B.to_dyn b)
+         ; ("c", C.to_dyn c)
+         ]
 
 - To write an equality function, use the following pattern (this applies to
   other kinds of binary functions). The same remarks about about pattern
   matching and ignoring fields apply.
 
-.. code:: ocaml
+  .. code:: ocaml
 
-    let equal {a; b; c} t =
-      A.equal a t.a &&
-      B.equal b t.b &&
-      C.equal c t.c
+     let equal {a; b; c} t =
+       A.equal a t.a &&
+       B.equal b t.b &&
+       C.equal c t.c
 
 Subjective Style Points
 -----------------------
@@ -696,18 +799,18 @@ to keep the code consistent.
 
 - Do not write inverted if-else expressions.
 
-Bad:
+  Bad:
 
-.. code:: ocaml
+  .. code:: ocaml
 
-   (* try reading this out loud without short circuiting your brain *)
-   if not x then foo else bar
+     (* try reading this out loud without short circuiting your brain *)
+     if not x then foo else bar
 
-Good:
+  Good:
 
-.. code:: ocaml
+  .. code:: ocaml
 
-   if x then bar else foo
+     if x then bar else foo
 
 - We prefer snake_casing identifiers. This includes the names of modules and
   module types.
@@ -715,17 +818,17 @@ Good:
 - Avoid qualifying constructors and record fields. Instead, add type
   annotations to the type being matched on or being constructed, e.g.,
 
-Bad:
+  Bad:
 
-.. code:: ocaml
+  .. code:: ocaml
 
-   let foo = Command.Args.S []
+     let foo = Command.Args.S []
 
-Good:
+  Good:
 
-.. code:: ocaml
+  .. code:: ocaml
 
-   let (foo : _ Command.Args.t) = S []
+     let (foo : _ Command.Args.t) = S []
 
 Benchmarking
 ============
@@ -783,16 +886,6 @@ Melange Bench
 We also benchmark a demo Melange project's build time:
 
 https://ocaml.github.io/dune/dev/bench/
-
-Monorepo Benchmark
-------------------
-
-We benchmark the performance of Dune in building a large monorepo in every
-PR. The benchmark results can be found here:
-
-https://bench.ci.dev/ocaml/dune/branch/main?worker=fermat&image=bench%2Fmonorepo%2Fbench.Dockerfile
-
-You can find more information about these benchmarks `here <./dev/monorepo-bench.md>`_.
 
 Formatting
 ==========

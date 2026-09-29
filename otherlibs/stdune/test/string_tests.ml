@@ -1,4 +1,4 @@
-open! Stdune
+open Stdune
 open Dyn
 open Dune_tests_common
 
@@ -206,4 +206,164 @@ let%expect_test _ =
 let%expect_test _ =
   split ":::" ~on:':';
   [%expect {| [ ""; ""; ""; "" ] |}]
+;;
+
+let%expect_test "split functions agree with the standard library" =
+  List.iter [ ""; "a"; ":"; "a:b"; "::a::b::" ] ~f:(fun s ->
+    let expected = Stdlib.String.split_on_char ':' s in
+    assert (List.equal String.equal (String.split s ~on:':') expected);
+    assert (List.equal String.equal (String.split_on_char ~sep:':' s) expected));
+  print_endline "all splits agree";
+  [%expect {| all splits agree |}]
+;;
+
+let%expect_test "extract blank separated words" =
+  List.iter [ ""; " \t "; "one"; " one\ttwo  three " ] ~f:(fun s ->
+    String.extract_blank_separated_words s |> list string |> print_dyn);
+  [%expect
+    {|
+    []
+    []
+    [ "one" ]
+    [ "one"; "two"; "three" ]
+    |}]
+;;
+
+let search_test_strings =
+  [ ""
+  ; "a"
+  ; "abcdefgh"
+  ; "abcdefghi"
+  ; String.init 257 ~f:(fun i -> Char.chr (i land 0xff))
+  ]
+;;
+
+let%expect_test "contains agrees with the standard library" =
+  List.iter search_test_strings ~f:(fun s ->
+    for code = 0 to 255 do
+      let char = Char.chr code in
+      assert (Bool.equal (String.contains s char) (Stdlib.String.contains s char))
+    done);
+  let unchanged = "unchanged" in
+  assert (String.escape_only 'x' unchanged == unchanged);
+  print_endline "all searches agree";
+  [%expect {| all searches agree |}]
+;;
+
+let%expect_test "forward searches agree with the standard library" =
+  List.iter search_test_strings ~f:(fun s ->
+    for pos = 0 to String.length s do
+      for code = 0 to 255 do
+        let char = Char.chr code in
+        let expected = Stdlib.String.index_from_opt s pos char in
+        assert (Option.equal Int.equal (String.index_from s pos char) expected);
+        assert (Option.equal Int.equal (String.index_from_opt s pos char) expected);
+        if pos = 0 then assert (Option.equal Int.equal (String.index_opt s char) expected);
+        assert (
+          Int.equal
+            (String.index_from_unchecked s pos char)
+            (Option.value expected ~default:(-1)));
+        assert (
+          Bool.equal
+            (String.contains_from s pos char)
+            (Stdlib.String.contains_from s pos char))
+      done
+    done);
+  print_endline "all searches agree";
+  [%expect {| all searches agree |}]
+;;
+
+let%expect_test "checked forward searches reject invalid positions" =
+  let raises_invalid_argument f =
+    match f () with
+    | exception Invalid_argument _ -> true
+    | _ -> false
+  in
+  List.iter search_test_strings ~f:(fun s ->
+    List.iter
+      [ -1; String.length s + 1 ]
+      ~f:(fun pos ->
+        assert (raises_invalid_argument (fun () -> String.index_from s pos '\000'));
+        assert (raises_invalid_argument (fun () -> String.index_from_opt s pos '\000'));
+        assert (raises_invalid_argument (fun () -> String.contains_from s pos '\000'))));
+  print_endline "all invalid positions rejected";
+  [%expect {| all invalid positions rejected |}]
+;;
+
+let%expect_test "bounded bytes search agrees with a scalar search" =
+  let scalar_index_in_range bytes ~pos ~len char =
+    let stop = pos + len in
+    let rec loop i =
+      if i = stop
+      then -1
+      else if Char.equal (Bytes.unsafe_get bytes i) char
+      then i
+      else loop (i + 1)
+    in
+    loop pos
+  in
+  let bytes = Bytes.of_string (String.init 17 ~f:(fun i -> Char.chr (i * 47 land 255))) in
+  for pos = 0 to Bytes.length bytes do
+    for len = 0 to Bytes.length bytes - pos do
+      for code = 0 to 255 do
+        let char = Char.chr code in
+        assert (
+          Int.equal
+            (Bytes.index_in_range_unchecked bytes ~pos ~len char)
+            (scalar_index_in_range bytes ~pos ~len char))
+      done
+    done
+  done;
+  let all_bytes = Bytes.of_string (String.init 256 ~f:Char.chr) in
+  for code = 0 to 255 do
+    assert (
+      Int.equal
+        (Bytes.index_in_range_unchecked all_bytes ~pos:code ~len:1 (Char.chr code))
+        code)
+  done;
+  print_endline "all bounded searches agree";
+  [%expect {| all bounded searches agree |}]
+;;
+
+let%expect_test "reverse searches agree with the standard library" =
+  List.iter search_test_strings ~f:(fun s ->
+    for pos = -1 to String.length s - 1 do
+      for code = 0 to 255 do
+        let char = Char.chr code in
+        let expected = Stdlib.String.rindex_from_opt s pos char in
+        assert (Option.equal Int.equal (String.rindex_from s pos char) expected);
+        assert (
+          Int.equal
+            (String.rindex_from_unchecked s pos char)
+            (Option.value expected ~default:(-1)))
+      done
+    done);
+  print_endline "all searches agree";
+  [%expect {| all searches agree |}]
+;;
+
+let%expect_test "split_lines preserves carriage returns outside CRLF" =
+  List.iter [ "\r"; "first\n\r"; "first\rsecond"; "first\r\nsecond" ] ~f:(fun s ->
+    String.split_lines s |> list string |> print_dyn);
+  [%expect
+    {|
+    []
+    [ "first" ]
+    [ "first\rsecond" ]
+    [ "first"; "second" ]
+    |}]
+;;
+
+let%expect_test "table dedupe_by preserves first occurrences across calls" =
+  let dedupe = String.Table.dedupe_by ~key:fst |> Staged.unstage in
+  let print values = dedupe values |> list (pair string int) |> print_dyn in
+  print [];
+  print [ "a", 1; "b", 2; "a", 3; "c", 4; "b", 5 ];
+  print [ "c", 6; "a", 7; "c", 8 ];
+  [%expect
+    {|
+    []
+    [ ("a", 1); ("b", 2); ("c", 4) ]
+    [ ("c", 6); ("a", 7) ]
+    |}]
 ;;

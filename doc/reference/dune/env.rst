@@ -16,6 +16,12 @@ The first form ``(<profile> <settings>)`` that corresponds to the selected build
 profile will be used to modify the environment in this directory. You can use
 ``_`` to match any build profile.
 
+Profiles are not declared by ``env`` stanzas. Any valid profile name can be
+selected on the command line or in ``dune-workspace``. ``env`` stanzas only
+provide settings that are looked up later when a context is built with a
+matching profile. For example, a workspace context using ``(profile dbg)`` can
+pick up settings from an ``(env (dbg ...))`` stanza in the project.
+
 Fields supported in ``<settings>`` are:
 
 - any OCaml flags field. See :doc:`/concepts/ocaml-flags` for more details.
@@ -26,9 +32,10 @@ Fields supported in ``<settings>`` are:
 - ``(c_flags <flags>)`` and ``(cxx_flags <flags>)`` specify compilation flags
   for C and C++ stubs, respectively. See :doc:`library` for more details.
 
-- ``(env-vars (<var1> <val1>) .. (<varN> <valN>))`` will add the corresponding
+- ``(env_vars (<var1> <val1>) .. (<varN> <valN>))`` will add the corresponding
   variables to the environment where the build commands are executed and are
-  used by ``dune exec``.
+  used by ``dune exec``. This field has been available since Dune 3.24. The
+  dashed spelling ``env-vars`` is also supported for compatibility.
 
 - ``(menhir_flags <flags>))`` specifies flags for Menhir stanzas. This flag was
   replaced by the ``(menhir)`` field (see below) starting in version 3.0 of the
@@ -46,7 +53,7 @@ Fields supported in ``<settings>`` are:
   ``separate``.
 
 - ``(js_of_ocaml (sourcemap <mode>))`` controls whether to generate sourcemap
-  or not where ``<mode>`` is either ``no``, ``file`` (to generate sourcemap in a ``.map`` file next the the generated javascript file) or ``inline`` (to inline the sourcemap at the end of the generated JavaScript file).
+  or not where ``<mode>`` is either ``no``, ``file`` (to generate sourcemap in a ``.map`` file next to the generated javascript file) or ``inline`` (to inline the sourcemap at the end of the generated JavaScript file).
 
 - ``(js_of_ocaml (runtest_alias <alias-name>))`` specifies the alias under which
   :ref:`inline_tests` and tests (:ref:`tests-stanza`) run for the ``js`` mode.
@@ -61,7 +68,7 @@ Fields supported in ``<settings>`` are:
   ``separate``.
 
 - ``(wasm_of_ocaml (sourcemap <mode>))`` controls whether to generate sourcemap
-  or not where ``<mode>`` is either ``no``, ``file`` (to generate sourcemap in a ``.map`` file next the the generated javascript file) or ``inline`` (to inline the sourcemap at the end of the generated JavaScript file).
+  or not where ``<mode>`` is either ``no``, ``file`` (to generate sourcemap in a ``.map`` file next to the generated javascript file) or ``inline`` (to inline the sourcemap at the end of the generated JavaScript file).
 
 - ``(wasm_of_ocaml (runtest_alias <alias-name>))`` specifies the alias under which
   :ref:`inline_tests` and tests (:ref:`tests-stanza`) run for the ``wasm`` mode.
@@ -86,7 +93,7 @@ Fields supported in ``<settings>`` are:
 - ``(odoc <fields>)`` allows passing options to ``odoc``. See
   :ref:`odoc-options` for more details.
 
-- ``(coq <coq_fields>)`` allow passing options to Coq. See :ref:`coq-env`
+- ``(rocq <rocq_fields>)`` allow passing options to Rocq. See :ref:`rocq-env`
   for more details.
 
 - ``(formatting <settings>)`` allows the user to set auto-formatting in the

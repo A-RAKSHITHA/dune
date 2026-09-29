@@ -6,16 +6,12 @@ printer.1.0, and the project depends on a different version, printer.2.0.
 It shows those two do not conflict, and the dev-tools dependencies do not leak
 into the user build environment.
 
-  $ . ./helpers.sh
   $ mkrepo
 
 Make a fake OCamlFormat which depends on printer lib:
   $ mkdir ocamlformat
   $ cd ocamlformat
-  $ cat > dune-project <<EOF
-  > (lang dune 3.13)
-  > (package (name ocamlformat))
-  > EOF
+  $ make_dune_project_with_package 3.13 ocamlformat
   $ cat > ocamlformat.ml <<EOF
   > let () = Printer.print ()
   > EOF
@@ -83,7 +79,7 @@ Add ".ocamlformat" file.
   > EOF
 
 Lock the to trigger package management
-  $ dune pkg lock
+  $ dune_pkg_lock_normalized
   Solution for dune.lock:
   - printer.2.0
 
@@ -94,15 +90,16 @@ It shows that the project uses printer.2.0
 Format foo.ml, "dune fmt" uses printer.1.0 instead. There is no conflict with different
 versions of the same dependency.
   $ DUNE_CONFIG__LOCK_DEV_TOOL=enabled dune fmt --preview
-  Solution for dev-tools.locks/ocamlformat:
+  Solution for _build/.dev-tools.locks/ocamlformat:
   - ocamlformat.0.26.2
   - printer.1.0
   File "foo.ml", line 1, characters 0-0:
-  Error: Files _build/default/foo.ml and _build/default/.formatted/foo.ml
-  differ.
+  --- foo.ml
+  +++ foo.ml.corrected
+  @@ -1 +1 @@
+  -let () = Printer.print ()
+  +formatted
   [1]
-  $ cat _build/default/.formatted/foo.ml
-  formatted
 
 Update "dune-project", removing the dependency on the "printer" package. This
 demonstrates that even though OCamlFormat depends on the "printer" package, building the
@@ -116,7 +113,7 @@ dependencies of the project are isolated from one another.
   > EOF
 
 Relock the project.
-  $ dune pkg lock
+  $ dune_pkg_lock_normalized
   Solution for dune.lock:
   (no dependencies to lock)
 
@@ -126,10 +123,8 @@ There is no leak here. It is not taking the "printer" lib from dev-tools.
   3 |  (libraries printer))
                   ^^^^^^^
   Error: Library "printer" not found.
-  -> required by _build/default/.foo.eobjs/byte/dune__exe__Foo.cmi
   -> required by _build/default/.foo.eobjs/native/dune__exe__Foo.cmx
   -> required by _build/default/foo.exe
-  -> required by _build/install/default/bin/foo
   [1]
 
 Update the executable "foo" to not depend on the library "printer", but "foo.ml" still
@@ -142,9 +137,9 @@ dev-tools don't leak into the project.
 
 There is no leak here. It is not taking Printer module from the printer of dev-tools dependency.
   $ dune exec -- foo
-  File "foo.ml", line 1, characters 9-22:
+  File "foo.ml", line 1, characters 9-16:
   1 | let () = Printer.print ()
-               ^^^^^^^^^^^^^
+               ^^^^^^^
   Error: Unbound module Printer
-  Hint: Did you mean Printexc or Printf?
+  Hint:    Did you mean Printexc or Printf?
   [1]

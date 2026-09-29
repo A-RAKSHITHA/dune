@@ -1,0 +1,116 @@
+module File_kind = struct
+  include File_kind
+
+  module Option = struct
+    [@@@warning "-37"]
+
+    (* The values are constructed on the C-side *)
+    type t =
+      | S_REG
+      | S_DIR
+      | S_CHR
+      | S_BLK
+      | S_LNK
+      | S_FIFO
+      | S_SOCK
+      | UNKNOWN
+
+    let elim ~none ~some t =
+      match t with
+      | S_REG -> some (S_REG : Unix.file_kind)
+      | S_DIR -> some S_DIR
+      | S_CHR -> some S_CHR
+      | S_BLK -> some S_BLK
+      | S_LNK -> some S_LNK
+      | S_FIFO -> some S_FIFO
+      | S_SOCK -> some S_SOCK
+      | UNKNOWN -> none ()
+    ;;
+  end
+end
+
+module Readdir_result = struct
+  [@@@warning "-37"]
+
+  (* The values are constructed on the C-side *)
+  type t =
+    | End_of_directory
+    | Entry of Filename.t * File_kind.Option.t
+end
+
+external readdir_with_kind_if_available_unix
+  :  Unix.dir_handle
+  -> Readdir_result.t
+  = "caml__dune_filesystem_stubs__readdir"
+
+let rec readdir_with_kind_if_available_win32 : Unix.dir_handle -> Readdir_result.t =
+  fun dir ->
+  (* Windows also gives us the information about file kind and it's discarded by
+     [readdir]. We could do better here, but the Windows code is more
+     complicated. (there's an additional OCaml abstraction layer) *)
+  match Unix.readdir dir with
+  | exception End_of_file -> Readdir_result.End_of_directory
+  | "." | ".." -> readdir_with_kind_if_available_win32 dir
+  | entry -> Entry (Filename.of_string_exn entry, File_kind.Option.UNKNOWN)
+;;
+
+let readdir_with_kind_if_available =
+  if Stdlib.Sys.win32
+  then readdir_with_kind_if_available_win32
+  else readdir_with_kind_if_available_unix
+;;
+
+let with_directory dir_path ~f =
+  let start = Counter.Timer.start () in
+  Counter.incr Metrics.Directory_read.count;
+  let dir =
+    match Unix.opendir dir_path with
+    | dir -> dir
+    | exception exn ->
+      Counter.Timer.stop Metrics.Directory_read.time start;
+      raise exn
+  in
+  Fun.protect
+    ~finally:(fun () ->
+      Unix.closedir dir;
+      Counter.Timer.stop Metrics.Directory_read.time start)
+    (fun () -> f dir)
+;;
+
+let read_directory_with_kinds_exn dir_path =
+  with_directory dir_path ~f:(fun dir ->
+    let rec loop acc =
+      match readdir_with_kind_if_available dir with
+      | End_of_directory -> acc
+      | Entry (base, kind) ->
+        let k kind = loop ((base, kind) :: acc) in
+        let skip () = loop acc in
+        File_kind.Option.elim
+          kind
+          ~none:(fun () ->
+            match Unix.lstat (Filename.append dir_path base) with
+            | exception Unix.Unix_error _ ->
+              (* File disappeared between readdir & lstat system calls. Handle
+                   as if readdir never told us about it *)
+              skip ()
+            | stat -> k stat.st_kind)
+          ~some:k
+    in
+    loop [])
+;;
+
+let read_directory_with_kinds dir_path =
+  Unix_error.Detailed.catch read_directory_with_kinds_exn dir_path
+;;
+
+let read_directory_exn dir_path =
+  with_directory dir_path ~f:(fun dir ->
+    let rec loop acc =
+      match readdir_with_kind_if_available dir with
+      | End_of_directory -> acc
+      | Entry (base, _) -> loop (base :: acc)
+    in
+    loop [])
+;;
+
+let read_directory dir_path = Unix_error.Detailed.catch read_directory_exn dir_path

@@ -1,9 +1,7 @@
 Packages can export environment variables
 
-  $ . ./helpers.sh
-
   $ make_lockdir
-  $ cat >dune.lock/test.pkg <<EOF
+  $ make_lockpkg test <<EOF
   > (version 0.0.1)
   > (exported_env
   >  (= FOO bar)
@@ -12,7 +10,7 @@ Packages can export environment variables
   >  (:= BAR zzz))
   > EOF
 
-  $ cat >dune.lock/usetest.pkg <<'EOF'
+  $ make_lockpkg usetest <<'EOF'
   > (depends test)
   > (version 1.2.3)
   > (build
@@ -21,6 +19,7 @@ Packages can export environment variables
   >           "\| echo BAR=$BAR
   >           "\| echo OPAM_PACKAGE_NAME=$OPAM_PACKAGE_NAME
   >           "\| echo OPAM_PACKAGE_VERSION=$OPAM_PACKAGE_VERSION
+  >           "\| echo OPAMSWITCH=$OPAMSWITCH
   >   )
   >   (run mkdir -p %{prefix})))
   > EOF
@@ -30,3 +29,4 @@ Packages can export environment variables
   BAR=zzz:yyy:xxx
   OPAM_PACKAGE_NAME=usetest
   OPAM_PACKAGE_VERSION=1.2.3
+  OPAMSWITCH=dune

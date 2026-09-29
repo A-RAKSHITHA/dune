@@ -10,7 +10,12 @@ open Import
     function has returned. Consider adding a type annotation to make sure this
     doesn't happen by mistake. *)
 
-val gen_select_rules : Super_context.t -> dir:Path.Build.t -> Lib.Compile.t -> unit Memo.t
+val gen_select_rules
+  :  Super_context.t
+  -> dir:Path.Build.t
+  -> Lib.Compile.t
+  -> for_:Compilation_mode.t
+  -> unit Memo.t
 
 (** Generate the rules for the [(select ...)] forms in library dependencies *)
 val with_lib_deps
@@ -23,9 +28,9 @@ val with_lib_deps
 type kind =
   | Executables of Buildable.t * (Loc.t * string) list
   | Library of Buildable.t * Lib_name.Local.t
+  | Parameter of Buildable.t * Lib_name.Local.t
   | Melange of
-      { preprocess : Preprocess.With_instrumentation.t Preprocess.Per_module.t
-      ; preprocessor_deps : Dep_conf.t list
+      { preprocess : Preprocess.preprocess
       ; lint : Preprocess.Without_instrumentation.t Preprocess.Per_module.t
       ; empty_module_interface_if_absent : bool
       }
@@ -37,12 +42,5 @@ val modules_rules
   -> dir:Path.Build.t
   -> Scope.t
   -> Modules.t
+  -> for_:Compilation_mode.t
   -> (Modules.t * Pp_spec.t) Memo.t
-
-(** Compute the ocaml flags based on the directory environment and a buildable
-    stanza *)
-val ocaml_flags
-  :  Super_context.t
-  -> dir:Path.Build.t
-  -> Ocaml_flags.Spec.t
-  -> Ocaml_flags.t Memo.t

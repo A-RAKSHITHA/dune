@@ -1,4 +1,7 @@
-(** Representation of dune-package files *)
+(** Representation of dune-package files.
+
+    dune-package files record package data for the purposes of installation.
+    They are not intended to be written or read by human users. *)
 
 open Import
 
@@ -19,9 +22,6 @@ end
 module Lib : sig
   type t
 
-  val main_module_name : t -> Module_name.t option
-  val dir_of_name : Lib_name.t -> Path.Local.t
-  val wrapped : t -> Wrapped.t option
   val info : t -> Path.t Lib_info.t
   val external_location : t -> External_location.t option
   val of_findlib : Path.t Lib_info.t -> External_location.t -> t
@@ -58,7 +58,10 @@ module Entry : sig
   val to_dyn : t Dyn.builder
 end
 
-type path = [ `File | `Dir ] * Install.Entry.Dst.t
+type path =
+  { kind : Install.Entry.Expanded.kind
+  ; dst : Install.Entry.Dst.t
+  }
 
 type t =
   { name : Package.Name.t
@@ -99,7 +102,13 @@ module Or_meta : sig
     -> unit
 
   val pp_use_meta : dune_version:Dune_lang.Syntax.Version.t -> Format.formatter -> unit
-  val parse : Path.t -> Lexbuf.t -> (t, User_message.t) result
-  val load : Path.t -> (t, User_message.t) result Memo.t
+
+  val parse
+    :  package:Package.Name.t option
+    -> Path.t
+    -> Lexbuf.t
+    -> (t, User_message.t) result
+
+  val load : package:Package.Name.t option -> Path.t -> (t, User_message.t) result Memo.t
   val to_dyn : t Dyn.builder
 end

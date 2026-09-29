@@ -1,0 +1,28 @@
+include struct
+  open Stdune
+  module Sexp = Sexp
+  module String = String
+  module List = List
+  module Either = Either (* Needed for backwards compat *)
+  module Int = Int
+  module Poly = Poly
+  module Code_error = Code_error
+  module Conv = Conv
+  module Env = Env
+  module Comparable = Comparable
+  module Repr = Repr
+  module Set = Set
+  module Result = Result
+  module Option = Option
+  module Table = Table
+  module Loc = Loc
+  module Fdecl = Fdecl
+  module Univ_map = Univ_map
+  module Comparable_intf = Comparable_intf
+  module Filename = Filename
+  module Pid = Pid
+
+  module Path = struct
+    (* we don't want to depend on build or source directories here *)
+  end
+end

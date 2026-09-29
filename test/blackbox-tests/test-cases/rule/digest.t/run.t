@@ -1,9 +1,11 @@
 ----------------------------------------------------------------------------------
 Test that rule digest doesn't depend on irrelevant details of the dune file
 
+  $ # Needed when upgrading this test to Dune language 3.25:
+  $ # export DUNE_CONFIG__LANDLOCK=disabled
   $ export DUNE_PWD_STORE="$(mktemp)"
 
-  $ echo "(lang dune 3.0)" > dune-project
+  $ make_dune_project 3.0
 
   $ cat >dune <<EOF
   > (rule
@@ -30,7 +32,7 @@ Let's add a comment to the dune file. It shouldn't affect the rule digest.
 
 ... and it doesn't.
 
-  $ rm _build/default/target target
+  $ rm -rf _build/
   $ dune build @default
   running...
   digest: $1

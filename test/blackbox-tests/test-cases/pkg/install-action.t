@@ -1,9 +1,7 @@
 Testing install actions
 
-  $ . ./helpers.sh
-
   $ make_lockdir
-  $ cat >dune.lock/test.pkg <<'EOF'
+  $ make_lockpkg test <<EOF
   > (version 0.0.1)
   > (install (system "echo foobar; mkdir -p %{lib}; touch %{lib}/xxx"))
   > EOF
@@ -33,9 +31,10 @@ Testing install actions
 
   $ show_pkg_cookie test
   { files =
-      map
-        { LIB_ROOT :
-            [ In_build_dir "_private/default/.pkg/test/target/lib/xxx" ]
-        }
+      [ (LIB_ROOT,
+         [ In_build_dir
+             "_private/default/.pkg/test.0.0.1-$DIGEST/target/lib/xxx"
+         ])
+      ]
   ; variables = []
   }

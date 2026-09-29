@@ -1,3 +1,4 @@
+# This file is auto-generated. Edit bench.yml.in instead
 name: Build time benchmarks
 
 # Do not run this workflow on pull request since this workflow has permission to modify contents.
@@ -5,7 +6,15 @@ on:
   push:
     branches:
       - main
-      - ci-bench/fix-after-ocaml51
+
+env:
+  # Keep Git maintenance in the foreground to avoid a race in opam 2.5.
+  # See https://github.com/ocaml/opam/issues/7031.
+  GIT_CONFIG_COUNT: "2"
+  GIT_CONFIG_KEY_0: gc.autoDetach
+  GIT_CONFIG_VALUE_0: "false"
+  GIT_CONFIG_KEY_1: maintenance.autoDetach
+  GIT_CONFIG_VALUE_1: "false"
 
 permissions:
   # deployments permission to deploy GitHub pages website
@@ -22,13 +31,13 @@ jobs:
         os:
           - ubuntu-latest
         ocaml-compiler:
-          - 5.1.x
+          - 5.5.x
 
     runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Use OCaml ${{ matrix.ocaml-compiler }}
         uses: ocaml/setup-ocaml@v3
@@ -42,6 +51,7 @@ jobs:
 
       - name: Install deps on Unix
         run: |
+          opam pin -n . --with-version=3.25.0
           opam install . --deps-only --with-test
           opam exec -- make dev-deps
           # Install hyperfine
@@ -72,41 +82,6 @@ jobs:
           auto-push: true
           # Ratio indicating how worse the current benchmark result is.
           # 175% means if last build took 40s and current takes >70s, it will trigger an alert
-          alert-threshold: "225%"
-          fail-on-alert: true
-          # Enable alert commit comment
-          comment-on-alert: true
-          # Mention @jchavarri in the commit comment
-          alert-comment-cc-users: '@jchavarri'
-
-      - name: Clone pupilfirst fork
-        run: git clone --depth 1 https://github.com/jchavarri/pupilfirst.git
-
-      - name: Install all deps
-        working-directory: pupilfirst
-        run: |
-          opam install -y . --deps-only
-
-      - name: Run pupilfirst benchmark
-        working-directory: pupilfirst
-        run: ../bench/gen-benchmark.sh 'opam exec -- ../_boot/dune.exe build --root=. @main' 'opam exec -- ../_boot/dune.exe clean --root=.' 'pupilfirst build time (${{ runner.os }})' > melange-benchmark-result.json
-
-      - name: Print pupilfirst benchmark results
-        working-directory: pupilfirst
-        run: |
-          cat bench.json
-          cat melange-benchmark-result.json
-
-      - name: Store melange benchmark result
-        uses: benchmark-action/github-action-benchmark@v1
-        with:
-          name: Melange Benchmark
-          tool: "customSmallerIsBetter"
-          output-file-path: pupilfirst/melange-benchmark-result.json
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          auto-push: true
-          # Ratio indicating how worse the current benchmark result is.
-          # 150% means if last build took 40s and current takes >60s, it will trigger an alert
           alert-threshold: "225%"
           fail-on-alert: true
           # Enable alert commit comment

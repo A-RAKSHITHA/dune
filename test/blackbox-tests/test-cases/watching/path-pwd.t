@@ -3,10 +3,8 @@ adding . to $CWD
 
 Reproduce #6907
 
-  $ . ./helpers.sh
-
   $ export PATH=.:$PATH
-  $ echo "(lang dune 2.0)" > dune-project
+  $ make_dune_project 2.0
 
   $ start_dune
 
@@ -26,6 +24,4 @@ Reproduce #6907
   $ build y
   Success
 
-  $ stop_dune
-  Success, waiting for filesystem changes...
-  Success, waiting for filesystem changes...
+  $ stop_dune_quiet

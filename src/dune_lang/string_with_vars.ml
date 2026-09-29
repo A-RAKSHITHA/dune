@@ -1,5 +1,4 @@
-open Stdune
-open Dune_sexp
+open Import
 
 type part =
   | Text of string
@@ -13,38 +12,48 @@ type t =
   ; loc : Loc.t
   }
 
+let compare_part a b =
+  match a, b with
+  | Text a, Text b -> String.compare a b
+  | Pform (_, a), Pform (_, b) -> Pform.compare a b
+  | Error (_, a), Error (_, b) -> User_message.compare a b
+  | Text _, _ -> Lt
+  | _, Text _ -> Gt
+  | Pform _, _ -> Lt
+  | _, Pform _ -> Gt
+;;
+
 let compare { quoted; parts; loc } t =
-  let open Ordering.O in
-  let= () = Bool.compare quoted t.quoted in
-  let= () = Loc.compare loc t.loc in
-  List.compare parts t.parts ~compare:(fun a b ->
-    match a, b with
-    | Text a, Text b -> String.compare a b
-    | Pform (_, a), Pform (_, b) -> Pform.compare a b
-    | Error (_, a), Error (_, b) -> User_message.compare a b
-    | Text _, _ -> Lt
-    | _, Text _ -> Gt
-    | Pform _, _ -> Lt
-    | _, Pform _ -> Gt)
+  match Bool.compare quoted t.quoted with
+  | (Lt | Gt) as ordering -> ordering
+  | Eq ->
+    (match Loc.compare loc t.loc with
+     | Eq -> List.compare parts t.parts ~compare:compare_part
+     | (Lt | Gt) as ordering -> ordering)
 ;;
 
 let equal x y = Ordering.is_eq (compare x y)
 
 let compare_no_loc { quoted; parts; loc = _ } t =
-  let open Ordering.O in
-  let= () = Bool.compare quoted t.quoted in
-  List.compare parts t.parts ~compare:(fun a b ->
-    match a, b with
-    | Text a, Text b -> String.compare a b
-    | Pform (_, a), Pform (_, b) -> Pform.compare a b
-    | Error (_, a), Error (_, b) -> User_message.compare a b
-    | Text _, _ -> Lt
-    | _, Text _ -> Gt
-    | Pform _, _ -> Lt
-    | _, Pform _ -> Gt)
+  match Bool.compare quoted t.quoted with
+  | Eq -> List.compare parts t.parts ~compare:compare_part
+  | (Lt | Gt) as ordering -> ordering
 ;;
 
 let equal_no_loc t1 t2 = Ordering.is_eq (compare_no_loc t1 t2)
+
+let add_prefix t prefix =
+  if String.equal prefix ""
+  then t
+  else (
+    let parts =
+      match t.parts with
+      | Text text :: parts -> Text (prefix ^ text) :: parts
+      | parts -> Text prefix :: parts
+    in
+    { t with parts })
+;;
+
 let make_text ?(quoted = false) loc s = { quoted; loc; parts = [ Text s ] }
 
 let part_of_pform loc pform =
@@ -102,7 +111,7 @@ let decode_manually f =
     ; loc
     ; parts =
         List.map parts ~f:(function
-          | Template.Text s -> Text s
+          | Template.Part.Text s -> Text s
           | Pform v ->
             (match f env v with
              | pform -> Pform (v, pform)
@@ -115,9 +124,9 @@ let decode_manually f =
 let decode = decode_manually Pform.Env.parse
 let loc t = t.loc
 
-let virt_pform ?quoted pos pform =
-  let loc = Loc.of_pos pos in
-  make_pform ?quoted loc pform
+let map_loc t ~f =
+  let loc = f t.loc in
+  { t with loc }
 ;;
 
 let virt_text pos s =
@@ -240,16 +249,6 @@ let known_prefix =
   fun t -> go t.parts []
 ;;
 
-let fold_pforms =
-  let rec loop parts acc f =
-    match parts with
-    | [] -> acc
-    | (Text _ | Error _) :: parts -> loop parts acc f
-    | Pform (p, v) :: parts -> loop parts (f ~source:p v acc) f
-  in
-  fun t ~init ~f -> loop t.parts init f
-;;
-
 type 'a expander = source:Template.Pform.t -> Pform.t -> 'a
 
 type yes_no_unknown =
@@ -257,24 +256,13 @@ type yes_no_unknown =
   | No
   | Unknown of { source_pform : Template.Pform.t }
 
-let is_suffix t ~suffix:want =
-  match known_suffix t with
-  | Full s -> if String.is_suffix ~suffix:want s then Yes else No
-  | Partial { suffix = have; source_pform } ->
-    if String.is_suffix ~suffix:want have
-    then Yes
-    else if String.is_suffix ~suffix:have want
-    then Unknown { source_pform }
-    else No
-;;
-
 let is_prefix t ~prefix:want =
   match known_prefix t with
-  | Full s -> if String.is_prefix ~prefix:want s then Yes else No
+  | Full s -> if String.starts_with ~prefix:want s then Yes else No
   | Partial { prefix = have; source_pform } ->
-    if String.is_prefix ~prefix:want have
+    if String.starts_with ~prefix:want have
     then Yes
-    else if String.is_prefix ~prefix:have want
+    else if String.starts_with ~prefix:have want
     then Unknown { source_pform }
     else No
 ;;
@@ -441,14 +429,14 @@ let has_pforms t = Option.is_none (text_only t)
 
 let encode t =
   match text_only t with
-  | Some s -> atom_or_quoted_string s
+  | Some s -> Dune_sexp.atom_or_quoted_string s
   | None ->
-    Template
+    Dune_sexp.Template
       { loc = t.loc
       ; quoted = t.quoted
       ; parts =
           List.map t.parts ~f:(function
-            | Text s -> Template.Text s
+            | Text s -> Template.Part.Text s
             | Error (_, msg) -> raise (User_error.E msg)
             | Pform (source, pform) ->
               (match Pform.encode_to_latest_dune_lang_version pform with
@@ -464,7 +452,8 @@ let encode t =
       }
 ;;
 
-let to_dyn t = to_dyn (encode t)
+let repr = Repr.view Dune_sexp.repr ~to_:encode
+let to_dyn t = Dune_sexp.to_dyn (encode t)
 
 let remove_locs { quoted; loc = _; parts } =
   { quoted

@@ -13,7 +13,7 @@ Overview
 Introduction
 ============
 
-Dune is a build system for OCaml (with support for Reason and Coq). It is not
+Dune is a build system for OCaml (with support for Reason and Rocq). It is not
 intended as a completely generic build system that's able to build any project
 in any language. On the contrary, it makes lots of choices in order to encourage
 a consistent development style.
@@ -96,7 +96,7 @@ Terminology
      from this directory. Moreover, scopes are separate from your project's
      dependencies. The scope also determines where private items are visible.
      Private items include libraries or binaries that will not be installed.
-     See :doc:`concepts/scopes` for more details.
+     See :doc:`/explanation/scopes` for more details.
 
    build context
      A specific configuration written in a
@@ -130,11 +130,10 @@ Terminology
    build profile
      A global setting that influences various defaults. It can be set from the
      command line using ``--profile <profile>`` or from ``dune-workspace``
-     files. The following profiles are standard:
-
-     -  ``release`` which is the profile used for opam releases
-     -  ``dev`` which is the default profile when none is set explicitly, it has
-        stricter warnings than the ``release`` one
+     files. The standard profiles are ``dev`` and ``release``. ``dev`` is the
+     default profile when none is set explicitly, and ``release`` is the profile
+     used for opam releases. See :doc:`reference/dune-workspace/profile` for the
+     exact defaults associated with these profiles.
 
    dialect
      An alternative frontend to OCaml (such as ReasonML). It is described
@@ -164,7 +163,7 @@ A typical Dune project will have a ``dune-project`` and one or more
 interesting things are: libraries, executables, tests, documents to install,
 etc.
 
-We recommended organising your project to have exactly one library per
+We recommend organising your project to have exactly one library per
 directory. You can have several executables in the same directory, as long as
 they share the same build configuration. If you'd like to have multiple
 executables with different configurations in the same directory, you will have

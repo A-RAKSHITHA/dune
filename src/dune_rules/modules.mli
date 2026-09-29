@@ -13,7 +13,9 @@ val lib
   -> stdlib:Ocaml_stdlib.t option
   -> lib_name:Lib_name.Local.t
   -> implements:bool
+  -> has_instances:bool
   -> modules:Module.t Module_trie.t
+  -> for_:Compilation_mode.t
   -> t
 
 val decode : src_dir:Path.t -> t Dune_lang.Decoder.t
@@ -32,6 +34,7 @@ val exe_unwrapped : Module.t Module_trie.t -> obj_dir:Path.Build.t -> t
 val make_wrapped
   :  obj_dir:Path.Build.t
   -> modules:Module.t Module_trie.t
+  -> has_instances:bool
   -> [ `Exe | `Melange ]
   -> t
 
@@ -51,10 +54,19 @@ end
 val obj_map : t -> Sourced_module.t Module_name.Unique.Map.t
 
 (** Returns only the virtual module names in the library *)
-val virtual_module_names : t -> Module_name.Path.Set.t
+val virtual_module_names
+  :  version:Dune_lang.Syntax.Version.t
+  -> t
+  -> Module_name.Path.Set.t
 
 val wrapped : t -> Wrapped.t
 val source_dirs : t -> Path.Set.t
+val compat_for_exn : t -> Module.t -> Module.t
+
+(** List of entry modules visible to users of the library. For wrapped
+    libraries, this is always one module. For unwrapped libraries, this could
+    be more than one. *)
+val entry_modules : t -> Module.t list
 
 module With_vlib : sig
   type modules := t
@@ -65,14 +77,19 @@ module With_vlib : sig
   val encode : t -> src_dir:Path.t -> Dune_lang.t
   val impl : modules -> vlib:modules -> t
 
-  val find_dep
+  (** Resolve a batch of dependencies in order. The error carries the dependency
+      name that closes a parent cycle. *)
+  val find_deps
     :  t
     -> of_:Module.t
-    -> Module_name.t
-    -> (Module.t list, [ `Parent_cycle ]) result
+    -> Module_name.t list
+    -> (Module.t list, [ `Parent_cycle of Module_name.t ]) result
+
+  (** Additional dependencies that aren't always reported by [ocamldep], such
+      as `(modules_before_stdlib ..)` in `(stdlib ..)` libraries. *)
+  val implicit_deps : t -> of_:Module.t -> Module.t list
 
   val find : t -> Module_name.t -> Module.t option
-  val compat_for_exn : t -> Module.t -> Module.t
   val impl_only : t -> Module.t list
 
   (** A set of modules from a single module. Not suitable for single module exe as
@@ -80,7 +97,7 @@ module With_vlib : sig
       executables. *)
   val singleton : Module.t -> t
 
-  val canonical_path : t -> Group.t -> Module.t -> Module_name.Path.t
+  val canonical_path : t -> Module.t -> Module_name.Path.t
 
   val fold_no_vlib_with_aliases
     :  t
@@ -89,6 +106,8 @@ module With_vlib : sig
     -> alias:(Group.t -> 'acc -> 'acc)
     -> 'acc
 
+  val map : t -> f:(Module.t -> Module.t) -> t
+
   (** For wrapped libraries, this is the user written entry module for the
       library. For single module libraries, it's the sole module in the library *)
   val lib_interface : t -> Module.t option
@@ -96,17 +115,12 @@ module With_vlib : sig
   (** Returns all the compatibility modules. *)
   val wrapped_compat : t -> Module.Name_map.t
 
-  (** List of entry modules visible to users of the library. For wrapped
-      libraries, this is always one module. For unwrapped libraries, this could be
-      more than one. *)
-  val entry_modules : t -> Module.t list
-
-  (** Returns the main module name if it exists. It exist for libraries with
-      [(wrapped true)] or one module libraries. *)
-  val main_module_name : t -> Module_name.t option
-
   val version_installed : t -> src_root:Path.t -> install_dir:Path.t -> t
   val alias_for : t -> Module.t -> Module.t list
+
+  (** Whether an alias returned by [alias_for] needs a self-shadowing guard. *)
+  val is_guarded_alias : t -> Module.t -> bool
+
   val local_open : t -> Module.t -> Module_name.t list
   val is_stdlib_alias : t -> Module.t -> bool
   val exit_module : t -> Module.t option

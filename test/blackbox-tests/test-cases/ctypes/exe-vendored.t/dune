@@ -1,21 +1,13 @@
-(rule
- (targets libexample.a dllexample%{ext_dll})
- (deps (source_tree vendor))
- (action
-  (no-infer
-   (progn
-    (copy vendor/libexample.a libexample.a)
-    (copy vendor/libexample%{ext_dll} dllexample%{ext_dll})))))
-
 (executable
  (name example)
  (flags (:standard -w -9-27))
- (foreign_archives example)
  (ctypes
   (external_library_name examplelib)
+  (deps (source_tree vendor))
   (build_flags_resolver
    (vendored
-    (c_flags "-Ivendor")))
+    (c_flags "-Ivendor")
+    (c_library_flags ("-Lvendor" "-lexample"))))
   (headers (include (:include includes.sexp)))
   (type_description
    (instance Types)

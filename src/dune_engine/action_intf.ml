@@ -1,5 +1,5 @@
 open Import
-open Dune_util.Action
+open Stdune.Action_types
 
 module Simplified = struct
   type destination =
@@ -18,6 +18,17 @@ module Simplified = struct
     | Sh of string
 end
 
+type ('program, 'string) run =
+  { prog : 'program
+  ; args : 'string Appendable_list.t
+  ; can_run_in_action_runner : bool
+  }
+
+type 'string bash =
+  { script : 'string
+  ; can_run_in_action_runner : bool
+  }
+
 module type Ast = sig
   type program
   type path
@@ -26,9 +37,8 @@ module type Ast = sig
   type ext
 
   type t =
-    | Run of program * string Array.Immutable.t
+    | Run of (program, string) run
     | With_accepted_exit_codes of int Predicate_lang.t * t
-    | Dynamic_run of program * string list
     | Chdir of path * t
     | Setenv of string * string * t
     (* It's not possible to use a build path here since jbuild supports
@@ -44,12 +54,14 @@ module type Ast = sig
     | Copy of path * target
     | Symlink of path * target
     | Hardlink of path * target
-    | Bash of string
+    | System of string
+    | Bash of string bash
     | Write_file of target * File_perm.t * string
     | Rename of target * target
     | Remove_tree of target
     | Mkdir of target
     | Pipe of Outputs.t * t list
+    | Diff of (path, target) Diff.t
     | Extension of ext
 end
 
@@ -60,7 +72,6 @@ module type Helpers = sig
   type string
   type t
 
-  (* TODO consider changing this to a [string array] to save some conversion *)
   val run : program -> string list -> t
   val chdir : path -> t -> t
   val setenv : string -> string -> t -> t
@@ -77,20 +88,31 @@ module type Helpers = sig
   val cat : path list -> t
   val copy : path -> target -> t
   val symlink : path -> target -> t
+  val system : string -> t
   val bash : string -> t
   val write_file : ?perm:File_perm.t -> target -> string -> t
   val rename : target -> target -> t
   val remove_tree : target -> t
   val mkdir : target -> t
+
+  val diff
+    :  ?optional:bool
+    -> ?mode:Diff.Mode.t
+    -> ?directory_diffs:bool
+    -> path
+    -> target
+    -> t
 end
 
 module Exec = struct
   type context =
     { targets : Targets.Validated.t option
+    ; root : Path.t
     ; context : Build_context.t option
-    ; metadata : Process.metadata
+    ; metadata : Process_metadata.t
+    ; sandbox : Process.Sandbox.t option
     ; rule_loc : Loc.t
-    ; build_deps : Dep.Set.t -> Dep.Facts.t Fiber.t
+    ; build_deps : Dep.Set.t -> unit Fiber.t
     }
 
   type env =
@@ -99,18 +121,22 @@ module Exec = struct
     ; stdout_to : Process.Io.output Process.Io.t
     ; stderr_to : Process.Io.output Process.Io.t
     ; stdin_from : Process.Io.input Process.Io.t
-    ; prepared_dependencies : Dune_action_plugin.Private.Protocol.Dependency.Set.t
     ; exit_codes : int Predicate.t
     }
 end
 
 module Ext = struct
+  module Exec = Exec
+
   module type Spec = sig
     type ('path, 'target) t
 
     val name : string
     val version : int
     val is_useful_to : memoize:bool -> bool
+    val is_dynamic : bool
+    val runs_process : bool
+    val can_run_in_action_runner : bool
     val encode : ('p, 't) t -> ('p -> Sexp.t) -> ('t -> Sexp.t) -> Sexp.t
     val bimap : ('a, 'b) t -> ('a -> 'x) -> ('b -> 'y) -> ('x, 'y) t
 
@@ -118,11 +144,7 @@ module Ext = struct
       :  (Path.t, Path.Build.t) t
       -> ectx:Exec.context
       -> eenv:Exec.env
-      -> (* cwong: For now, I think we should only worry about extensions with
-            known dependencies. In the future, we may generalize this to return
-            an [Action_exec.done_or_more_deps], but that may be trickier to get
-            right, and is a bridge we can cross when we get there. *)
-      unit Fiber.t
+      -> unit Fiber.t
   end
 
   module type Instance = sig

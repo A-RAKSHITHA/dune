@@ -10,9 +10,9 @@ module DB = struct
       type nonrec t = Path.Build.t Path.Build.Table.t
 
       let name = "COPY-LINE-DIRECTIVE-MAP"
-      let version = 1
-      let to_dyn = Path.Build.Table.to_dyn Path.Build.to_dyn
-      let test_example () = Path.Build.Table.create 1
+      let sharing = true
+      let version = 3
+      let repr = Repr.abstract (Path.Build.Table.to_dyn Path.Build.to_dyn)
     end)
 
   let needs_dumping = ref false
@@ -33,7 +33,7 @@ module DB = struct
       Persistent.dump file (Lazy.force t))
   ;;
 
-  let () = at_exit dump
+  let () = At_exit.at_exit_ignore Dune_trace.at_exit dump
 
   let rec follow_while path ~f =
     let t = Lazy.force t in
@@ -71,6 +71,8 @@ module Spec = struct
 
   let name = "copy-line-directive"
   let version = 2
+  let runs_process = false
+  let can_run_in_action_runner = false
   let bimap (src, dst, merlin) f g = f src, g dst, merlin
   let is_useful_to ~memoize = memoize
 

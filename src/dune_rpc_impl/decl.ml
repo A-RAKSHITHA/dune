@@ -1,31 +1,15 @@
 open Import
 open Dune_rpc
 
-module Build_outcome = struct
-  type t = Scheduler.Run.Build_outcome.t =
-    | Success
-    | Failure
-
-  let sexp =
-    let open Conv in
-    let success = constr "Success" unit (fun () -> Success) in
-    let failure = constr "Failure" unit (fun () -> Failure) in
-    let variants = [ econstr success; econstr failure ] in
-    sum variants (function
-      | Success -> case () success
-      | Failure -> case () failure)
-  ;;
-end
-
 module Status = struct
   module Menu = struct
     type t =
       | Uninitialized
-      | Menu of (string * int) list
+      | Menu of (Method.Name.t * int) list
 
     let sexp =
       let open Conv in
-      let menu = constr "menu" (list (pair string int)) (fun m -> Menu m) in
+      let menu = constr "menu" (list (pair Method.Name.sexp int)) (fun m -> Menu m) in
       let uninitialized = constr "stage1" unit (fun () -> Uninitialized) in
       let variants = [ econstr menu; econstr uninitialized ] in
       sum variants (function
@@ -44,19 +28,71 @@ module Status = struct
   ;;
 
   let v1 = Decl.Request.make_current_gen ~req:Conv.unit ~resp:sexp ~version:1
-  let decl = Decl.Request.make ~method_:"status" ~generations:[ v1 ]
+
+  let decl =
+    Decl.Request.make ~method_:(Method.Name.of_string "status") ~generations:[ v1 ]
+  ;;
 end
 
 module Build = struct
   let v1 =
     Decl.Request.make_current_gen
       ~req:(Conv.list Conv.string)
-      ~resp:Build_outcome.sexp
+      ~resp:Dune_rpc.Build_outcome_with_diagnostics.sexp_v1
       ~version:1
   ;;
 
-  let decl = Decl.Request.make ~method_:"build" ~generations:[ v1 ]
+  let v2 =
+    Decl.Request.make_current_gen
+      ~req:(Conv.list Conv.string)
+      ~resp:Dune_rpc.Build_outcome_with_diagnostics.sexp_v2
+      ~version:2
+  ;;
+
+  let decl =
+    Decl.Request.make ~method_:(Method.Name.of_string "build") ~generations:[ v1; v2 ]
+  ;;
+end
+
+module Pkg_enabled = struct
+  let v1 =
+    Decl.Request.make_current_gen
+      ~req:Conv.unit
+      ~resp:(Conv.enum [ "enabled", true; "disabled", false ])
+      ~version:1
+  ;;
+
+  let decl =
+    Decl.Request.make ~method_:(Method.Name.of_string "pkg-enabled") ~generations:[ v1 ]
+  ;;
+end
+
+module Queue_overflow = struct
+  type response =
+    | Ok
+    | Not_in_watch_mode
+    | Build_failed
+
+  let v1 =
+    Decl.Request.make_current_gen
+      ~req:Conv.unit
+      ~resp:
+        (Conv.enum
+           [ "ok", Ok
+           ; "not-in-watch-mode", Not_in_watch_mode
+           ; "build-failed", Build_failed
+           ])
+      ~version:1
+  ;;
+
+  let decl =
+    Decl.Request.make
+      ~method_:(Method.Name.of_string "simulate-file-watcher-queue-overflow")
+      ~generations:[ v1 ]
+  ;;
 end
 
 let build = Build.decl
 let status = Status.decl
+let pkg_enabled = Pkg_enabled.decl
+let simulate_file_watcher_queue_overflow = Queue_overflow.decl

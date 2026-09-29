@@ -1,17 +1,37 @@
 (** Running external programs *)
 
 open Import
-module Action_output_on_success := Execution_parameters.Action_output_on_success
+open Action_types
 module Action_output_limit := Execution_parameters.Action_output_limit
 
+module Sandbox : sig
+  (** Platform-independent sandbox requirements for a process. The concrete
+      enforcement mechanism is selected when the process is spawned. *)
+  type base
+
+  type t
+
+  val create_base : action_trace_root:Path.t -> base
+  val for_action : base -> root:Path.t -> t
+  val destroy : t -> unit
+end
+
 module Failure_mode : sig
-  (** How to handle sub-process failures *)
+  (** How to handle sub-process failures. This type controls the way in which
+      the process we are running can fail. *)
   type ('a, 'b) t =
     | Strict : ('a, 'a) t (** Fail if the process exits with anything else than [0] *)
     | Accept : int Predicate.t -> ('a, ('a, int) result) t
     (** Accept the following non-zero exit codes, and return [Error code] if
         the process exits with one of these codes. *)
     | Return : ('a, 'a * int) t (** Accept any error code and return it. *)
+    | Timeout :
+        { timeout : Time.Span.t option
+        ; failure_mode : ('a, 'b) t
+        }
+        -> ('a, ('b, [ `Timed_out ]) result) t
+    (** In addition to the [failure_mode], finish early if [timeout]
+        was reached. *)
 end
 
 module Io : sig
@@ -48,7 +68,7 @@ module Io : sig
       input from the file. The returned channel can only be used by a single
       call to {!run}. If you want to use it multiple times, you need to use
       [clone]. *)
-  val file : Path.t -> ?perm:int -> 'a mode -> 'a t
+  val file : Path.t -> ?perm:Permissions.Mode.t -> 'a mode -> 'a t
 
   (** Call this when you no longer need this redirection *)
   val release : 'a t -> unit
@@ -57,34 +77,30 @@ module Io : sig
   val multi_use : 'a t -> 'a t
 end
 
-(** Why a Fiber.t was run.*)
-type purpose =
-  | Internal_job
-  | Build_job of Targets.Validated.t option
+module Build : sig
+  type t
 
-(** Additional metadata attached to processes. The location and annotations will
-    be attached to error messages. *)
-type metadata =
-  { loc : Loc.t option
-  ; annots : User_message.Annots.t
-  ; name : string option
-    (** name when emitting stats. defaults to the basename of the executable *)
-  ; categories : string list (** additional categories when emitting stats *)
-  ; purpose : purpose
-  }
+  val create
+    :  action_runner:Action_runner.t option
+    -> run_id:Run_id.t
+    -> cancellation:Fiber.Cancel.t
+    -> t
 
-val create_metadata
-  :  ?loc:Loc.t
-  -> ?annots:User_message.Annots.t
-  -> ?name:string
-  -> ?categories:string list
-  -> ?purpose:purpose
-  -> unit
-  -> metadata
+  val run_id : t -> Run_id.t
+  val cancellation : t -> Fiber.Cancel.t
+  val action_runner : t -> Action_runner.t option
+  val get : unit -> t option
+  val with_ : t -> (unit -> 'a Fiber.t) -> 'a Fiber.t
+  val cancel_current : unit -> unit Fiber.t
+end
 
-(* Dune overrides the TMPDIR for all running actions. At Jane Street, we change
-   this behaviour by setting [set_temp_dir_when_running_actions = false]. *)
-val set_temp_dir_when_running_actions : bool ref
+(** Execute a [Process_runner.request] locally without taking another scheduler job
+    slot. The caller must already account for scheduler concurrency. This is
+    intended for the external worker implementation. *)
+val exec_locally
+  :  build:Build.t
+  -> Process_runner.request
+  -> Process_runner.response Fiber.t
 
 (** [run ?dir ?stdout_to prog args] spawns a sub-process and wait for its
     termination. [stdout_to] [stderr_to] are released *)
@@ -95,10 +111,27 @@ val run
   -> ?stderr_to:Io.output Io.t
   -> ?stdin_from:Io.input Io.t
   -> ?env:Env.t
-  -> ?metadata:metadata
+  -> ?metadata:Process_metadata.t
+  -> ?build:Build.t
+  -> ?sandbox:Sandbox.t
   -> (unit, 'a) Failure_mode.t
   -> Path.t
   -> string list
+  -> 'a Fiber.t
+
+val run_with_array_args
+  :  ?dir:Path.t
+  -> display:Display.t
+  -> ?stdout_to:Io.output Io.t
+  -> ?stderr_to:Io.output Io.t
+  -> ?stdin_from:Io.input Io.t
+  -> ?env:Env.t
+  -> ?metadata:Process_metadata.t
+  -> ?build:Build.t
+  -> ?sandbox:Sandbox.t
+  -> (unit, 'a) Failure_mode.t
+  -> Path.t
+  -> string Array.Immutable.t
   -> 'a Fiber.t
 
 val run_with_times
@@ -108,7 +141,8 @@ val run_with_times
   -> ?stderr_to:Io.output Io.t
   -> ?stdin_from:Io.input Io.t
   -> ?env:Env.t
-  -> ?metadata:metadata
+  -> ?metadata:Process_metadata.t
+  -> ?build:Build.t
   -> (Proc.Times.t, 'a) Failure_mode.t
   -> Path.t
   -> string list
@@ -121,7 +155,9 @@ val run_capture
   -> ?stderr_to:Io.output Io.t
   -> ?stdin_from:Io.input Io.t
   -> ?env:Env.t
-  -> ?metadata:metadata
+  -> ?metadata:Process_metadata.t
+  -> ?build:Build.t
+  -> ?sandbox:Sandbox.t
   -> (string, 'a) Failure_mode.t
   -> Path.t
   -> string list
@@ -133,7 +169,8 @@ val run_capture_line
   -> ?stderr_to:Io.output Io.t
   -> ?stdin_from:Io.input Io.t
   -> ?env:Env.t
-  -> ?metadata:metadata
+  -> ?metadata:Process_metadata.t
+  -> ?build:Build.t
   -> (string, 'a) Failure_mode.t
   -> Path.t
   -> string list
@@ -145,7 +182,8 @@ val run_capture_lines
   -> ?stderr_to:Io.output Io.t
   -> ?stdin_from:Io.input Io.t
   -> ?env:Env.t
-  -> ?metadata:metadata
+  -> ?metadata:Process_metadata.t
+  -> ?build:Build.t
   -> (string list, 'a) Failure_mode.t
   -> Path.t
   -> string list
@@ -157,8 +195,26 @@ val run_capture_zero_separated
   -> ?stderr_to:Io.output Io.t
   -> ?stdin_from:Io.input Io.t
   -> ?env:Env.t
-  -> ?metadata:metadata
+  -> ?metadata:Process_metadata.t
+  -> ?build:Build.t
   -> (string list, 'a) Failure_mode.t
   -> Path.t
   -> string list
   -> 'a Fiber.t
+
+(** [run_inherit_std_in_out] differs from the other [run] functions in the
+    followings ways:
+
+    - The process group ID is inherited by the parent process rather than
+    creating a new one.
+
+    - The input and output file descriptors are the standard ones.
+
+    This version is intended for running external processes at the end of a
+    build such as the ones spawned with "dune exec". *)
+val run_inherit_std_in_out
+  :  ?dir:Path.t
+  -> ?env:Env.t
+  -> Path.t
+  -> string list
+  -> int Fiber.t

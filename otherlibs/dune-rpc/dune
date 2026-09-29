@@ -2,12 +2,8 @@
  (name dune_rpc)
  (public_name dune-rpc)
  (synopsis "dune rpc client and protocol")
- (libraries
-  stdune
-  csexp
-  xdg
-  ordering
-  pp
-  (re_export dune_rpc_private))
- (instrumentation
-  (backend bisect_ppx)))
+ (libraries dyn ocamlc_loc unix stdune csexp xdg ordering pp re))
+
+(ocamllex
+ (modules dbus_address glob_lexer)
+ (flags -ml))

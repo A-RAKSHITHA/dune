@@ -1,8 +1,15 @@
-open Stdune
-open Dune_sexp
+open Import
 module Payload = Template.Pform.Payload
 
 module Var : sig
+  module Os : sig
+    type t =
+      | Os
+      | Os_version
+      | Os_distribution
+      | Os_family
+  end
+
   module Pkg : sig
     module Section : sig
       type t =
@@ -22,10 +29,7 @@ module Var : sig
 
     type t =
       | Switch
-      | Os
-      | Os_version
-      | Os_distribution
-      | Os_family
+      | Os of Os.t
       | Build
       | Prefix
       | User
@@ -70,6 +74,7 @@ module Var : sig
     | Profile
     | Context_name
     | Os_type
+    | Os of Os.t
     | Architecture
     | Arch_sixtyfour
     | System
@@ -85,6 +90,9 @@ module Var : sig
     | Inline_tests
     | Toolchain
     | Pkg of Pkg.t
+    | Oxcaml_supported
+    | Dune_warnings
+    | Git_sha
 
   val compare : t -> t -> Ordering.t
   val to_dyn : t -> Dyn.t
@@ -95,13 +103,18 @@ module Var : sig
 end
 
 module Artifact : sig
+  type mod_ =
+    | Cm_kind of Ocaml.Cm_kind.t
+    | Cmt
+    | Cmti
+
   type t =
-    | Mod of Ocaml.Cm_kind.t
+    | Mod of mod_
     | Lib of Ocaml.Mode.t
 
   val compare : t -> t -> Ordering.t
   val to_dyn : t -> Dyn.t
-  val ext : t -> string
+  val ext : t -> Filename.Extension.t
   val all : t list
 end
 
@@ -125,11 +138,13 @@ module Macro : sig
     | Read_lines
     | Path_no_dep
     | Ocaml_config
-    | Coq_config
+    | Rocq_config
     | Env
+    | Melange_emit
     | Artifact of Artifact.t
     | Pkg
     | Pkg_self
+    | Ppx
 
   val compare : t -> t -> Ordering.t
   val to_dyn : t -> Dyn.t
@@ -183,8 +198,14 @@ module Env : sig
   (** Decoding environment *)
   type t
 
-  val pkg : Syntax.Version.t -> t
-  val initial : Syntax.Version.t -> t
+  val pkg : Syntax.t -> Syntax.Version.t -> t
+
+  val initial
+    :  stanza:Syntax.Version.t
+    -> extensions:(Syntax.t * Syntax.Version.t) list
+    -> t
+
+  val package_enabled_if : t
   val add_user_vars : t -> string list -> t
   val parse : t -> Template.Pform.t -> pform
 
@@ -202,8 +223,5 @@ module Env : sig
       deleted. *)
   val lt_renamed_input_file : t -> t
 
-  type stamp
-
-  val to_stamp : t -> stamp
   val to_dyn : t -> Dyn.t
 end

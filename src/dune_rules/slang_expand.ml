@@ -19,6 +19,9 @@ let rec eval_rec (t : Slang.t) ~dir ~(f : expander)
   =
   match t with
   | Nil -> Memo.return (Ok [])
+  | Undefined ->
+    (* Undefined should be simplified away before expansion *)
+    Code_error.raise "Unexpected Undefined in slang expansion" []
   | Literal sw ->
     f sw
     >>| Result.map_error ~f:(function `Undefined_pkg_var variable_name ->
@@ -50,7 +53,14 @@ let rec eval_rec (t : Slang.t) ~dir ~(f : expander)
        (match value with
         | Ok value -> Memo.return @@ Ok value
         | Error (Undefined_pkg_var _) -> eval_rec fallback ~dir ~f)
-     | And_absorb_undefined_var blangs ->
+     | (And_absorb_undefined_var blangs | Or_absorb_undefined_var blangs) as form ->
+       let identity, absorbing =
+         match form with
+         | And_absorb_undefined_var _ -> true, false
+         | Or_absorb_undefined_var _ -> false, true
+         | _ -> assert false
+       in
+       let value bool = Ok [ Value.Deferred_concat.singleton (Value.of_bool bool) ] in
        let rec loop acc = function
          | [] -> Memo.return acc
          | x :: xs ->
@@ -58,25 +68,11 @@ let rec eval_rec (t : Slang.t) ~dir ~(f : expander)
            (match x with
             | Error _ as e ->
               (* Propagate the first error rather than the last *)
-              if Result.is_ok acc then loop e xs else loop acc xs
-            | Ok true -> loop acc xs
-            | Ok false ->
-              Memo.return (Ok [ Value.Deferred_concat.singleton Value.false_ ]))
+              loop (if Result.is_ok acc then e else acc) xs
+            | Ok result ->
+              if result = absorbing then Memo.return (value result) else loop acc xs)
        in
-       loop (Ok [ Value.Deferred_concat.singleton Value.true_ ]) blangs
-     | Or_absorb_undefined_var blangs ->
-       let rec loop acc = function
-         | [] -> Memo.return acc
-         | x :: xs ->
-           let* x = eval_blang_rec x ~dir ~f in
-           (match x with
-            | Error _ as e ->
-              (* Propagate the first error rather than the last *)
-              if Result.is_ok acc then loop e xs else loop acc xs
-            | Ok false -> loop acc xs
-            | Ok true -> Memo.return (Ok [ Value.Deferred_concat.singleton Value.true_ ]))
-       in
-       loop (Ok [ Value.Deferred_concat.singleton Value.false_ ]) blangs
+       loop (value identity) blangs
      | Blang b ->
        eval_blang_rec b ~dir ~f
        >>| Result.map ~f:(fun bool ->
@@ -129,30 +125,21 @@ and eval_blang_rec (t : Slang.blang) ~dir ~f =
   match t with
   | Const x -> Memo.return (Ok x)
   | Expr s -> eval_to_bool s ~dir ~f
-  | And xs ->
-    let rec loop = function
-      | [] -> Memo.return (Ok true)
-      | x :: xs ->
-        let* x = eval_blang_rec x ~dir ~f in
-        (match x with
-         | Error _ as e -> Memo.return e
-         | Ok true -> loop xs
-         | Ok false ->
-           (* stop evaluating when a false case is reached *)
-           Memo.return (Ok false))
+  | And xs | Or xs ->
+    let continue, result =
+      match t with
+      | And _ -> true, false
+      | Or _ -> false, true
+      | Const _ | Expr _ | Not _ | Compare _ -> assert false
     in
-    loop xs
-  | Or xs ->
     let rec loop = function
-      | [] -> Memo.return (Ok false)
+      | [] -> Memo.return (Ok continue)
       | x :: xs ->
         let* x = eval_blang_rec x ~dir ~f in
         (match x with
          | Error _ as e -> Memo.return e
-         | Ok false -> loop xs
-         | Ok true ->
-           (* stop evaluating when a true case is reached *)
-           Memo.return (Ok true))
+         | Ok value ->
+           if Bool.equal value continue then loop xs else Memo.return (Ok result))
     in
     loop xs
   | Not blang ->
@@ -168,9 +155,7 @@ and eval_blang_rec (t : Slang.blang) ~dir ~f =
         Relop.eval op (Value.L.compare_vals ~dir (concat x) (concat y))))
 ;;
 
-let eval t ~dir ~f : Value.Deferred_concat.t list Memo.t =
-  eval_rec t ~dir ~f
-  >>| function
+let raise_undefined_pkg_var = function
   | Ok x -> x
   | Error (Undefined_pkg_var { literal; variable_name }) ->
     User_error.raise
@@ -181,20 +166,13 @@ let eval t ~dir ~f : Value.Deferred_concat.t list Memo.t =
       ]
 ;;
 
+let eval t ~dir ~f : Value.Deferred_concat.t list Memo.t =
+  eval_rec t ~dir ~f >>| raise_undefined_pkg_var
+;;
+
 let eval_multi_located ts ~dir ~f =
   Memo.List.concat_map ts ~f:(fun t ->
     eval t ~dir ~f >>| List.map ~f:(fun value -> Slang.loc t, value))
 ;;
 
-let eval_blang blang ~dir ~f =
-  let+ result = eval_blang_rec blang ~dir ~f in
-  match result with
-  | Ok value -> value
-  | Error (Undefined_pkg_var { literal; variable_name }) ->
-    User_error.raise
-      ~loc:(String_with_vars.loc literal)
-      [ Pp.textf
-          "Undefined package variable %S"
-          (Package_variable_name.to_string variable_name)
-      ]
-;;
+let eval_blang blang ~dir ~f = eval_blang_rec blang ~dir ~f >>| raise_undefined_pkg_var

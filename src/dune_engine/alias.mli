@@ -1,10 +1,9 @@
 open Import
 
 module Name : sig
-  include module type of Dune_util.Alias_name with type t = Dune_util.Alias_name.t
+  include module type of Stdune.Alias_name with type t = Stdune.Alias_name.t
 
   val default : t
-  val parse_local_path : Loc.t * Path.Local.t -> Path.Local.t * t
 
   include Comparable_intf.S with type key := t
 end
@@ -22,5 +21,4 @@ val name : t -> Name.t
 val dir : t -> Path.Build.t
 val to_dyn : t -> Dyn.t
 val of_user_written_path : loc:Loc.t -> Path.t -> t
-val fully_qualified_name : t -> Path.Build.t
 val describe : ?loc:Loc.t -> t -> _ Pp.t

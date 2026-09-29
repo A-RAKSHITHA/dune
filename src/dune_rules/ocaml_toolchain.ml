@@ -16,9 +16,8 @@ type t =
   ; lib_config : Lib_config.t
   }
 
-let make_builtins ~ocaml_config ~version =
-  Memo.Lazy.create (fun () ->
-    let stdlib_dir = Path.of_string (Ocaml_config.standard_library ocaml_config) in
+let make_builtins ~stdlib_dir ~version =
+  Memo.Lazy.create ~name:"ocaml-toolchain-builtins" (fun () ->
     Meta.builtins ~stdlib_dir ~version)
 ;;
 
@@ -60,7 +59,12 @@ let best_mode t : Mode.t =
 
 let make name ~which ~env ~get_ocaml_tool =
   let not_found ?hint program =
-    Action.Prog.Not_found.create ?hint ~context:name ~loc:None ~program ()
+    Action.Prog.Not_found.create
+      ?hint
+      ~context:name
+      ~loc:None
+      ~program:(Filename.of_string_exn program)
+      ()
   in
   let* ocamlc =
     let program = "ocamlc" in
@@ -91,8 +95,9 @@ let make name ~which ~env ~get_ocaml_tool =
   and* ocamldep = get_ocaml_tool "ocamldep"
   and* ocamlmklib = get_ocaml_tool "ocamlmklib"
   and* ocamlobjinfo = get_ocaml_tool "ocamlobjinfo" in
+  let lib_config = Lib_config.create ocaml_config ~ocamlopt in
   let version = Ocaml.Version.of_ocaml_config ocaml_config in
-  let builtins = make_builtins ~version ~ocaml_config in
+  let builtins = make_builtins ~stdlib_dir:lib_config.stdlib_dir ~version in
   Memo.return
     { bin_dir = ocaml_bin
     ; ocaml
@@ -104,8 +109,8 @@ let make name ~which ~env ~get_ocaml_tool =
     ; ocaml_config
     ; ocaml_config_vars
     ; version
+    ; lib_config
     ; builtins = Memo.Lazy.force builtins
-    ; lib_config = Lib_config.create ocaml_config ~ocamlopt
     }
 ;;
 
@@ -117,13 +122,13 @@ let of_env_with_findlib name env findlib_config ~which =
     get_tool_using_findlib_config program
     >>= function
     | Some x -> Memo.return (Some x)
-    | None -> which program
+    | None -> which (Filename.of_string_exn program)
   in
   let get_ocaml_tool ~dir prog =
     get_tool_using_findlib_config prog
     >>= function
     | Some x -> Memo.return (Some x)
-    | None -> Which.best_in_dir ~dir prog
+    | None -> Which.best_in_dir ~dir (Filename.of_string_exn prog)
   in
   make name ~env ~get_ocaml_tool ~which
 ;;
@@ -135,6 +140,7 @@ let of_binaries ~path name env binaries =
       |> Filename.Map.of_list_map_exn ~f:(fun binary -> Path.basename binary, binary)
     in
     fun basename ->
+      let basename = Filename.of_string_exn basename in
       match Which.candidates basename |> List.find_map ~f:(Filename.Map.find map) with
       | Some s -> Memo.return (Some s)
       | None -> Which.which ~path basename
@@ -155,36 +161,4 @@ let register_response_file_support t =
     Result.iter t.ocamldep ~f:set;
     if Ocaml.Version.ocamlmklib_supports_response_file t.version
     then Result.iter ~f:set t.ocamlmklib)
-;;
-
-let check_fdo_support { version; lib_config = { has_native; _ }; ocaml_config; _ } name =
-  let version_string = Ocaml_config.version_string ocaml_config in
-  let err () =
-    User_error.raise
-      [ Pp.textf
-          "fdo requires ocamlopt version >= 4.10, current version is %s (context: %s)"
-          (Context_name.to_string name)
-          version_string
-      ]
-  in
-  if not has_native then err ();
-  if Ocaml_config.is_dev_version ocaml_config
-  then
-    ( (* Allows fdo to be invoked with any dev version of the compiler. This is
-         experimental and will be removed when ocamlfdo is fully integrated into
-         the toolchain. When using a dev version of ocamlopt that does not
-         support the required options, fdo builds will fail because the compiler
-         won't recognize the options. Normals builds won't be affected. *) )
-  else if not (Ocaml.Version.supports_split_at_emit version)
-  then
-    if not (Ocaml.Version.supports_function_sections version)
-    then err ()
-    else
-      User_warning.emit
-        [ Pp.textf
-            "fdo requires ocamlopt version >= 4.10, current version %s has partial \
-             support. Some optimizations are disabled! (context: %s)"
-            (Context_name.to_string name)
-            version_string
-        ]
 ;;

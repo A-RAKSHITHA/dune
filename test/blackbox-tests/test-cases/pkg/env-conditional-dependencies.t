@@ -1,4 +1,4 @@
-  $ . ./helpers.sh
+
   $ mkrepo
  
 A package with different linux and macos dependencies including a test-only
@@ -55,7 +55,7 @@ Create a workspace config that defines separate build contexts for macos and lin
   > EOF
 
 Now the os-specific dependencies are included on their respective systems.
-  $ dune pkg lock --all
+  $ dune_pkg_lock_normalized --all
   Solution for dune.linux.lock:
   (no dependencies to lock)
   Solution for dune.lock:

@@ -1,5 +1,4 @@
-open Stdune
-open Dune_sexp
+open Import
 open Decoder
 
 module Glob_files = struct
@@ -8,22 +7,40 @@ module Glob_files = struct
     ; recursive : bool
     }
 
+  let equal t { glob; recursive } =
+    String_with_vars.equal t.glob glob && Bool.equal t.recursive recursive
+  ;;
+
   let to_dyn { glob; recursive } =
     Dyn.record [ "glob", String_with_vars.to_dyn glob; "recursive", Dyn.bool recursive ]
   ;;
 end
 
 module Sandbox_config = struct
-  type t = Loc.t * [ `None | `Always | `Preserve_file_kind ] list
+  type mode =
+    [ `None
+    | `Always
+    | `Preserve_file_kind
+    | `Patch_back_source_tree
+    ]
+
+  type t = Loc.t * mode list
+
+  let equal_mode : mode -> mode -> bool = Poly.equal
+  let equal = Tuple.T2.equal Loc.equal (List.equal equal_mode)
 
   let all =
-    [ "none", `None; "always", `Always; "preserve_file_kind", `Preserve_file_kind ]
+    [ "none", `None, (1, 12)
+    ; "always", `Always, (1, 12)
+    ; "preserve_file_kind", `Preserve_file_kind, (1, 12)
+    ; "patch_back_source_tree", `Patch_back_source_tree, (3, 22)
+    ]
   ;;
 
   let loc (loc, _) = loc
 
   let string_of_mode mode =
-    List.find_map all ~f:(fun (s, mode') ->
+    List.find_map all ~f:(fun (s, mode', _) ->
       if Poly.equal mode mode' then Some s else None)
     |> Option.value_exn
   ;;
@@ -33,7 +50,13 @@ module Sandbox_config = struct
   ;;
 
   let decode : t Decoder.t =
-    Syntax.since Stanza.syntax (1, 12) >>> located (repeat (enum all))
+    let all =
+      List.map all ~f:(fun (name, mode, version) ->
+        ( name
+        , let+ () = Syntax.since Stanza.syntax version in
+          mode ))
+    in
+    located (repeat (enum' all))
   ;;
 
   let fold (_, xs) ~f ~init = List.fold_left xs ~init ~f:(fun acc a -> f a acc)
@@ -50,6 +73,21 @@ type t =
   | Env_var of String_with_vars.t
   | Sandbox_config of Sandbox_config.t
   | Include of string
+
+let equal a b =
+  match a, b with
+  | File a, File b
+  | Alias a, Alias b
+  | Alias_rec a, Alias_rec b
+  | Source_tree a, Source_tree b
+  | Package a, Package b
+  | Env_var a, Env_var b -> String_with_vars.equal a b
+  | Glob_files a, Glob_files b -> Glob_files.equal a b
+  | Universe, Universe -> true
+  | Sandbox_config a, Sandbox_config b -> Sandbox_config.equal a b
+  | Include a, Include b -> String.equal a b
+  | _, _ -> false
+;;
 
 let remove_locs = function
   | File sw -> File (String_with_vars.remove_locs sw)
@@ -101,8 +139,8 @@ let decode files =
           Sandbox_config config )
       ; ( "include"
         , let+ () = Syntax.since Stanza.syntax (3, 1)
-          and+ filename = filename in
-          Include filename )
+          and+ file_path = file_path in
+          Include file_path )
       ]
   in
   decode
@@ -112,6 +150,34 @@ let decode files =
 
 let decode_no_files = decode `Forbid
 let decode = decode `Allow
+
+let decode_bindings =
+  let+ bindings = Bindings.decode decode in
+  Bindings.fold bindings ~init:() ~f:(fun binding () ->
+    match binding with
+    | Bindings.Unnamed _ -> ()
+    | Named (name, deps) ->
+      List.iter deps ~f:(function
+        | Package package ->
+          User_error.raise
+            ~loc:(String_with_vars.loc package)
+            ~hints:[ Pp.text "Place the (package ...) entry in the deps list directly." ]
+            [ Pp.textf
+                "(package ...) is not supported inside a named dependency binding (:%s)."
+                name
+            ]
+        | _ -> ()));
+  bindings
+;;
+
+let command_line_parser ~stanza_version =
+  Syntax.set
+    Stanza.syntax
+    (Active Stanza.latest_version)
+    (String_with_vars.set_decoding_env
+       (Pform.Env.initial ~stanza:stanza_version ~extensions:[])
+       decode)
+;;
 
 open Dune_sexp
 
@@ -132,4 +198,5 @@ let encode = function
   | Include t -> List [ Dune_sexp.atom "include"; Dune_sexp.atom t ]
 ;;
 
+let repr = Repr.view Dune_sexp.repr ~to_:encode
 let to_dyn t = Dune_sexp.to_dyn (encode t)

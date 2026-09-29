@@ -3,17 +3,6 @@ let printf = Printf.printf
 open Base
 open Stdune
 
-let critical_section mutex ~f =
-  (* Since 5.0, using "Mutex" with Base open rings an alert and suggests
-     we use "Stdlib.Mutex" instead.
-     Prior to OCaml 5.0, "Stdlib.Mutex" didn't exist, it was just "Mutex".
-     Since 5.1 there is Stdlib.Mutex.protect which replaces this function.
-  *)
-  let module Mutex = Mutex [@alert "-deprecated"] in
-  Mutex.lock mutex;
-  Exn.protect ~f ~finally:(fun () -> Mutex.unlock mutex)
-;;
-
 let init () =
   let tmp_dir = Stdlib.Filename.concat (Unix.getcwd ()) "working-dir" in
   let () =
@@ -25,16 +14,58 @@ let init () =
   Path.Build.set_build_dir (Path.Outside_build_dir.of_string "_build")
 ;;
 
-let now () = Unix.gettimeofday ()
+let create_watcher ?fsevents_debounce ~watch_exclusions () =
+  let mutex = Mutex.create () in
+  let events_buffer = ref [] in
+  let try_to_get_events () =
+    Mutex.protect mutex (fun () ->
+      match !events_buffer with
+      | [] -> None
+      | events ->
+        events_buffer := [];
+        Some events)
+  in
+  let event_queue = Dune_scheduler.Event.Queue.create () in
+  let watcher =
+    Dune_scheduler.File_watcher.create
+      ?fsevents_debounce
+      ~watch_exclusions
+      ~event_queue
+      ()
+  in
+  let rec read_events () =
+    let open Fiber.O in
+    Dune_scheduler.File_watcher.read watcher
+    >>= function
+    | None -> Fiber.return ()
+    | Some events ->
+      let events =
+        List.map events ~f:(function
+          | Dune_scheduler.Event.File_watcher_event.Fs_memo_event event -> event
+          | Queue_overflow -> assert false)
+      in
+      Mutex.protect mutex (fun () -> events_buffer := !events_buffer @ events);
+      read_events ()
+  in
+  let (_ : Thread.t) =
+    let iter () =
+      match Dune_scheduler.Event.Queue.next event_queue with
+      | Fiber_fill_ivar fill -> [ fill ]
+      | Shutdown _ | Job_complete_ready -> assert false
+    in
+    Thread.create (fun () -> Fiber.run (read_events ()) ~iter) ()
+  in
+  watcher, try_to_get_events
+;;
 
 let retry_loop (type a) ~period ~timeout ~(f : unit -> a option) : a option =
-  let t0 = now () in
+  let t0 = Time.now () in
   let rec loop () =
     match f () with
     | Some res -> Some res
     | None ->
-      let t1 = now () in
-      if Base.Float.( < ) (t1 -. t0) timeout
+      let t1 = Time.now () in
+      if Base.Float.( < ) (Time.Span.to_secs (Time.diff t1 t0)) timeout
       then (
         Thread.delay period;
         loop ())
@@ -69,7 +100,9 @@ let get_events ~try_to_get_events ~expected =
 let print_events ~try_to_get_events ~expected =
   let events, status = get_events ~try_to_get_events ~expected in
   List.iter events ~f:(fun event ->
-    Dune_file_watcher.Fs_memo_event.to_dyn event |> Dyn.to_string |> Stdio.print_endline);
+    Dune_scheduler.Event.Fs_memo_event.to_dyn event
+    |> Dyn.to_string
+    |> Stdio.print_endline);
   match status with
   | `Ok -> ()
   | `Not_enough ->

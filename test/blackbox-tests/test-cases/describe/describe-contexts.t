@@ -1,18 +1,8 @@
 Showcase behavior of the `dune describe contexts` subcommand
 
-  $ cat >dune-project <<EOF
-  > (lang dune 3.14)
-  > EOF
+  $ make_dune_project 3.14
 
-  $ cat > dune-workspace << EOF
-  > (lang dune 3.14)
-  > 
-  > (context default)
-  > 
-  > (context
-  >  (default
-  >   (name alt)))
-  > EOF
+  $ make_two_context_workspace 3.14 alt
 
   $ dune describe contexts
   alt

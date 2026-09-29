@@ -1,8 +1,6 @@
 This test verifies the @pkg-install alias fetch and build the project dependencies
 without building the project itself.
 
-  $ . ./helpers.sh
-
 Create a project using the fake library as a dependency:
   $ cat > dune-project << EOF
   > (lang dune 3.16)
@@ -21,7 +19,7 @@ Ensure the alias is not available outside of the package manamgent context:
 
 Create a fake package which echoes information to stdout when build:
   $ make_lockdir
-  $ cat > dune.lock/foo.pkg << EOF
+  $ make_lockpkg foo <<EOF
   > (version 0.0.1)
   > (build
   >  (run echo "Build package foo"))
@@ -54,3 +52,17 @@ already built the `foo` dependency when calling `@pkg-install`:
 
   $ dune build ./bar.exe
   let _ = 42
+
+Loading a subdirectory still contributes its own rules. Re-requesting the root
+package-install alias does not rebuild the installed dependency.
+
+  $ mkdir sub
+  $ cat > sub/dune <<EOF
+  > (rule
+  >  (target generated)
+  >  (action (with-stdout-to %{target} (echo "nested\n"))))
+  > EOF
+  $ dune build sub/generated
+  $ cat _build/default/sub/generated
+  nested
+  $ dune build @pkg-install

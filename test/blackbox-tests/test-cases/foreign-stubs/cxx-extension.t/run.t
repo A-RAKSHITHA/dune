@@ -15,15 +15,13 @@
   >  (action (run ./bar.exe)))
   > EOF
 
-  $ cat >dune-project <<EOF
-  > (lang dune 1.8)
-  > EOF
+  $ make_dune_project 1.8
 
 * .cxx extension is allowed
   $ dune build
   n = 42
 
-  $ echo "(lang dune 1.11)" > dune-project
+  $ make_dune_project 1.11
 
 * Compilation succeeds when unused baz.cpp and baz.cxx exist
 
@@ -102,7 +100,7 @@ This works because the translation layer from pre-2.0 to 2.0 replaces
 
 * Compilation fails when using :standard in Dune 2.0
 
-  $ echo "(lang dune 2.0)" > dune-project
+  $ make_dune_project 2.0
 
   $ cat >dune <<EOF
   > (library

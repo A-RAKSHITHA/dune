@@ -24,16 +24,23 @@ module Make (Stdune : sig
         type t
       end
 
-      module Annots : sig
+      module Compound : sig
+        type t
+      end
+
+      module Diff_annot : sig
         type t
       end
     end
 
     module User_error : sig
       val raise
-        :  ?loc:Loc.t
+        :  ?has_embedded_location:bool
+        -> ?needs_stack_trace:bool
+        -> ?loc:Loc.t
         -> ?hints:User_message.Style.t Pp.t list
-        -> ?annots:User_message.Annots.t
+        -> ?compound:User_message.Compound.t list
+        -> ?promotion:User_message.Diff_annot.t
         -> User_message.Style.t Pp.t list
         -> _
     end

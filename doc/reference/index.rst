@@ -37,7 +37,6 @@ These documents specify the various features and languages present in Dune.
        :maxdepth: 1
        :caption: Concepts
 
-       ../concepts/scopes
        ../concepts/variables
        ../concepts/dependency-spec
        ../concepts/ocaml-flags
@@ -66,8 +65,9 @@ These documents specify the various features and languages present in Dune.
        :caption: Dune Components
 
        cli
+       dune-tools
        ../dune-libs
-       ../caching
+       caches
 
   .. grid-item::
 
@@ -75,7 +75,7 @@ These documents specify the various features and languages present in Dune.
        :maxdepth: 1
        :caption: Integrations
 
-       ../coq
+       ../rocq
        ../rpc
        packages
        findlib

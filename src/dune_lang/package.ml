@@ -1,38 +1,11 @@
-open Stdune
-open Dune_sexp
+open Import
 module Name = Package_name
-
-module Id = struct
-  module T = struct
-    type t =
-      { name : Name.t
-      ; dir : Path.Source.t
-      }
-
-    let compare { name; dir } pkg =
-      match Name.compare name pkg.name with
-      | Eq -> Path.Source.compare dir pkg.dir
-      | e -> e
-    ;;
-
-    let to_dyn { dir; name } =
-      Dyn.record [ "name", Name.to_dyn name; "dir", Path.Source.to_dyn dir ]
-    ;;
-  end
-
-  include T
-
-  let hash { name; dir } = Tuple.T2.hash Name.hash Path.Source.hash (name, dir)
-  let name t = t.name
-
-  module C = Comparable.Make (T)
-  module Set = C.Set
-  module Map = C.Map
-end
+module Id = Package_id
 
 type opam_file =
   | Exists of bool
   | Generated
+  | Generated_with_diff
 
 (* we need the original opam file when passing it [$ dune pkg lock] we want to
    to allow the opam library interpret the opam file directly. *)
@@ -40,6 +13,31 @@ type original_opam_file =
   { file : Path.Source.t
   ; contents : string
   }
+
+module Duplicate_dep_warning = struct
+  type field =
+    | Depends
+    | Conflicts
+    | Depopts
+
+  let make ~loc ~dep_string field =
+    let field_name, combine_op =
+      match field with
+      | Depends -> "depends", "(and ...)"
+      | Conflicts -> "conflicts", "(or ...)"
+      | Depopts -> "depopts", "(and ...)"
+    in
+    User_message.make
+      ~loc
+      [ Pp.textf
+          "Duplicate dependency on package %s in '%s' field. If you want to specify \
+           multiple constraints, combine them using %s."
+          dep_string
+          field_name
+          combine_op
+      ]
+  ;;
+end
 
 type t =
   { id : Id.t
@@ -50,6 +48,7 @@ type t =
   ; depends : Package_dependency.t list
   ; conflicts : Package_dependency.t list
   ; depopts : Package_dependency.t list
+  ; enabled_if : Blang.t option
   ; info : Package_info.t
   ; version : Package_version.t option
   ; has_opam_file : opam_file
@@ -58,6 +57,8 @@ type t =
   ; sites : Section.t Site.Map.t
   ; allow_empty : bool
   ; original_opam_file : original_opam_file option
+  ; exclusive_dir : (Loc.t * Path.Source.t) option
+  ; duplicate_dep_warnings : User_message.t list
   }
 
 (* Package name are globally unique, so we can reasonably expect that there will
@@ -81,6 +82,9 @@ let id t = t.id
 let original_opam_file t = t.original_opam_file
 let set_inside_opam_dir t ~dir = { t with opam_file = Name.file t.id.name ~dir }
 let set_version_and_info t ~version ~info = { t with version; info }
+let exclusive_dir t = t.exclusive_dir
+let duplicate_dep_warnings t = t.duplicate_dep_warnings
+let enabled_if t = t.enabled_if
 
 let encode
       (name : Name.t)
@@ -100,6 +104,9 @@ let encode
       ; allow_empty
       ; opam_file = _
       ; original_opam_file = _
+      ; exclusive_dir
+      ; duplicate_dep_warnings = _
+      ; enabled_if
       }
   =
   let open Encoder in
@@ -112,6 +119,7 @@ let encode
         ; field_l "depends" Package_dependency.encode depends
         ; field_l "conflicts" Package_dependency.encode conflicts
         ; field_l "depopts" Package_dependency.encode depopts
+        ; field_o "enabled_if" Blang.encode enabled_if
         ; field_o "version" Package_version.encode version
         ; field "tags" (list string) ~default:[] tags
         ; field_l
@@ -120,6 +128,13 @@ let encode
             (Name.Map.keys deprecated_package_names)
         ; field_l "sites" (pair Site.encode Section.encode) (Site.Map.to_list sites)
         ; field_b "allow_empty" allow_empty
+        ; field_o
+            "dir"
+            (fun (_, dir) ->
+               Path.Source.basename dir
+               |> Filename.to_string
+               |> Dune_sexp.atom_or_quoted_string)
+            exclusive_dir
         ]
   in
   list sexp (string "package" :: fields)
@@ -130,6 +145,11 @@ let decode_name ~version =
 ;;
 
 let decode =
+  let enabled_if =
+    String_with_vars.set_decoding_env
+      Pform.Env.package_enabled_if
+      (Blang.Ast.decode ~override_decode_bare_literal:None String_with_vars.decode)
+  in
   let open Decoder in
   let name_map syntax of_list_map to_string name decode print_value error_msg =
     let+ names = field ~default:[] name (syntax >>> repeat decode) in
@@ -142,6 +162,24 @@ let decode =
         ; Pp.textf "- %s" (print_value loc2)
         ]
   in
+  let collect_duplicate_deps deps field =
+    let warnings, _ =
+      List.fold_left deps ~init:([], []) ~f:(fun (warnings, seen) (loc, dep) ->
+        let is_duplicate =
+          List.exists seen ~f:(fun (_, seen_dep) ->
+            Package_name.equal
+              dep.Package_dependency.name
+              seen_dep.Package_dependency.name)
+        in
+        if is_duplicate
+        then (
+          let dep_string = Package_dependency.encode dep |> Dune_sexp.to_string in
+          let warning = Duplicate_dep_warning.make ~loc ~dep_string field in
+          warning :: warnings, (loc, dep) :: seen)
+        else warnings, (loc, dep) :: seen)
+    in
+    warnings
+  in
   fun ~dir ->
     fields
     @@ let* version = Syntax.get_exn Stanza.syntax in
@@ -151,11 +189,20 @@ let decode =
        and+ description = field_o "description" string
        and+ version =
          field_o "version" (Syntax.since Stanza.syntax (2, 5) >>> Package_version.decode)
-       and+ depends = field ~default:[] "depends" (repeat Package_dependency.decode)
-       and+ conflicts = field ~default:[] "conflicts" (repeat Package_dependency.decode)
-       and+ depopts = field ~default:[] "depopts" (repeat Package_dependency.decode)
+       and+ depends_with_locs =
+         field ~default:[] "depends" (repeat (located Package_dependency.decode))
+       and+ conflicts_with_locs =
+         field ~default:[] "conflicts" (repeat (located Package_dependency.decode))
+       and+ depopts_with_locs =
+         field ~default:[] "depopts" (repeat (located Package_dependency.decode))
+       and+ enabled_if = field_o "enabled_if" (Unreleased.since () >>> enabled_if)
        and+ info = Package_info.decode ~since:(2, 0) ()
        and+ tags = field "tags" (enter (repeat string)) ~default:[]
+       and+ exclusive_dir =
+         field_o
+           "dir"
+           (let+ loc, s = Syntax.since Stanza.syntax (3, 21) >>> located string in
+            loc, Path.Source.relative ~error_loc:loc dir s)
        and+ deprecated_package_names =
          name_map
            (Syntax.since Stanza.syntax (2, 0))
@@ -177,7 +224,17 @@ let decode =
        and+ allow_empty = field_b "allow_empty" ~check:(Syntax.since Stanza.syntax (3, 0))
        and+ lang_version = Syntax.get_exn Stanza.syntax in
        let allow_empty = lang_version < (3, 0) || allow_empty in
-       let id = { Id.name; dir } in
+       let duplicate_dep_warnings =
+         List.concat
+           [ collect_duplicate_deps depends_with_locs Depends
+           ; collect_duplicate_deps conflicts_with_locs Conflicts
+           ; collect_duplicate_deps depopts_with_locs Depopts
+           ]
+       in
+       let depends = List.map ~f:snd depends_with_locs in
+       let conflicts = List.map ~f:snd conflicts_with_locs in
+       let depopts = List.map ~f:snd depopts_with_locs in
+       let id = Id.create ~name ~dir in
        let opam_file = Name.file id.name ~dir:id.dir in
        { id
        ; loc
@@ -195,6 +252,9 @@ let decode =
        ; allow_empty
        ; opam_file
        ; original_opam_file = None
+       ; exclusive_dir
+       ; duplicate_dep_warnings
+       ; enabled_if
        }
 ;;
 
@@ -203,6 +263,7 @@ let dyn_of_opam_file =
   function
   | Exists b -> variant "Exists" [ bool b ]
   | Generated -> variant "Generated" []
+  | Generated_with_diff -> variant "Generated_with_diff" []
 ;;
 
 let to_dyn
@@ -222,6 +283,9 @@ let to_dyn
       ; allow_empty
       ; opam_file = _
       ; original_opam_file = _
+      ; exclusive_dir = _
+      ; duplicate_dep_warnings = _
+      ; enabled_if
       }
   =
   let open Dyn in
@@ -239,6 +303,7 @@ let to_dyn
     ; "deprecated_package_names", Name.Map.to_dyn Loc.to_dyn_hum deprecated_package_names
     ; "sites", Site.Map.to_dyn Section.to_dyn sites
     ; "allow_empty", Bool allow_empty
+    ; "enabled_if", (option Blang.to_dyn) enabled_if
     ]
 ;;
 
@@ -255,6 +320,7 @@ let create
       ~conflicts
       ~depends
       ~depopts
+      ~enabled_if
       ~info
       ~has_opam_file
       ~dir
@@ -265,8 +331,9 @@ let create
       ~tags
       ~original_opam_file
       ~deprecated_package_names
+      ~contents_basename
   =
-  let id = { Id.name; dir } in
+  let id = Id.create ~name ~dir in
   { id
   ; loc
   ; version
@@ -283,5 +350,10 @@ let create
   ; allow_empty
   ; opam_file = Name.file name ~dir
   ; original_opam_file
+  ; exclusive_dir =
+      Option.map contents_basename ~f:(fun (loc, s) ->
+        loc, Path.Source.relative_fname dir s)
+  ; duplicate_dep_warnings = []
+  ; enabled_if
   }
 ;;

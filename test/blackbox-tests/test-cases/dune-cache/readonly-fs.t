@@ -1,9 +1,7 @@
 The cache can't be written if the location to where it is supposed to be
 written can't be written to.
 
-  $ cat > dune-project <<EOF
-  > (lang dune 3.17)
-  > EOF
+  $ make_dune_project 3.17
   $ cat >dune <<EOF
   > (rule (with-stdout-to foo (progn)))
   > EOF
@@ -20,7 +18,7 @@ where Dune is supposed to store the cache:
   Warning: Cache directories could not be created: Permission denied; disabling
   cache
   Hint: Make sure the directory
-  $TESTCASE_ROOT/readonly/cache-dir/temp
+  $TESTCASE_ROOT/readonly/cache-dir/db/temp
   can be created
 
 Likewise, this should also happen if the location is set via XDG variables.
@@ -33,7 +31,7 @@ Likewise, this should also happen if the location is set via XDG variables.
   Warning: Cache directories could not be created: $REASON: disabling cache
   Hint: Make sure the directory $TESTCASE_ROOT/readonly/xdg-cache-dir/dune/db/temp can be created
 
-  $ HOME=/homeless-shelter
+  $ export HOME=/homeless-shelter
   $ unset XDG_CACHE_HOME
   $ dune build 2>&1 | sed 's/created: .*;/created: $REASON:/'
   Warning: Cache directories could not be created: $REASON: disabling cache

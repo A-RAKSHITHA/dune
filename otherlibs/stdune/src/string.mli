@@ -5,21 +5,27 @@ include module type of struct
   end
   with type t := t
 
+val repr : t Repr.t
 val equal : t -> t -> bool
 val compare : t -> t -> Ordering.t
 val hash : t -> int
 val to_dyn : t -> Dyn.t
 val break : t -> pos:int -> t * t
+val to_string : t -> t
 val is_empty : t -> bool
+
+(** [append_with_char x ~sep y] concatenates [x], [sep], and [y]. *)
+val append_with_char : t -> sep:char -> t -> t
+
 val of_list : char list -> t
-val is_prefix : t -> prefix:t -> bool
-val is_suffix : t -> suffix:t -> bool
+val starts_with : prefix:t -> t -> bool
+val ends_with : suffix:t -> t -> bool
 val take : t -> int -> t
 val drop : t -> int -> t
 val split_n : t -> int -> t * t
-val drop_prefix : t -> prefix:t -> t option
+val drop_prefix : prefix:t -> t -> t option
 val drop_prefix_if_exists : t -> prefix:t -> t
-val drop_suffix : t -> suffix:t -> t option
+val drop_suffix : suffix:t -> t -> t option
 val drop_suffix_if_exists : t -> suffix:t -> t
 
 (** [drop_prefix_and_suffix t ~prefix ~suffix] Will attempt to remove [prefix]
@@ -30,9 +36,9 @@ val drop_prefix_and_suffix : t -> prefix:t -> suffix:t -> t option
 module Caseless : sig
   (** Case-insensitive matching semantics. *)
 
-  val drop_prefix : t -> prefix:t -> t option
+  val drop_prefix : prefix:t -> t -> t option
   val drop_prefix_if_exists : t -> prefix:t -> t
-  val drop_suffix : t -> suffix:t -> t option
+  val drop_suffix : suffix:t -> t -> t option
   val drop_suffix_if_exists : t -> suffix:t -> t
 end
 
@@ -42,10 +48,25 @@ val capitalize : t -> t
 val uncapitalize : t -> t
 val uppercase : t -> t
 val lowercase : t -> t
+val contains : t -> char -> bool
+val contains_from : t -> int -> char -> bool
 val index : t -> char -> int option
+val index_opt : t -> char -> int option
 val index_from : t -> int -> char -> int option
+val index_from_opt : t -> int -> char -> int option
 val rindex : t -> char -> int option
 val rindex_from : t -> int -> char -> int option
+
+(** [index_from_unchecked s pos char] returns the first index of [char] at or
+    after [pos], or [-1] if it is absent. [pos] must be between [0] and
+    [length s]. *)
+val index_from_unchecked : t -> int -> char -> int
+
+(** [rindex_from_unchecked s pos char] returns the last index of [char] at or
+    before [pos], or [-1] if it is absent. [pos] must be between [-1] and
+    [length s - 1]. *)
+val rindex_from_unchecked : t -> int -> char -> int
+
 val extract_words : t -> is_word_char:(char -> bool) -> t list
 val extract_comma_space_separated_words : t -> t list
 val extract_blank_separated_words : t -> t list
@@ -67,6 +88,7 @@ val rsplit2 : t -> on:char -> (t * t) option
     the original string [s]. *)
 val split : t -> on:char -> t list
 
+val split_on_char : sep:char -> t -> t list
 val split_lines : t -> t list
 
 (** Escape ONLY one character. {!escape} also escapes '\n',... and transforms
@@ -108,6 +130,7 @@ val rfindi : string -> f:(char -> bool) -> int option
 
 include Comparable_intf.S with type key := t
 module Table : Hashtbl.S with type key = t
+module Array : Array_intf.S with type Set.elt = t
 
 (** Whether the string needs quoting if it is part of a shell command *)
 val need_quoting : string -> bool
@@ -122,3 +145,5 @@ val quote_list_for_shell : string list -> string
 
 val filter_map : string -> f:(char -> char option) -> string
 val contains_double_underscore : string -> bool
+val last : string -> char option
+val replace_char : string -> from:char -> to_:char -> string

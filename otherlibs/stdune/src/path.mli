@@ -27,7 +27,7 @@
 
     The second part is the "external world". It is all the paths that live
     outside of the workspace and build directory. To be on the safe side Dune
-    makes no assumption does nothing clever with these paths.
+    makes no assumption and does nothing clever with these paths.
 
     External paths are represented as [Path.External.t] values.
 
@@ -40,7 +40,8 @@
 
     Represented as: either the root, or a '/' separated list of components other
     that ".", ".." and not containing a '/'. *)
-module Local_gen : Path_intf.Local_gen
+
+module Local_gen : module type of Path0.Local_gen
 
 module Unspecified : sig
   type w = Path_intf.Unspecified.w
@@ -52,12 +53,15 @@ end
     not containing a '/'. *)
 module Local : sig
   type w = Unspecified.w
-  type t = w Local_gen.t
+  type t = w Path0.Local_gen.t
 
   include Path_intf.S with type t := t
 
   val root : t
+  val repr : t Repr.t
   val append : t -> t -> t
+
+  include Path_intf.With_loc with type t := t
 
   module L : sig
     val relative : ?error_loc:Loc0.t -> t -> string list -> t
@@ -66,6 +70,8 @@ module Local : sig
   val split_first_component : t -> (Filename.t * t) option
   val explode : t -> Filename.t list
   val descendant : t -> of_:t -> t option
+  val of_comps : Filename.t list -> t
+  val reach : t -> from:t -> string
 
   module Table : Hashtbl.S with type key = t
 end
@@ -76,8 +82,9 @@ module External : sig
   val root : t
   val initial_cwd : t
   val cwd : unit -> t
+  val parse_string_exn : loc:Loc0.t -> string -> t
   val relative : t -> string -> t
-  val mkdir_p : ?perms:int -> t -> unit
+  val relative_fname : t -> Filename.t -> t
   val of_filename_relative_to_initial_cwd : string -> t
   val append_local : t -> Local.t -> t
 
@@ -86,9 +93,10 @@ end
 
 (** In the source section of the current workspace. *)
 module Source : sig
-  type w
-  type t = w Local_gen.t
+  type w = Path_intf.Source.w
+  type t = w Path0.Local_gen.t
 
+  include Path_intf.With_loc with type t := t
   include Path_intf.S with type t := t
 
   val root : t
@@ -112,25 +120,6 @@ module Source : sig
   module Table : Hashtbl.S with type key = t
 end
 
-module Permissions : sig
-  type t
-
-  (** Execute permissions. *)
-  val execute : t
-
-  (** Write permissions. *)
-  val write : t
-
-  (** Add permissions to a given mask for the current user. *)
-  val add : t -> int -> int
-
-  (** Test permissions of a given mask for the current user. *)
-  val test : t -> int -> bool
-
-  (** Remove permissions from a given mask for all users. *)
-  val remove : t -> int -> int
-end
-
 module Outside_build_dir : sig
   type t =
     | External of External.t
@@ -138,7 +127,9 @@ module Outside_build_dir : sig
 
   val hash : t -> int
   val relative : t -> string -> t
+  val relative_fname : t -> Filename.t -> t
   val extend_basename : t -> suffix:Filename.t -> t
+  val append_local : t -> Local.t -> t
   val equal : t -> t -> bool
   val to_dyn : t -> Dyn.t
   val of_string : string -> t
@@ -150,8 +141,8 @@ module Outside_build_dir : sig
 end
 
 module Build : sig
-  type w
-  type t = w Local_gen.t
+  type w = Path_intf.Build.w
+  type t = w Path0.Local_gen.t
 
   include Path_intf.S with type t := t
 
@@ -161,6 +152,8 @@ module Build : sig
 
   (** [append x y] is [append_local x (local y)] *)
   val append : t -> t -> t
+
+  include Path_intf.With_loc with type t := t
 
   module L : sig
     val relative : ?error_loc:Loc0.t -> t -> string list -> t
@@ -192,14 +185,7 @@ module Build : sig
   val split_sandbox_root : t -> t option * t
   val of_local : Local.t -> t
 
-  (** Set permissions for a given path. You can use the [Permissions] module if
-      you need to modify existing permissions in a non-trivial way. *)
-  val chmod : t -> mode:int -> unit
-
-  val lstat : t -> Unix.stats
-  val unlink : t -> Fpath.unlink_status
-  val unlink_no_err : t -> unit
-
+  module Array : Array_intf.S with type Set.elt = t
   module Table : Hashtbl.S with type key = t
 end
 
@@ -224,7 +210,9 @@ module Table : sig
   val set : 'a t -> path -> 'a -> unit
   val remove : 'a t -> path -> unit
   val iter : 'a t -> f:('a -> unit) -> unit
+  val iteri : 'a t -> f:(key:path -> data:'a -> unit) -> unit
   val find : 'a t -> path -> 'a option
+  val find_or_add : 'a t -> path -> f:(path -> 'a) -> 'a
   val filteri_inplace : 'a t -> f:(key:path -> data:'a -> bool) -> unit
   val filter_inplace : 'a t -> f:('a -> bool) -> unit
   val to_dyn : ('a -> Dyn.t) -> 'a t -> Dyn.t
@@ -253,9 +241,16 @@ val relative_to_source_in_build_or_external
   -> string
   -> t
 
+include Path_intf.With_loc with type t := t
+
 (** Create an external path. If the argument is relative, assume it is relative
     to the initial directory dune was launched in. *)
 val of_filename_relative_to_initial_cwd : string -> t
+
+(** Like [of_string], but if the path is relative and would escape the workspace
+    (e.g., [../foo]), it is treated as relative to the initial directory dune
+    was launched in instead of raising an error. *)
+val of_string_allow_outside_workspace : string -> t
 
 (** Convert a path to an absolute filename. Must be called after the workspace
     root has been set. [root] is the root directory of local paths *)
@@ -318,9 +313,6 @@ val drop_optional_sandbox_root : t -> t
     otherwise fail. *)
 val drop_optional_build_context_src_exn : t -> Source.t
 
-val explode : t -> Filename.t list option
-val explode_exn : t -> Filename.t list
-
 (** The build directory *)
 val build_dir : t
 
@@ -336,50 +328,25 @@ val as_in_build_dir : t -> Build.t option
 val as_in_build_dir_exn : t -> Build.t
 val as_external : t -> External.t option
 
-(** [is_strict_descendant_of_build_dir t = is_in_build_dir t && t <> build_dir] *)
-val is_strict_descendant_of_build_dir : t -> bool
-
 (** Split after the first component if [t] is local *)
 val split_first_component : t -> (Filename.t * t) option
 
-val exists : t -> bool
-
-val readdir_unsorted
-  :  t
-  -> (Filename.t list, Dune_filesystem_stubs.Unix_error.Detailed.t) Result.t
+val readdir_unsorted : t -> (Filename.t list, Unix_error.Detailed.t) Result.t
 
 val readdir_unsorted_with_kinds
   :  t
-  -> ( (Filename.t * Unix.file_kind) list
-       , Dune_filesystem_stubs.Unix_error.Detailed.t )
-       Result.t
+  -> ((Filename.t * Unix.file_kind) list, Unix_error.Detailed.t) Result.t
 
 val is_dir_sep : char -> bool
 
-(** [is_dir t] checks if [t] is a directory. It swallows permission errors so the preferred way is to use [stat] instead *)
-val is_directory : t -> bool
-
-val rmdir : t -> unit
-val unlink_exn : t -> unit
-val unlink_no_err : t -> unit
-val link : t -> t -> unit
-
 (** If the path does not exist, this function is a no-op. *)
-val rm_rf : ?allow_external:bool -> t -> unit
+val rm_rf : ?chmod:bool -> ?allow_external:bool -> t -> unit
 
-(** [clear_dir t] deletes all the contents of directory [t] without removing [t]
-    itself. *)
-val clear_dir : t -> Fpath.clear_dir_result
-
-val mkdir_p : ?perms:int -> t -> unit
+val mkdir_p : ?perms:Permissions.Mode.t -> t -> unit
 val build_dir_exists : unit -> bool
 val ensure_build_dir_exists : unit -> unit
 val source : Source.t -> t
 val build : Build.t -> t
-
-(** paths guaranteed to be in the source directory *)
-val in_source : string -> t
-
 val of_local : Local.t -> t
 
 (** Set the workspace root. Can only be called once and the path must be
@@ -396,44 +363,20 @@ end
     of [/a/b] is [./a/b]. *)
 val local_part : t -> Local.t
 
-val stat : t -> (Unix.stats, Dune_filesystem_stubs.Unix_error.Detailed.t) Result.t
-val stat_exn : t -> Unix.stats
-val lstat : t -> (Unix.stats, Dune_filesystem_stubs.Unix_error.Detailed.t) Result.t
-val lstat_exn : t -> Unix.stats
-
-(* it would be nice to call this [Set.of_source_paths], but it's annoying to
-   change the [Set] signature because then we don't comply with [Path_intf.S] *)
-val set_of_source_paths : Source.Set.t -> Set.t
-val set_of_build_paths_list : Build.t list -> Set.t
-val set_of_external_paths : External.Set.t -> Set.t
-
-(** Rename a file. [rename oldpath newpath] renames the file called [oldpath] to
-    [newpath], moving it between directories if needed. If [newpath] already
-    exists, its contents will be replaced with those of [oldpath]. *)
-val rename : t -> t -> unit
-
-(** Set permissions for a given path. You can use the [Permissions] module if
-    you need to modify existing permissions in a non-trivial way. *)
-val chmod : t -> mode:int -> unit
-
-(** Attempts to resolve a symlink. Returns:
-
-    - [Ok path] with the resolved destination
-    - [Error Not_a_symlink] if the path isn't a symlink
-    - [Error Max_depth_exceeded] if the function reached the maximum symbolic
-      link depth
-    - [Error (Unix_error _)] with the underlying syscall error. *)
-val follow_symlink : t -> (t, Fpath.follow_symlink_error) result
+val stat : t -> (Unix.stats, Unix_error.Detailed.t) Result.t
+val lstat : t -> (Unix.stats, Unix_error.Detailed.t) Result.t
 
 (** [drop_prefix_exn t ~prefix] drops the [prefix] from a path, including any
-    leftover `/` prefix. Raises a [Code_error.t] if the prefix wasn't found. *)
+    leftover directory separator prefix. Raises a [Code_error.t] if the prefix
+    wasn't found. *)
 val drop_prefix_exn : t -> prefix:t -> Local.t
 
 (** [drop_prefix t ~prefix] drops the [prefix] from a path, including any
-    leftover `/` prefix. Returns [None] if the prefix wasn't found. *)
+    leftover directory separator prefix. Returns [None] if the prefix wasn't
+    found. *)
 val drop_prefix : t -> prefix:t -> Local.t option
 
-val make_local_path : Local.t -> t
+val is_broken_symlink : t -> bool
 
 module Expert : sig
   (** Attempt to convert external paths to source/build paths. Don't use this

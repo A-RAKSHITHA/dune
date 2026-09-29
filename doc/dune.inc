@@ -54,13 +54,13 @@
  (files   dune-clean.1))
 
 (rule
- (with-stdout-to dune-coq.1
-  (run dune coq --help=groff)))
+ (with-stdout-to dune-completion.1
+  (run dune completion --help=groff)))
 
 (install
  (section man)
  (package dune)
- (files   dune-coq.1))
+ (files   dune-completion.1))
 
 (rule
  (with-stdout-to dune-describe.1
@@ -216,6 +216,15 @@
  (files   dune-promotion.1))
 
 (rule
+ (with-stdout-to dune-rocq.1
+  (run dune rocq --help=groff)))
+
+(install
+ (section man)
+ (package dune)
+ (files   dune-rocq.1))
+
+(rule
  (with-stdout-to dune-rpc.1
   (run dune rpc --help=groff)))
 
@@ -286,6 +295,15 @@
  (section man)
  (package dune)
  (files   dune-top.1))
+
+(rule
+ (with-stdout-to dune-trace.1
+  (run dune trace --help=groff)))
+
+(install
+ (section man)
+ (package dune)
+ (files   dune-trace.1))
 
 (rule
  (with-stdout-to dune-uninstall.1

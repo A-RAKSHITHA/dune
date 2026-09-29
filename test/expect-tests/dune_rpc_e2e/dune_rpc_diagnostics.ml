@@ -1,8 +1,8 @@
 open Stdune
 open Fiber.O
-module Client = Dune_rpc_client.Client
+module Client = Rpc.Client
 open Dune_rpc_e2e
-module Dune_rpc = Dune_rpc_private
+module Dune_rpc = Dune_rpc.Private
 module Sub = Dune_rpc.Sub
 module Diagnostic = Dune_rpc.Diagnostic
 module Request = Dune_rpc.Public.Request
@@ -23,7 +23,7 @@ let%expect_test "turn on and shutdown" =
     shutting down |}]
 ;;
 
-let files = List.iter ~f:(fun (f, contents) -> Io.String_path.write_file f contents)
+let files = List.iter ~f:(fun (f, contents) -> Io.String_path.write_file_exn f contents)
 
 let on_diagnostic_event diagnostics =
   let cwd = Sys.getcwd () in
@@ -101,9 +101,28 @@ let poll_exn client decl =
   | Error e -> raise (Dune_rpc.Version_error.E e)
 ;;
 
+let request_exn client req n =
+  Client.Versioned.prepare_request client req
+  >>= function
+  | Ok req -> Client.request client req n
+  | Error e -> raise (Dune_rpc.Version_error.E e)
+;;
+
+let flush_file_watcher client =
+  request_exn client Request.flush_file_watcher ()
+  >>| function
+  | Ok `Ok -> ()
+  | Ok `Not_in_watch_mode ->
+    Code_error.raise "expected the RPC server to run in watch mode" []
+  | Error e ->
+    Code_error.raise
+      "failed to flush the file watcher"
+      [ "error", Response.Error.to_dyn e ]
+;;
+
 let print_diagnostics poll =
-  let+ res = Client.Stream.next poll in
-  match res with
+  Client.Stream.next poll
+  >>| function
   | None -> printfn "client: no more diagnostics"
   | Some diag -> on_diagnostic_event diag
 ;;
@@ -136,85 +155,85 @@ let%expect_test "related error" =
     "foo.cma";
   [%expect
     {|
-  Building foo.cma
-  Build foo.cma failed
-  [ "Add"
-  ; [ [ "directory"; "$CWD" ]
-    ; [ "id"; "0" ]
-    ; [ "loc"
-      ; [ [ "start"
-          ; [ [ "pos_bol"; "0" ]
-            ; [ "pos_cnum"; "0" ]
-            ; [ "pos_fname"; "$CWD/foo.ml" ]
-            ; [ "pos_lnum"; "1" ]
+    Building foo.cma
+    Build foo.cma failed
+    [ "Add"
+    ; [ [ "directory"; "$CWD" ]
+      ; [ "id"; "0" ]
+      ; [ "loc"
+        ; [ [ "start"
+            ; [ [ "pos_bol"; "0" ]
+              ; [ "pos_cnum"; "0" ]
+              ; [ "pos_fname"; "$CWD/foo.ml" ]
+              ; [ "pos_lnum"; "1" ]
+              ]
             ]
-          ]
-        ; [ "stop"
-          ; [ [ "pos_bol"; "0" ]
-            ; [ "pos_cnum"; "0" ]
-            ; [ "pos_fname"; "$CWD/foo.ml" ]
-            ; [ "pos_lnum"; "1" ]
+          ; [ "stop"
+            ; [ [ "pos_bol"; "0" ]
+              ; [ "pos_cnum"; "0" ]
+              ; [ "pos_fname"; "$CWD/foo.ml" ]
+              ; [ "pos_lnum"; "1" ]
+              ]
             ]
           ]
         ]
-      ]
-    ; [ "message"
-      ; [ "Verbatim"
-        ; "The implementation foo.ml\n\
-           does not match the interface .foo.objs/byte/foo.cmi: \n\
-           Values do not match: val x : bool is not included in val x : int\n\
-           The type bool is not compatible with the type int\n\
-           "
+      ; [ "message"
+        ; [ "Verbatim"
+          ; "The implementation foo.ml does not match the interface foo.mli: \n\
+             Values do not match: val x : bool is not included in val x : int\n\
+             The type bool is not compatible with the type int\n\
+             "
+          ]
         ]
-      ]
-    ; [ "promotion"; [] ]
-    ; [ "related"
-      ; [ [ [ "loc"
-            ; [ [ "start"
-                ; [ [ "pos_bol"; "0" ]
-                  ; [ "pos_cnum"; "0" ]
-                  ; [ "pos_fname"; "$CWD/foo.mli" ]
-                  ; [ "pos_lnum"; "1" ]
+      ; [ "promotion"; [] ]
+      ; [ "related"
+        ; [ [ [ "loc"
+              ; [ [ "start"
+                  ; [ [ "pos_bol"; "0" ]
+                    ; [ "pos_cnum"; "0" ]
+                    ; [ "pos_fname"; "$CWD/foo.mli" ]
+                    ; [ "pos_lnum"; "1" ]
+                    ]
                   ]
-                ]
-              ; [ "stop"
-                ; [ [ "pos_bol"; "0" ]
-                  ; [ "pos_cnum"; "11" ]
-                  ; [ "pos_fname"; "$CWD/foo.mli" ]
-                  ; [ "pos_lnum"; "1" ]
+                ; [ "stop"
+                  ; [ [ "pos_bol"; "0" ]
+                    ; [ "pos_cnum"; "11" ]
+                    ; [ "pos_fname"; "$CWD/foo.mli" ]
+                    ; [ "pos_lnum"; "1" ]
+                    ]
                   ]
                 ]
               ]
+            ; [ "message"; [ "Verbatim"; "Expected declaration\n\
+                                          " ] ]
             ]
-          ; [ "message"; [ "Verbatim"; "Expected declaration\n\
-                                        " ] ]
-          ]
-        ; [ [ "loc"
-            ; [ [ "start"
-                ; [ [ "pos_bol"; "0" ]
-                  ; [ "pos_cnum"; "4" ]
-                  ; [ "pos_fname"; "$CWD/foo.ml" ]
-                  ; [ "pos_lnum"; "1" ]
+          ; [ [ "loc"
+              ; [ [ "start"
+                  ; [ [ "pos_bol"; "0" ]
+                    ; [ "pos_cnum"; "4" ]
+                    ; [ "pos_fname"; "$CWD/foo.ml" ]
+                    ; [ "pos_lnum"; "1" ]
+                    ]
                   ]
-                ]
-              ; [ "stop"
-                ; [ [ "pos_bol"; "0" ]
-                  ; [ "pos_cnum"; "5" ]
-                  ; [ "pos_fname"; "$CWD/foo.ml" ]
-                  ; [ "pos_lnum"; "1" ]
+                ; [ "stop"
+                  ; [ [ "pos_bol"; "0" ]
+                    ; [ "pos_cnum"; "5" ]
+                    ; [ "pos_fname"; "$CWD/foo.ml" ]
+                    ; [ "pos_lnum"; "1" ]
+                    ]
                   ]
                 ]
               ]
+            ; [ "message"; [ "Verbatim"; "Actual declaration\n\
+                                          " ] ]
             ]
-          ; [ "message"; [ "Verbatim"; "Actual declaration\n\
-                                        " ] ]
           ]
         ]
+      ; [ "severity"; "error" ]
+      ; [ "targets"; [] ]
       ]
-    ; [ "severity"; "error" ]
-    ; [ "targets"; [] ]
     ]
-  ] |}];
+    |}];
   diagnostic_with_build
     [ "dune", "(library (name foo)) (executable (name foo))"; "foo.ml", "" ]
     "@check";
@@ -292,7 +311,8 @@ let%expect_test "promotion" =
     Building (alias foo)
     Build (alias foo) failed
     [ "Add"
-    ; [ [ "id"; "0" ]
+    ; [ [ "directory"; "$CWD" ]
+      ; [ "id"; "0" ]
       ; [ "loc"
         ; [ [ "start"
             ; [ [ "pos_bol"; "0" ]
@@ -312,12 +332,18 @@ let%expect_test "promotion" =
         ]
       ; [ "message"
         ; [ "Verbatim"
-          ; "Error: Files _build/default/x and _build/default/x.gen differ.\n\
+          ; "--- x\n\
+             +++ x.gen\n\
+             @@ -1 +1 @@\n\
+             -titi\n\
+             \\ No newline at end of file\n\
+             +toto\n\
+             \\ No newline at end of file\n\
              "
           ]
         ]
       ; [ "promotion"
-        ; [ [ [ "in_build"; "$CWD/_build/default/x.gen" ]
+        ; [ [ [ "in_build"; "$CWD/_build/.promotion-staging/x" ]
             ; [ "in_source"; "$CWD/x" ]
             ]
           ]
@@ -326,7 +352,8 @@ let%expect_test "promotion" =
       ; [ "severity"; "error" ]
       ; [ "targets"; [] ]
       ]
-    ] |}]
+    ]
+    |}]
 ;;
 
 let%expect_test "optional promotion" =
@@ -348,9 +375,10 @@ let%expect_test "optional promotion" =
     {|
     Building (alias foo)
     Build (alias foo) failed
-    FAILURE: promotion file $CWD/_build/default/output.actual does not exist
+    FAILURE: promotion file $CWD/_build/.promotion-staging/output.expected does not exist
     [ "Add"
-    ; [ [ "id"; "0" ]
+    ; [ [ "directory"; "$CWD" ]
+      ; [ "id"; "0" ]
       ; [ "loc"
         ; [ [ "start"
             ; [ [ "pos_bol"; "0" ]
@@ -370,13 +398,18 @@ let%expect_test "optional promotion" =
         ]
       ; [ "message"
         ; [ "Verbatim"
-          ; "Error: Files _build/default/output.expected and _build/default/output.actual\n\
-             differ.\n\
+          ; "--- output.expected\n\
+             +++ output.actual\n\
+             @@ -1 +1 @@\n\
+             -foo\n\
+             \\ No newline at end of file\n\
+             +bar\n\
+             \\ No newline at end of file\n\
              "
           ]
         ]
       ; [ "promotion"
-        ; [ [ [ "in_build"; "$CWD/_build/default/output.actual" ]
+        ; [ [ [ "in_build"; "$CWD/_build/.promotion-staging/output.expected" ]
             ; [ "in_source"; "$CWD/output.expected" ]
             ]
           ]
@@ -385,13 +418,42 @@ let%expect_test "optional promotion" =
       ; [ "severity"; "error" ]
       ; [ "targets"; [] ]
       ]
-    ] |}]
+    ]
+    |}]
 ;;
 
-let%expect_test "warning detection" =
+(* Non-fatal compiler warnings aren't transferred to the RPC client. *)
+let%expect_test "warning non-detection" =
   diagnostic_with_build
-    [ "dune", "(executable (flags -w +26) (name foo))"
+    [ "dune", "(executable (flags (-w +26)) (name foo))"
     ; "foo.ml", "let () = let x = 10 in ()"
+    ]
+    "./foo.exe";
+  [%expect
+    {|  
+    Building ./foo.exe
+    Build ./foo.exe succeeded
+    <no diagnostics> |}]
+;;
+
+(* Compiler alerts aren't transferred to the RPC client. *)
+let%expect_test "alert non-detection" =
+  diagnostic_with_build
+    [ "dune", "(executable (name foo))"
+    ; ( "foo.ml"
+      , {|
+module A : sig
+
+  val f : unit
+  [@@alert foo "foobar"]
+
+end = struct
+  let f = ()
+end
+
+let () = A.f
+|}
+      )
     ]
     "./foo.exe";
   [%expect
@@ -498,40 +560,42 @@ let%expect_test "create and fix error" =
     let* () = print_diagnostics poll in
     [%expect
       {|
-        [ "Add"
-        ; [ [ "directory"; "$CWD" ]
-          ; [ "id"; "0" ]
-          ; [ "loc"
-            ; [ [ "start"
-                ; [ [ "pos_bol"; "0" ]
-                  ; [ "pos_cnum"; "23" ]
-                  ; [ "pos_fname"; "$CWD/foo.ml" ]
-                  ; [ "pos_lnum"; "1" ]
-                  ]
+      [ "Add"
+      ; [ [ "directory"; "$CWD" ]
+        ; [ "id"; "0" ]
+        ; [ "loc"
+          ; [ [ "start"
+              ; [ [ "pos_bol"; "0" ]
+                ; [ "pos_cnum"; "23" ]
+                ; [ "pos_fname"; "$CWD/foo.ml" ]
+                ; [ "pos_lnum"; "1" ]
                 ]
-              ; [ "stop"
-                ; [ [ "pos_bol"; "0" ]
-                  ; [ "pos_cnum"; "26" ]
-                  ; [ "pos_fname"; "$CWD/foo.ml" ]
-                  ; [ "pos_lnum"; "1" ]
-                  ]
+              ]
+            ; [ "stop"
+              ; [ [ "pos_bol"; "0" ]
+                ; [ "pos_cnum"; "26" ]
+                ; [ "pos_fname"; "$CWD/foo.ml" ]
+                ; [ "pos_lnum"; "1" ]
                 ]
               ]
             ]
-          ; [ "message"
-            ; [ "Verbatim"
-              ; "This expression has type int but an expression was expected of type\n\
-                \  string\n\
-                 "
-              ]
-            ]
-          ; [ "promotion"; [] ]
-          ; [ "related"; [] ]
-          ; [ "severity"; "error" ]
-          ; [ "targets"; [] ]
           ]
-        ] |}];
+        ; [ "message"
+          ; [ "Verbatim"
+            ; "The constant 123 has type int but an expression was expected of type\n\
+              \  string\n\
+               "
+            ]
+          ]
+        ; [ "promotion"; [] ]
+        ; [ "related"; [] ]
+        ; [ "severity"; "error" ]
+        ; [ "targets"; [] ]
+        ]
+      ]
+      |}];
     files [ "foo.ml", "let () = print_endline \"foo\"" ];
+    let* () = flush_file_watcher client in
     let* () = dune_build client "./foo.exe" in
     [%expect
       {|
@@ -540,47 +604,41 @@ let%expect_test "create and fix error" =
     let+ () = print_diagnostics poll in
     [%expect
       {|
-        [ "Remove"
-        ; [ [ "directory"; "$CWD" ]
-          ; [ "id"; "0" ]
-          ; [ "loc"
-            ; [ [ "start"
-                ; [ [ "pos_bol"; "0" ]
-                  ; [ "pos_cnum"; "23" ]
-                  ; [ "pos_fname"; "$CWD/foo.ml" ]
-                  ; [ "pos_lnum"; "1" ]
-                  ]
+      [ "Remove"
+      ; [ [ "directory"; "$CWD" ]
+        ; [ "id"; "0" ]
+        ; [ "loc"
+          ; [ [ "start"
+              ; [ [ "pos_bol"; "0" ]
+                ; [ "pos_cnum"; "23" ]
+                ; [ "pos_fname"; "$CWD/foo.ml" ]
+                ; [ "pos_lnum"; "1" ]
                 ]
-              ; [ "stop"
-                ; [ [ "pos_bol"; "0" ]
-                  ; [ "pos_cnum"; "26" ]
-                  ; [ "pos_fname"; "$CWD/foo.ml" ]
-                  ; [ "pos_lnum"; "1" ]
-                  ]
+              ]
+            ; [ "stop"
+              ; [ [ "pos_bol"; "0" ]
+                ; [ "pos_cnum"; "26" ]
+                ; [ "pos_fname"; "$CWD/foo.ml" ]
+                ; [ "pos_lnum"; "1" ]
                 ]
               ]
             ]
-          ; [ "message"
-            ; [ "Verbatim"
-              ; "This expression has type int but an expression was expected of type\n\
-                \  string\n\
-                 "
-              ]
-            ]
-          ; [ "promotion"; [] ]
-          ; [ "related"; [] ]
-          ; [ "severity"; "error" ]
-          ; [ "targets"; [] ]
           ]
-        ] |}]);
+        ; [ "message"
+          ; [ "Verbatim"
+            ; "The constant 123 has type int but an expression was expected of type\n\
+              \  string\n\
+               "
+            ]
+          ]
+        ; [ "promotion"; [] ]
+        ; [ "related"; [] ]
+        ; [ "severity"; "error" ]
+        ; [ "targets"; [] ]
+        ]
+      ]
+      |}]);
   [%expect {| |}]
-;;
-
-let request_exn client req n =
-  let* staged = Client.Versioned.prepare_request client req in
-  match staged with
-  | Ok req -> Client.request client req n
-  | Error e -> raise (Dune_rpc.Version_error.E e)
 ;;
 
 let%expect_test "formatting dune files" =
@@ -654,7 +712,7 @@ let%expect_test "promoting dune files" =
       in
       (match res with
        | Ok () ->
-         let contents = Io.String_path.read_file fname in
+         let contents = Io.String_path.read_file_exn fname in
          printfn "promoted file contents:\n%s" contents
        | Error e ->
          Format.eprintf
@@ -662,9 +720,10 @@ let%expect_test "promoting dune files" =
            (Dyn.to_string (Dune_rpc.Response.Error.to_dyn e)));
       [%expect
         {|
-          attempting to promote
-          promoted file contents:
-          toto |}])
+        attempting to promote
+        promoted file contents:
+        toto
+        |}])
   in
   run (fun () -> with_dune_watch exec);
   [%expect {| |}]
@@ -701,117 +760,198 @@ let g = A.f
     let+ () = print_diagnostics poll in
     [%expect
       {|
-        [ "Add"
-        ; [ [ "directory"; "$CWD" ]
-          ; [ "id"; "0" ]
-          ; [ "loc"
-            ; [ [ "start"
-                ; [ [ "pos_bol"; "0" ]
-                  ; [ "pos_cnum"; "8" ]
-                  ; [ "pos_fname"; "$CWD/foo.ml" ]
-                  ; [ "pos_lnum"; "11" ]
-                  ]
+      [ "Add"
+      ; [ [ "directory"; "$CWD" ]
+        ; [ "id"; "0" ]
+        ; [ "loc"
+          ; [ [ "start"
+              ; [ [ "pos_bol"; "0" ]
+                ; [ "pos_cnum"; "8" ]
+                ; [ "pos_fname"; "$CWD/foo.ml" ]
+                ; [ "pos_lnum"; "11" ]
                 ]
-              ; [ "stop"
-                ; [ [ "pos_bol"; "0" ]
-                  ; [ "pos_cnum"; "11" ]
-                  ; [ "pos_fname"; "$CWD/foo.ml" ]
-                  ; [ "pos_lnum"; "11" ]
-                  ]
+              ]
+            ; [ "stop"
+              ; [ [ "pos_bol"; "0" ]
+                ; [ "pos_cnum"; "11" ]
+                ; [ "pos_fname"; "$CWD/foo.ml" ]
+                ; [ "pos_lnum"; "11" ]
                 ]
               ]
             ]
-          ; [ "message"; [ "Verbatim"; "foobar\n\
-                                        " ] ]
-          ; [ "promotion"; [] ]
-          ; [ "related"; [] ]
-          ; [ "severity"; "error" ]
-          ; [ "targets"; [] ]
           ]
+        ; [ "message"; [ "Verbatim"; "foobar\n\
+                                      " ] ]
+        ; [ "promotion"; [] ]
+        ; [ "related"; [] ]
+        ; [ "severity"; "warning" ]
+        ; [ "targets"; [] ]
         ]
-        [ "Add"
-        ; [ [ "directory"; "$CWD" ]
-          ; [ "id"; "1" ]
-          ; [ "loc"
-            ; [ [ "start"
-                ; [ [ "pos_bol"; "0" ]
-                  ; [ "pos_cnum"; "8" ]
-                  ; [ "pos_fname"; "$CWD/foo.ml" ]
-                  ; [ "pos_lnum"; "12" ]
-                  ]
+      ]
+      [ "Add"
+      ; [ [ "directory"; "$CWD" ]
+        ; [ "id"; "1" ]
+        ; [ "loc"
+          ; [ [ "start"
+              ; [ [ "pos_bol"; "0" ]
+                ; [ "pos_cnum"; "8" ]
+                ; [ "pos_fname"; "$CWD/foo.ml" ]
+                ; [ "pos_lnum"; "12" ]
                 ]
-              ; [ "stop"
-                ; [ [ "pos_bol"; "0" ]
-                  ; [ "pos_cnum"; "11" ]
-                  ; [ "pos_fname"; "$CWD/foo.ml" ]
-                  ; [ "pos_lnum"; "12" ]
-                  ]
+              ]
+            ; [ "stop"
+              ; [ [ "pos_bol"; "0" ]
+                ; [ "pos_cnum"; "11" ]
+                ; [ "pos_fname"; "$CWD/foo.ml" ]
+                ; [ "pos_lnum"; "12" ]
                 ]
               ]
             ]
-          ; [ "message"; [ "Verbatim"; "foobar\n\
-                                        " ] ]
-          ; [ "promotion"; [] ]
-          ; [ "related"; [] ]
-          ; [ "severity"; "error" ]
-          ; [ "targets"; [] ]
           ]
+        ; [ "message"; [ "Verbatim"; "foobar\n\
+                                      " ] ]
+        ; [ "promotion"; [] ]
+        ; [ "related"; [] ]
+        ; [ "severity"; "warning" ]
+        ; [ "targets"; [] ]
         ]
-        [ "Add"
-        ; [ [ "directory"; "$CWD" ]
-          ; [ "id"; "2" ]
-          ; [ "loc"
-            ; [ [ "start"
-                ; [ [ "pos_bol"; "0" ]
-                  ; [ "pos_cnum"; "4" ]
-                  ; [ "pos_fname"; "$CWD/foo.ml" ]
-                  ; [ "pos_lnum"; "11" ]
-                  ]
+      ]
+      [ "Add"
+      ; [ [ "directory"; "$CWD" ]
+        ; [ "id"; "2" ]
+        ; [ "loc"
+          ; [ [ "start"
+              ; [ [ "pos_bol"; "0" ]
+                ; [ "pos_cnum"; "4" ]
+                ; [ "pos_fname"; "$CWD/foo.ml" ]
+                ; [ "pos_lnum"; "11" ]
                 ]
-              ; [ "stop"
-                ; [ [ "pos_bol"; "0" ]
-                  ; [ "pos_cnum"; "5" ]
-                  ; [ "pos_fname"; "$CWD/foo.ml" ]
-                  ; [ "pos_lnum"; "11" ]
-                  ]
+              ]
+            ; [ "stop"
+              ; [ [ "pos_bol"; "0" ]
+                ; [ "pos_cnum"; "5" ]
+                ; [ "pos_fname"; "$CWD/foo.ml" ]
+                ; [ "pos_lnum"; "11" ]
                 ]
               ]
             ]
-          ; [ "message"; [ "Verbatim"; "unused value f.\n\
-                                        " ] ]
-          ; [ "promotion"; [] ]
-          ; [ "related"; [] ]
-          ; [ "severity"; "error" ]
-          ; [ "targets"; [] ]
           ]
+        ; [ "message"; [ "Verbatim"; "unused value f.\n\
+                                      " ] ]
+        ; [ "promotion"; [] ]
+        ; [ "related"; [] ]
+        ; [ "severity"; "error" ]
+        ; [ "targets"; [] ]
         ]
-        [ "Add"
-        ; [ [ "directory"; "$CWD" ]
-          ; [ "id"; "3" ]
-          ; [ "loc"
-            ; [ [ "start"
-                ; [ [ "pos_bol"; "0" ]
-                  ; [ "pos_cnum"; "4" ]
-                  ; [ "pos_fname"; "$CWD/foo.ml" ]
-                  ; [ "pos_lnum"; "12" ]
-                  ]
+      ]
+      [ "Add"
+      ; [ [ "directory"; "$CWD" ]
+        ; [ "id"; "3" ]
+        ; [ "loc"
+          ; [ [ "start"
+              ; [ [ "pos_bol"; "0" ]
+                ; [ "pos_cnum"; "4" ]
+                ; [ "pos_fname"; "$CWD/foo.ml" ]
+                ; [ "pos_lnum"; "12" ]
                 ]
-              ; [ "stop"
-                ; [ [ "pos_bol"; "0" ]
-                  ; [ "pos_cnum"; "5" ]
-                  ; [ "pos_fname"; "$CWD/foo.ml" ]
-                  ; [ "pos_lnum"; "12" ]
-                  ]
+              ]
+            ; [ "stop"
+              ; [ [ "pos_bol"; "0" ]
+                ; [ "pos_cnum"; "5" ]
+                ; [ "pos_fname"; "$CWD/foo.ml" ]
+                ; [ "pos_lnum"; "12" ]
                 ]
               ]
             ]
-          ; [ "message"; [ "Verbatim"; "unused value g.\n\
-                                        " ] ]
-          ; [ "promotion"; [] ]
-          ; [ "related"; [] ]
-          ; [ "severity"; "error" ]
-          ; [ "targets"; [] ]
           ]
-        ] |}]);
-  [%expect {||}]
+        ; [ "message"; [ "Verbatim"; "unused value g.\n\
+                                      " ] ]
+        ; [ "promotion"; [] ]
+        ; [ "related"; [] ]
+        ; [ "severity"; "error" ]
+        ; [ "targets"; [] ]
+        ]
+      ]
+      |}])
+;;
+
+let%expect_test "cyclic dependency error simple" =
+  setup_diagnostics (fun client ->
+    files
+      [ "dune", "(executable (name foo))"; "foo.ml", "open Bar"; "bar.ml", "open Foo" ];
+    let* poll = poll_exn client Dune_rpc.Public.Sub.diagnostic in
+    let* () = print_diagnostics poll in
+    [%expect
+      {|
+        <no diagnostics> |}];
+    let* () = dune_build client "./foo.exe" in
+    [%expect
+      {|
+        Building ./foo.exe
+        Build ./foo.exe failed |}];
+    let+ () = print_diagnostics poll in
+    [%expect
+      {|
+      [ "Add"
+      ; [ [ "id"; "0" ]
+        ; [ "message"
+          ; [ "Verbatim"
+            ; "Error: dependency cycle between modules in _build/default:\n\
+              \   Foo\n\
+               -> Bar\n\
+               -> Foo\n\
+               "
+            ]
+          ]
+        ; [ "promotion"; [] ]
+        ; [ "related"; [] ]
+        ; [ "severity"; "error" ]
+        ; [ "targets"; [] ]
+        ]
+      ]
+      |}])
+;;
+
+let%expect_test "cyclic dependency error" =
+  setup_diagnostics (fun client ->
+    files
+      [ "dune", "(executable (name foo))"
+      ; "foo.ml", "open Bar open Baz"
+      ; "bar.ml", "open Baz"
+      ; "baz.ml", "open Bar"
+      ];
+    let* poll = poll_exn client Dune_rpc.Public.Sub.diagnostic in
+    let* () = print_diagnostics poll in
+    [%expect
+      {|
+        <no diagnostics> |}];
+    let* () = dune_build client "./foo.exe" in
+    [%expect
+      {|
+        Building ./foo.exe
+        Build ./foo.exe failed |}];
+    let+ () = print_diagnostics poll in
+    let backtrace_regex = Re.str "\\ " |> Re.compile in
+    [%expect.output]
+    |> String.split_lines
+    |> List.filter ~f:(fun s -> not (Re.execp backtrace_regex s))
+    |> String.concat ~sep:"\n"
+    |> print_endline;
+    [%expect
+      {|
+      [ "Add"
+      ; [ [ "id"; "0" ]
+        ; [ "message"
+          ; [ "Verbatim"
+            ; "Cycle_error.E\n\
+               "
+            ]
+          ]
+        ; [ "promotion"; [] ]
+        ; [ "related"; [] ]
+        ; [ "severity"; "error" ]
+        ; [ "targets"; [] ]
+        ]
+      ]
+      |}])
 ;;

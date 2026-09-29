@@ -1,6 +1,6 @@
-  $ cat >dune-project <<EOF
-  > (lang dune 3.3)
-  > EOF
+Tests dune ocaml top-module with a preprocessor action.
+
+  $ make_dune_project 3.3
 
   $ cat >dune <<EOF
   > (library

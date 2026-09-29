@@ -1,19 +1,9 @@
 We try to pull an opam package that isn't a dune project
 
-  $ . ../helpers.sh
-
   $ mkrepo
   $ add_mock_repo_if_needed
 
-  $ cat >dune-project <<EOF
-  > (lang dune 3.13)
-  > (pin
-  >  (url "file://$PWD/_foo")
-  >  (package (name foo)))
-  > (package
-  >  (name main)
-  >  (depends foo))
-  > EOF
+  $ make_project_pinned_to_foo
 
   $ mkdir _foo
   $ cat >_foo/foo.opam <<EOF
@@ -21,14 +11,14 @@ We try to pull an opam package that isn't a dune project
   > build: [ "echo" "foo" ]
   > EOF
 
-  $ dune pkg lock
+  $ dune_pkg_lock_normalized
   Solution for dune.lock:
   - foo.dev
-  $ pkg="dune.lock/foo.pkg"
+  $ pkg="${default_lock_dir}/foo.dev.pkg"
   $ grep version $pkg
   (version dev)
   $ grep dev $pkg
   (version dev)
   (dev)
-  $ grep "file://" $pkg | sed "s#$PWD#PWD#g"
+  $ grep "file://" $pkg | dune_cmd subst "$PWD" PWD
      file://PWD/_foo)))

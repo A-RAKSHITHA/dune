@@ -1,15 +1,11 @@
 Test simple interactions between melange.emit and copy_files
 
-  $ cat > dune-project <<EOF
-  > (lang dune 3.8)
-  > (using melange 0.1)
-  > EOF
+  $ make_melange_project 3.8 0.1
 
   $ cat > dune <<EOF
   > (melange.emit
   >  (target output)
   >  (emit_stdlib false)
-  >  (libraries melange.node)
   >  (preprocess (pps melange.ppx))
   >  (alias mel))
   > 
@@ -24,9 +20,11 @@ Test simple interactions between melange.emit and copy_files
   > EOF
 
   $ cat > main.ml <<EOF
+  > external readFileSync : string -> encoding:string -> string = "readFileSync"
+  > [@@mel.module "fs"]
   > let dirname = [%mel.raw "__dirname"]
   > let file_path = "../assets/file.txt"
-  > let file_content = Node.Fs.readFileSync (dirname ^ "/" ^ file_path) \`utf8
+  > let file_content = readFileSync (dirname ^ "/" ^ file_path) ~encoding:"utf8"
   > let () = Js.log file_content
   > EOF
 
@@ -42,7 +40,6 @@ Copy the file into the output folder, so we can use same path as in-source
   > (melange.emit
   >  (target output)
   >  (emit_stdlib false)
-  >  (libraries melange.node)
   >  (preprocess (pps melange.ppx))
   >  (alias mel))
   > 
@@ -52,9 +49,11 @@ Copy the file into the output folder, so we can use same path as in-source
   > EOF
 
   $ cat > main.ml <<EOF
+  > external readFileSync : string -> encoding:string -> string = "readFileSync"
+  > [@@mel.module "fs"]
   > let dirname = [%mel.raw "__dirname"]
   > let file_path = "assets/file.txt"
-  > let file_content = Node.Fs.readFileSync (dirname ^ "/" ^ file_path) \`utf8
+  > let file_content = readFileSync (dirname ^ "/" ^ file_path) ~encoding:"utf8"
   > let () = Js.log file_content
   > EOF
 

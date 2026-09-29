@@ -16,20 +16,20 @@ module Linkage = struct
 
   type t =
     { mode : mode
-    ; ext : string
+    ; ext : Filename.Extension.t
     ; flags : string list
     }
 
-  let byte = { mode = Ocaml Byte; ext = ".bc"; flags = [] }
+  let byte = { mode = Ocaml Byte; ext = Filename.Extension.bc; flags = [] }
 
   let byte_for_jsoo =
     { mode = Ocaml Byte_for_jsoo
-    ; ext = ".bc-for-jsoo"
+    ; ext = Filename.Extension.of_string_exn ".bc-for-jsoo"
     ; flags = [ "-no-check-prims"; "-noautolink" ]
     }
   ;;
 
-  let native = { mode = Ocaml Native; ext = ".exe"; flags = [] }
+  let native = { mode = Ocaml Native; ext = Filename.Extension.exe; flags = [] }
 
   let is_native x =
     match x.mode with
@@ -56,7 +56,7 @@ module Linkage = struct
     }
   ;;
 
-  let custom = custom_with_ext ~ext:".exe"
+  let custom = custom_with_ext ~ext:Filename.Extension.exe
 
   let native_or_custom (ocaml : Ocaml_toolchain.t) =
     match ocaml.ocamlopt with
@@ -68,7 +68,8 @@ module Linkage = struct
   let wasm = { mode = Jsoo Wasm; ext = Js_of_ocaml.Ext.exe ~mode:Wasm; flags = [] }
 
   let is_plugin t =
-    List.mem (List.map ~f:Mode.plugin_ext Mode.all) t.ext ~equal:String.equal
+    let plugin_exts = List.map Mode.all ~f:Mode.plugin_ext in
+    List.mem plugin_exts t.ext ~equal:Filename.Extension.equal
   ;;
 
   let c_flags = [ "-output-obj" ]
@@ -154,7 +155,9 @@ module Linkage = struct
 end
 
 let exe_path_from_name cctx ~name ~(linkage : Linkage.t) =
-  Path.Build.relative (Compilation_context.dir cctx) (name ^ linkage.ext)
+  Path.Build.relative
+    (Compilation_context.dir cctx)
+    (name ^ Filename.Extension.to_string linkage.ext)
 ;;
 
 let link_exe
@@ -168,6 +171,7 @@ let link_exe
       ~link_args
       ~o_files
       ?(sandbox = Sandbox_config.default)
+      ~env
       cctx
   =
   let sctx = Compilation_context.super_context cctx in
@@ -175,14 +179,10 @@ let link_exe
   let dir = Compilation_context.dir cctx in
   let mode = Link_mode.mode linkage_mode in
   let exe = exe_path_from_name cctx ~name ~linkage in
-  let* action_with_targets =
+  let action_with_targets =
     let ocaml_flags = Ocaml_flags.get (Compilation_context.flags cctx) (Ocaml mode) in
     let prefix =
       Cm_files.top_sorted_objects_and_cms cm_files ~mode |> Action_builder.dyn_paths_unit
-    in
-    let+ fdo_linker_script_flags =
-      let fdo_linker_script = Fdo.Linker_script.create cctx (Path.build exe) in
-      Fdo.Linker_script.flags fdo_linker_script
     in
     let open Action_builder.With_targets.O in
     (* NB. Below we take care to pass [link_args] last on the command-line for
@@ -209,6 +209,9 @@ let link_exe
     Action_builder.with_no_targets prefix
     >>> Command.run
           ~dir:(Path.build (Context.build_dir ctx))
+          ~sandbox
+          ~env
+          ~forbid_action_runner:true
           (Ocaml_toolchain.compiler ocaml mode)
           [ Command.Args.dyn ocaml_flags
           ; A "-o"
@@ -229,20 +232,15 @@ let link_exe
           ; Dyn
               (let top_sorted_cms = Cm_files.top_sorted_cms cm_files ~mode in
                Action_builder.map top_sorted_cms ~f:(fun x -> Command.Args.Deps x))
-          ; fdo_linker_script_flags
           ; Dyn link_args
           ]
-    >>| Action.Full.add_sandbox sandbox
   in
-  Super_context.add_rule
-    sctx
-    ~loc
-    ~dir
-    ~mode:
-      (match promote with
-       | None -> Standard
-       | Some p -> Promote p)
-    action_with_targets
+  let* mode =
+    let sctx = Compilation_context.super_context cctx in
+    let* expander = Super_context.expander sctx ~dir in
+    Rule_mode_expand.expand_optional_promote ~expander ~dir promote
+  in
+  Super_context.add_rule sctx ~loc ~dir ~mode action_with_targets
 ;;
 
 let link_js
@@ -254,6 +252,7 @@ let link_js
       ~promote
       ~link_time_code_gen
       ~jsoo_mode
+      ~standalone_runtime
       cctx
   =
   let in_context =
@@ -268,7 +267,7 @@ let link_js
       let+ l =
         Command.expand_no_targets ~dir:(Path.build (Compilation_context.dir cctx)) cmd
       in
-      List.exists l ~f:(String.equal "-linkall"))
+      Appendable_list.exists l ~f:(String.equal "-linkall"))
   in
   Jsoo_rules.build_exe
     cctx
@@ -281,6 +280,7 @@ let link_js
     ~link_time_code_gen
     ~linkall
     ~jsoo_mode
+    ~standalone_runtime
 ;;
 
 type dep_graphs = { for_exes : Module.t list Action_builder.t list }
@@ -290,6 +290,7 @@ let link_many
       ?o_files
       ?(embed_in_plugin_libraries = [])
       ?sandbox
+      ~env
       ~programs
       ~linkages
       ~promote
@@ -302,6 +303,39 @@ let link_many
   in
   let modules = Compilation_context.modules cctx in
   let* link_time_code_gen = Link_time_code_gen.handle_special_libs cctx in
+  (* Build shared jsoo standalone runtimes (one per mode) *)
+  let* (shared_runtimes : Jsoo_rules.standalone_runtime option Js_of_ocaml.Mode.Pair.t) =
+    let in_context_for jsoo_mode =
+      Compilation_context.js_of_ocaml cctx
+      |> Js_of_ocaml.Mode.Pair.select ~mode:jsoo_mode
+      |> Option.value ~default:Js_of_ocaml.In_context.default
+    in
+    let loc =
+      match programs with
+      | p :: _ -> p.Program.loc
+      | [] -> Loc.none
+    in
+    let+ js =
+      if List.exists linkages ~f:(Linkage.is_jsoo ~mode:JS)
+      then
+        Jsoo_rules.build_standalone_runtime
+          cctx
+          ~loc
+          ~in_context:(in_context_for JS)
+          ~jsoo_mode:JS
+      else Memo.return None
+    and+ wasm =
+      if List.exists linkages ~f:(Linkage.is_jsoo ~mode:Wasm)
+      then
+        Jsoo_rules.build_standalone_runtime
+          cctx
+          ~loc
+          ~in_context:(in_context_for Wasm)
+          ~jsoo_mode:Wasm
+      else Memo.return None
+    in
+    { Js_of_ocaml.Mode.Pair.js; wasm }
+  in
   let+ for_exes =
     Memo.parallel_map programs ~f:(fun { Program.name; main_module_name; loc } ->
       let top_sorted_modules =
@@ -334,6 +368,9 @@ let link_many
           match linkage.Linkage.mode with
           | Jsoo jsoo_mode ->
             let obj_dir = Compilation_context.obj_dir cctx in
+            let standalone_runtime =
+              Js_of_ocaml.Mode.Pair.select ~mode:jsoo_mode shared_runtimes
+            in
             link_js
               ~loc
               ~name
@@ -344,6 +381,7 @@ let link_many
               cctx
               ~link_time_code_gen
               ~jsoo_mode
+              ~standalone_runtime
           | Ocaml linkage_mode ->
             let* link_time_code_gen =
               match Linkage.is_plugin linkage with
@@ -374,7 +412,8 @@ let link_many
               ~promote
               ~link_args
               ~o_files
-              ?sandbox)
+              ?sandbox
+              ~env)
       in
       top_sorted_modules)
   in
@@ -386,6 +425,7 @@ let build_and_link_many
       ?o_files
       ?embed_in_plugin_libraries
       ?sandbox
+      ~env
       ~programs
       ~linkages
       ~promote
@@ -401,6 +441,7 @@ let build_and_link_many
     ?o_files
     ?embed_in_plugin_libraries
     ?sandbox
+    ~env
     ~programs
     ~linkages
     ~promote
@@ -412,6 +453,7 @@ let build_and_link
       ?o_files
       ?embed_in_plugin_libraries
       ?sandbox
+      ~env
       ~program
       ~linkages
       ~promote
@@ -422,6 +464,7 @@ let build_and_link
     ?o_files
     ?embed_in_plugin_libraries
     ?sandbox
+    ~env
     ~programs:[ program ]
     ~linkages
     ~promote

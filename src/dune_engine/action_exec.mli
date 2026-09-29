@@ -18,7 +18,6 @@ module Exec_result : sig
         (* The set can be derived from the facts by getting the keys of the
            facts map. We don't do it because conversion isn't free *)
         (Dep.Set.t * Dep.Facts.t) list
-    ; duration : float option
     }
 
   type t = (ok, Error.t list) Result.t
@@ -35,6 +34,7 @@ type input =
   ; env : Env.t
   ; rule_loc : Loc.t
   ; execution_parameters : Execution_parameters.t
+  ; sandbox : Process.Sandbox.t option
   ; action : Action.t
   }
 

@@ -1,20 +1,13 @@
 A workspace with a package that exists in the lock file and in the workspace
 shouldn't be allowed (for now)
 
-  $ . ./helpers.sh
-
-  $ cat >dune-project <<EOF
-  > (lang dune 3.11)
-  > EOF
+  $ make_dune_project 3.11
 
   $ cat > mypkg.opam <<EOF
   > opam-version: "2.0"
   > EOF
-  $ mkdir dune.lock
-  $ cat >dune.lock/lock.dune <<EOF
-  > (lang package 0.1)
-  > EOF
-  $ touch dune.lock/mypkg.lock
+  $ make_lockdir
+  $ touch ${default_lock_dir}/mypkg.lock
 
   $ dune build
 

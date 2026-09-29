@@ -5,7 +5,7 @@ module Dir_rules = struct
   module Alias_spec = struct
     type item =
       | Deps of unit Action_builder.t
-      | Action of Rule.Anonymous_action.t Action_builder.t
+      | Action of Rule.Anonymous_action.t
 
     type t = { expansions : (Loc.t * item) Appendable_list.t } [@@unboxed]
 
@@ -62,10 +62,13 @@ module Dir_rules = struct
   let empty = Id.Map.empty
   let union_map a b ~f = Id.Map.union a b ~f:(fun _key a b -> Some (f a b))
 
-  let union =
-    union_map ~f:(fun a b ->
-      assert (a == b);
-      a)
+  let union a b =
+    if a == b
+    then a
+    else
+      union_map a b ~f:(fun a b ->
+        assert (a == b);
+        a)
   ;;
 
   let singleton (data : data) =
@@ -78,7 +81,6 @@ module Dir_rules = struct
     Id.Map.set t id data
   ;;
 
-  let is_subset t ~of_ = Id.Map.is_subset t ~of_ ~f:(fun _ ~of_:_ -> true)
   let is_empty = Id.Map.is_empty
 
   module Nonempty : sig
@@ -107,7 +109,7 @@ module T = struct
 
   let empty = Path.Build.Map.empty
   let union_map a b ~f = Path.Build.Map.union a b ~f:(fun _key a b -> Some (f a b))
-  let union = union_map ~f:Dir_rules.Nonempty.union
+  let union a b = if a == b then a else union_map a b ~f:Dir_rules.Nonempty.union
   let name = "Rules"
 end
 
@@ -150,20 +152,20 @@ module Produce = struct
         }
     ;;
 
-    let add_action t ~loc action =
-      let action =
-        let open Action_builder.O in
-        let+ action = action in
-        { Rule.Anonymous_action.action
-        ; loc
-        ; dir = Alias.dir t
-        ; alias = Some (Alias.name t)
-        }
+    (* All aliases in [ts] are expected to share a directory: the shared
+       anonymous action is created in the representative's directory. *)
+    let add_action ts ~loc action =
+      let representative =
+        match ts with
+        | [] -> Code_error.raise "Rules.Produce.Alias.add_action: empty list" []
+        | r :: _ -> r
       in
-      alias
-        t
-        { expansions = Appendable_list.singleton (loc, Dir_rules.Alias_spec.Action action)
-        }
+      let anon = Rule.Anonymous_action.make ~loc ~dir:(Alias.dir representative) action in
+      Memo.parallel_iter ts ~f:(fun t ->
+        alias
+          t
+          { expansions = Appendable_list.singleton (loc, Dir_rules.Alias_spec.Action anon)
+          })
     ;;
   end
 end
@@ -192,8 +194,10 @@ let directory_targets (rules : t) =
         | Alias _ -> acc
         | Rule rule ->
           Filename.Set.fold ~init:acc rule.targets.dirs ~f:(fun target acc ->
-            let target = Path.Build.relative rule.targets.root target in
-            Path.Build.Map.add_exn acc target rule.loc)))
+            let target = Path.Build.relative_fname rule.targets.root target in
+            Path.Build.Map.update acc target ~f:(function
+              | None -> Some (Rule.loc rule)
+              | Some loc -> Some loc))))
 ;;
 
 let collect f =
@@ -219,10 +223,6 @@ let map t ~f =
       | `Changed data -> Id.gen (), data)
     |> Dir_rules.Nonempty.create
     |> Option.value_exn)
-;;
-
-let is_subset t ~of_ =
-  Path.Build.Map.is_subset (to_map t) ~of_:(to_map of_) ~f:Dir_rules.is_subset
 ;;
 
 let map_rules t ~f =

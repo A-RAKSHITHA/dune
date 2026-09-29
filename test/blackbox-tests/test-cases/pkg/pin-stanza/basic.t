@@ -1,8 +1,6 @@
 The pin stanza allows us to define packages that are not available
 in any repository
 
-  $ . ../helpers.sh
-
   $ mkrepo
   $ add_mock_repo_if_needed
 
@@ -24,7 +22,7 @@ in any repository
   > (package (name foo))
   > EOF
 
-  $ dune pkg lock
+  $ dune_pkg_lock_normalized
   Solution for dune.lock:
   - foo.1.0.0
 
@@ -33,15 +31,15 @@ Now we verify the metadata we generated for the package. First we verify the
 build instructions and version are set correctly.
 
 We print the source separately for ease of post processing the output.
-  $ cat dune.lock/foo.pkg | sed "/source/,//d"
+  $ dune_cmd delete-between 'source' '^$' < ${default_lock_dir}/foo.1.0.0.pkg
   (version 1.0.0)
   
-  (dune)
-  
+  (build
+   (all_platforms ((dune))))
   
   (dev)
 
 Now we make sure that the source is set correctly.
 
-  $ print_source "foo"
-  (source (fetch (url file://PWD/_extra_source))) 
+  $ print_source "foo.1.0.0"
+  (source (fetch (url file://PWD/_extra_source)))

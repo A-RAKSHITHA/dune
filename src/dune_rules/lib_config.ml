@@ -9,7 +9,7 @@ type t =
   ; system : string
   ; model : string
   ; natdynlink_supported : Dynlink_supported.By_the_os.t
-  ; ext_dll : string
+  ; ext_dll : Filename.Extension.t
   ; stdlib_dir : Path.t
   ; ccomp_type : Ocaml_config.Ccomp_type.t
   ; ocaml_version_string : string
@@ -43,7 +43,7 @@ let get_for_enabled_if t (pform : Pform.t) =
 let linker_can_create_empty_archives t =
   match t.ccomp_type with
   | Msvc -> false
-  | Other _ -> true
+  | Cc | Other _ -> true
 ;;
 
 let hash = Poly.hash
@@ -53,22 +53,30 @@ let to_dyn = Dyn.opaque
 let cc_g t =
   match t.ccomp_type with
   | Msvc -> []
-  | Other _ -> [ "-g" ]
+  | Cc | Other _ -> [ "-g" ]
 ;;
 
 let create ocaml_config ~ocamlopt =
   { has_native = Result.is_ok ocamlopt
-  ; ext_obj = Ocaml_config.ext_obj ocaml_config
-  ; ext_lib = Ocaml_config.ext_lib ocaml_config
+  ; ext_obj = Filename.Extension.of_string_exn (Ocaml_config.ext_obj ocaml_config)
+  ; ext_lib = Filename.Extension.of_string_exn (Ocaml_config.ext_lib ocaml_config)
   ; os_type = Ocaml_config.os_type ocaml_config
   ; architecture = Ocaml_config.architecture ocaml_config
   ; system = Ocaml_config.system ocaml_config
   ; model = Ocaml_config.model ocaml_config
-  ; ext_dll = Ocaml_config.ext_dll ocaml_config
+  ; ext_dll = Filename.Extension.of_string_exn (Ocaml_config.ext_dll ocaml_config)
   ; natdynlink_supported =
       (let natdynlink_supported = Ocaml_config.natdynlink_supported ocaml_config in
        Dynlink_supported.By_the_os.of_bool natdynlink_supported)
-  ; stdlib_dir = Path.of_string (Ocaml_config.standard_library ocaml_config)
+  ; stdlib_dir =
+      (* When a compiler is installed as a regular package we get its stdlib
+         location as an External path but it is located in the [_build]
+         directory. If we leave it External, it will not get copied into
+         sandboxes, so we localize it. Paths elsewhere (system or local opam
+         switches, [OCAMLLIB] overrides) must remain external. *)
+      (let path = Path.of_string (Ocaml_config.standard_library ocaml_config) in
+       let localized = Path.Expert.try_localize_external path in
+       if Path.is_in_build_dir localized then localized else path)
   ; ccomp_type = Ocaml_config.ccomp_type ocaml_config
   ; ocaml_version_string = Ocaml_config.version_string ocaml_config
   ; ocaml_version = Ocaml.Version.of_ocaml_config ocaml_config

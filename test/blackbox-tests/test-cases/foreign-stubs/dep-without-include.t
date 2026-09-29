@@ -3,9 +3,7 @@ We demonstrate a strange property of the foreign stubs.
 Although we introduce a dependency on all header files found in all source
 directories, we do not add include directories, so they aren't accessible.
 
-  $ cat >dune-project <<EOF
-  > (lang dune 3.8)
-  > EOF
+  $ make_dune_project 3.8
 
   $ cat >dune <<EOF
   > (include_subdirs unqualified)
@@ -36,5 +34,6 @@ directories, we do not add include directories, so they aren't accessible.
 The rules include the dependency on foo.h, but the include directory has to be
 added manually.
 
-  $ dune rules _build/default/bar.o | grep subdir
-     (File (In_build_dir _build/default/subdir/foo.h))))
+  $ dune rules --root . --format=json _build/default/bar.o |
+  > jq_dune -r '.[] | ruleDepFilePaths | select(test("subdir"))'
+  _build/default/subdir/foo.h

@@ -11,11 +11,22 @@ module Info = struct
     | Some loc -> From_dune_file loc
   ;;
 
-  let to_dyn : t -> Dyn.t = function
-    | From_dune_file loc -> Dyn.Variant ("From_dune_file", [ Loc.to_dyn loc ])
-    | Internal -> Dyn.Variant ("Internal", [])
-    | Source_file_copy p -> Dyn.Variant ("Source_file_copy", [ Path.Source.to_dyn p ])
+  let repr =
+    Repr.variant
+      "rule-info"
+      [ Repr.case "From_dune_file" (Repr.abstract Loc.to_dyn) ~proj:(function
+          | From_dune_file loc -> Some loc
+          | Internal | Source_file_copy _ -> None)
+      ; Repr.case0 "Internal" ~test:(function
+          | Internal -> true
+          | From_dune_file _ | Source_file_copy _ -> false)
+      ; Repr.case "Source_file_copy" Path.Source.repr ~proj:(function
+          | Source_file_copy path -> Some path
+          | From_dune_file _ | Internal -> None)
+      ]
   ;;
+
+  let to_dyn = Repr.to_dyn repr
 end
 
 module Promote = struct
@@ -56,21 +67,37 @@ module T = struct
     ; action : Action.Full.t Action_builder.t
     ; mode : Mode.t
     ; info : Info.t
-    ; loc : Loc.t
     }
 
   let compare a b = Id.compare a.id b.id
   let equal a b = Id.equal a.id b.id
   let hash t = Id.hash t.id
-  let loc t = t.loc
-  let to_dyn t : Dyn.t = Record [ "id", Id.to_dyn t.id; "info", Info.to_dyn t.info ]
+
+  let loc { info; targets; _ } =
+    match info with
+    | From_dune_file loc -> loc
+    | Internal ->
+      Loc.in_file
+        (Path.drop_optional_build_context
+           (Path.build (Path.Build.relative targets.root "_unknown_")))
+    | Source_file_copy p -> Loc.in_file (Path.source p)
+  ;;
+
+  let repr =
+    Repr.record
+      "rule"
+      [ Repr.field "id" (Repr.abstract Id.to_dyn) ~get:(fun t -> t.id)
+      ; Repr.field "info" Info.repr ~get:(fun t -> t.info)
+      ]
+  ;;
+
+  let to_dyn = Repr.to_dyn repr
 end
 
 include T
 include Comparable.Make (T)
 
 let make ?(mode = Mode.Standard) ?(info = Info.Internal) ~targets action =
-  let action = Action_builder.memoize "Rule.make" action in
   let report_error ?(extra_pp = []) message =
     match info with
     | From_dune_file loc ->
@@ -97,28 +124,37 @@ let make ?(mode = Mode.Standard) ?(info = Info.Internal) ~targets action =
            "%S is declared as both a file and a directory target."
            (Dpath.describe_target path))
   in
-  let loc =
-    match info with
-    | From_dune_file loc -> loc
-    | Internal ->
-      Loc.in_file
-        (Path.drop_optional_build_context
-           (Path.build (Path.Build.relative targets.root "_unknown_")))
-    | Source_file_copy p -> Loc.in_file (Path.source p)
-  in
-  { id = Id.gen (); targets; action; mode; info; loc }
+  { id = Id.gen (); targets; action; mode; info }
 ;;
 
-let set_action t action =
-  let action = Action_builder.memoize "Rule.set_action" action in
-  { t with action }
-;;
+let set_action t action = { t with action }
 
 module Anonymous_action = struct
   type t =
-    { action : Action.Full.t
+    { action : Action.Full.t Action_builder.t
     ; loc : Loc.t
     ; dir : Path.Build.t
-    ; alias : Alias.Name.t option
     }
+
+  let loc t = t.loc
+  let info { loc; _ } = if Loc.is_none loc then Info.Internal else From_dune_file loc
+
+  let to_rule ~targets ?mode ({ action; loc = _; dir = _ } as anon) =
+    let info = info anon in
+    make ?mode ~info ~targets action
+  ;;
+
+  let make ?(loc = Loc.none) ~dir action = { action; loc; dir }
+
+  module Evaluated = struct
+    type anon = t
+
+    type t =
+      { anon : anon
+      ; action : Action.Full.t
+      ; facts : Dep.Facts.t
+      }
+
+    let make ~action ~facts anon = { anon; action; facts }
+  end
 end

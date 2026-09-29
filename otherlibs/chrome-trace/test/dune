@@ -2,9 +2,7 @@
  (name chrome_trace_tests)
  (inline_tests)
  (libraries
-  dune_tests_common
   stdune
-  dune_stats
   chrome_trace
   ;; This is because of the (implicit_transitive_deps false)
   ;; in dune-project
@@ -13,6 +11,4 @@
   base
   ppx_inline_test.config)
  (preprocess
-  (pps ppx_expect))
- (instrumentation
-  (backend bisect_ppx)))
+  (pps ppx_expect)))

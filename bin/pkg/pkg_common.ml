@@ -9,14 +9,49 @@ let solver_env
       ~solver_env_from_context
       ~unset_solver_vars_from_context
   =
-  let solver_env =
-    [ solver_env_from_current_system; solver_env_from_context ]
-    |> List.filter_opt
-    |> List.fold_left ~init:Solver_env.with_defaults ~f:Solver_env.extend
+  Solver_env.combine
+    ~current_system:solver_env_from_current_system
+    ~context:solver_env_from_context
+    ~unset:unset_solver_vars_from_context
+;;
+
+let poll_solver_env_from_current_system () =
+  Dune_pkg.Sys_poll.make ~path:(Env_path.path Stdune.Env.initial)
+  |> Dune_pkg.Sys_poll.solver_env_from_current_system
+;;
+
+let get_lock_dir_from_context ~lock_dir_path =
+  Memo.run
+  @@
+  let open Memo.O in
+  let+ workspace = Workspace.workspace () in
+  Workspace.find_lock_dir workspace lock_dir_path
+;;
+
+let get_solver_env_from_context ~lock_dir_path =
+  let open Fiber.O in
+  let+ lock_dir = get_lock_dir_from_context ~lock_dir_path in
+  Option.bind lock_dir ~f:(fun lock_dir -> lock_dir.solver_env)
+;;
+
+let get_unset_solver_vars_from_context ~lock_dir_path =
+  let open Fiber.O in
+  let+ lock_dir = get_lock_dir_from_context ~lock_dir_path in
+  Option.bind lock_dir ~f:(fun lock_dir -> lock_dir.unset_solver_vars)
+;;
+
+let solver_env_from_system_and_context ~lock_dir_path =
+  let open Fiber.O in
+  let+ solver_env_from_current_system =
+    poll_solver_env_from_current_system () >>| Option.some
+  and+ solver_env_from_context = get_solver_env_from_context ~lock_dir_path
+  and+ unset_solver_vars_from_context =
+    get_unset_solver_vars_from_context ~lock_dir_path
   in
-  match unset_solver_vars_from_context with
-  | None -> solver_env
-  | Some unset_solver_vars -> Solver_env.unset_multi solver_env unset_solver_vars
+  solver_env
+    ~solver_env_from_current_system
+    ~solver_env_from_context
+    ~unset_solver_vars_from_context
 ;;
 
 module Version_preference = struct
@@ -35,7 +70,7 @@ module Version_preference = struct
     Arg.(
       value
       & opt (some (enum all_by_string)) None
-      & info [ "version-preference" ] ~doc ~docv)
+      & info [ "version-preference" ] ~doc:(Some doc) ~docv)
   ;;
 
   let choose ~from_arg ~from_context =
@@ -58,6 +93,12 @@ let constraints_of_workspace (workspace : Workspace.t) ~lock_dir_path =
   | Some lock_dir -> lock_dir.constraints
 ;;
 
+let depopts_of_workspace (workspace : Workspace.t) ~lock_dir_path =
+  match Workspace.find_lock_dir workspace lock_dir_path with
+  | None -> []
+  | Some lock_dir -> lock_dir.depopts |> List.map ~f:snd
+;;
+
 let repositories_of_lock_dir workspace ~lock_dir_path =
   match Workspace.find_lock_dir workspace lock_dir_path with
   | Some lock_dir -> lock_dir.repositories
@@ -72,31 +113,6 @@ let unset_solver_vars_of_workspace workspace ~lock_dir_path =
   let open Option.O in
   let* lock_dir = Workspace.find_lock_dir workspace lock_dir_path in
   lock_dir.unset_solver_vars
-;;
-
-let get_repos repos ~repositories =
-  let module Repository = Dune_pkg.Pkg_workspace.Repository in
-  repositories
-  |> Fiber.parallel_map ~f:(fun (loc, name) ->
-    match Repository.Name.Map.find repos name with
-    | None ->
-      User_error.raise
-        ~loc
-        [ Pp.textf "Repository '%s' is not a known repository"
-          @@ Repository.Name.to_string name
-        ]
-    | Some repo ->
-      let loc, opam_url = Repository.opam_url repo in
-      let module Opam_repo = Dune_pkg.Opam_repo in
-      (match Dune_pkg.OpamUrl.classify opam_url loc with
-       | `Git -> Opam_repo.of_git_repo loc opam_url
-       | `Path path -> Fiber.return @@ Opam_repo.of_opam_repo_dir_path loc path
-       | `Archive ->
-         User_error.raise
-           ~loc
-           [ Pp.textf "Repositories stored in archives (%s) are currently unsupported"
-             @@ OpamUrl.to_string opam_url
-           ]))
 ;;
 
 let find_local_packages =
@@ -124,6 +140,8 @@ module Lock_dirs_arg = struct
     | All
     | Selected of Path.Source.t list
 
+  let all = All
+
   let term =
     Common.one_of
       (let+ arg =
@@ -134,7 +152,9 @@ module Lock_dirs_arg = struct
                []
                ~docv:"LOCKDIRS"
                ~doc:
-                 "Lock directories to check for outdated packages. Defaults to dune.lock.")
+                 (Some
+                    "Lock directories to check for outdated packages. Defaults to \
+                     dune.lock."))
        in
        Selected (List.map arg ~f:Path.Source.of_string))
       (let+ _all =
@@ -143,31 +163,34 @@ module Lock_dirs_arg = struct
            & flag
            & info
                [ "all" ]
-               ~doc:"Check all lock directories in the workspace for outdated packages.")
+               ~doc:
+                 (Some
+                    "Check all lock directories in the workspace for outdated packages."))
        in
        All)
   ;;
 
   let lock_dirs_of_workspace t (workspace : Workspace.t) =
+    let module Set = Path.Source.Set in
+    let default_path = Dune_rules.Lock_dir.default_source_path in
     let workspace_lock_dirs =
-      Lock_dir.default_path
+      default_path
       :: List.map workspace.lock_dirs ~f:(fun (lock_dir : Workspace.Lock_dir.t) ->
         lock_dir.path)
-      |> Path.Source.Set.of_list
-      |> Path.Source.Set.to_list
+      |> Set.of_list
+      |> Set.to_list
     in
     match t with
     | All -> workspace_lock_dirs
-    | Selected [] -> [ Lock_dir.default_path ]
+    | Selected [] -> [ default_path ]
     | Selected chosen_lock_dirs ->
-      let workspace_lock_dirs_set = Path.Source.Set.of_list workspace_lock_dirs in
-      let chosen_lock_dirs_set = Path.Source.Set.of_list chosen_lock_dirs in
-      if Path.Source.Set.is_subset chosen_lock_dirs_set ~of_:workspace_lock_dirs_set
+      let workspace_lock_dirs_set = Set.of_list workspace_lock_dirs in
+      let chosen_lock_dirs_set = Set.of_list chosen_lock_dirs in
+      if Set.is_subset chosen_lock_dirs_set ~of_:workspace_lock_dirs_set
       then chosen_lock_dirs
       else (
         let unknown_lock_dirs =
-          Path.Source.Set.diff chosen_lock_dirs_set workspace_lock_dirs_set
-          |> Path.Source.Set.to_list
+          Set.diff chosen_lock_dirs_set workspace_lock_dirs_set |> Set.to_list
         in
         let f x = Path.pp (Path.source x) in
         User_error.raise
@@ -179,3 +202,47 @@ module Lock_dirs_arg = struct
           ])
   ;;
 end
+
+let error_if_pkg_management_disabled () =
+  Memo.run
+  @@
+  let open Memo.O in
+  let+ workspace = Workspace.workspace () in
+  match workspace.config.pkg_enabled with
+  | Set (_, `Enabled) | Unset -> ()
+  | Set (Cli, `Disabled) ->
+    User_error.raise
+      [ Pp.text "Package management is disabled in a command line argument." ]
+      ~hints:
+        [ Pp.text
+            "To enable package management, remove the explicit --pkg=disabled flag from \
+             your command line arguments."
+        ]
+  | Set (Loc loc, `Disabled) ->
+    User_error.raise
+      ~loc
+      [ Pp.text "Package management is disabled in workspace configuration." ]
+      ~hints:
+        [ Pp.text
+            "To enable package management, remove the explicit (pkg disabled) setting \
+             from your dune-workspace file."
+        ]
+;;
+
+let error_if_pkg_management_not_enabled () =
+  let open Fiber.O in
+  let* () = error_if_pkg_management_disabled () in
+  let+ workspace = Memo.run (Workspace.workspace ()) in
+  if not (Workspace.pkg_enabled workspace)
+  then
+    User_error.raise
+      [ Pp.text "Package management is not enabled in this project." ]
+      ~hints:
+        [ Pp.concat
+            ~sep:Pp.space
+            [ Pp.text "Create a lock directory with"
+            ; User_message.command "dune pkg lock"
+            ; Pp.text "or add (pkg enabled) to your dune-workspace file."
+            ]
+        ]
+;;

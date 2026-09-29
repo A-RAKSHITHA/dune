@@ -1,21 +1,34 @@
 open Import
 
-let is_path_a_source_file path =
-  match Path.extension (Path.source path) with
-  | ".flv"
-  | ".gif"
-  | ".ico"
-  | ".jpeg"
-  | ".jpg"
-  | ".mov"
-  | ".mp3"
-  | ".mp4"
-  | ".otf"
-  | ".pdf"
-  | ".png"
-  | ".ttf"
-  | ".woff" -> false
-  | _ -> true
+let is_path_a_source_file =
+  let skip =
+    let t =
+      lazy
+        (let t = Table.create (module Filename.Extension) 16 in
+         [ ".flv"
+         ; ".gif"
+         ; ".ico"
+         ; ".jpeg"
+         ; ".jpg"
+         ; ".mov"
+         ; ".mp3"
+         ; ".mp4"
+         ; ".otf"
+         ; ".pdf"
+         ; ".png"
+         ; ".ttf"
+         ; ".woff"
+         ]
+         |> List.iter ~f:(fun s ->
+           Table.add_exn t (Filename.Extension.of_string_exn s) ());
+         t)
+    in
+    fun s -> Table.mem (Lazy.force t) s
+  in
+  fun path ->
+    match Path.source path |> Path.extension |> Filename.Extension.Or_empty.extension with
+    | None -> true
+    | Some ext -> not (skip ext)
 ;;
 
 let is_kind_a_source_file path =
@@ -53,12 +66,9 @@ let subst_string s path ~map =
     loop 1 0 0
   in
   let rec loop i acc =
-    if i = len
-    then acc
-    else (
-      match s.[i] with
-      | '%' -> after_percent (i + 1) acc
-      | _ -> loop (i + 1) acc)
+    match String.index_from_unchecked s i '%' with
+    | -1 -> acc
+    | percent -> after_percent (percent + 1) acc
   and after_percent i acc =
     if i = len
     then acc
@@ -120,8 +130,8 @@ let subst_string s path ~map =
 ;;
 
 let subst_file path ~map opam_package_files =
-  match Io.with_file_in (Path.source path) ~f:Io.read_all_unless_large with
-  | Error () ->
+  match Io.with_file_in (Path.source path) ~f:Fs_io.read_all_unless_large with
+  | Error exn ->
     let hints =
       if Sys.word_size = 32
       then
@@ -133,17 +143,33 @@ let subst_file path ~map opam_package_files =
     in
     User_warning.emit
       ~hints
-      [ Pp.textf "Ignoring large file: %s" (Path.Source.to_string path) ]
+      [ Pp.textf "Ignoring file: %s" (Path.Source.to_string path); Exn.pp exn ]
   | Ok s ->
-    let s =
+    let version =
       if Path.Source.Set.mem opam_package_files path
-      then "version: \"%%" ^ "VERSION_NUM" ^ "%%\"\n" ^ s
-      else s
+      then (
+        try
+          subst_string ("version: \"%%" ^ "VERSION_NUM" ^ "%%\"") ~map (Path.source path)
+        with
+        | User_error.E _ -> None)
+      else None
     in
     let path = Path.source path in
-    (match subst_string s ~map path with
-     | None -> ()
-     | Some s -> Io.write_file path s)
+    let subst = subst_string s ~map path in
+    let replace_or_prepend_version ver file_contents =
+      let re = Re.(compile (seq [ bol; str "version:"; rep (compl [ char '\n' ]) ])) in
+      if Re.execp re file_contents
+      then Re.replace_string re ~by:ver file_contents
+      else ver ^ "\n" ^ file_contents
+    in
+    let contents =
+      match version, subst with
+      | None, None -> None
+      | Some x, None -> Some (replace_or_prepend_version x s)
+      | None, Some x -> Some x
+      | Some x, Some y -> Some (replace_or_prepend_version x y)
+    in
+    Option.iter contents ~f:(Io.write_file_exn path)
 ;;
 
 (* Extending the Dune_project APIs, but adding capability to modify *)
@@ -164,16 +190,22 @@ module Dune_project = struct
     ; project : Dune_project.t
     }
 
-  let filename = Path.Source.of_string Dune_project.filename
+  let filename = Path.Source.relative_fname Path.Source.root Dune_project.filename
 
   let load ~dir ~files ~infer_from_opam_files =
     let open Memo.O in
-    let+ project = Dune_project.load ~dir ~files ~infer_from_opam_files in
+    let+ project =
+      Dune_project.load
+        ~dir
+        ~files
+        ~infer_from_opam_files
+        ~load_opam_file_with_contents:Dune_pkg.Opam_file.load_opam_file_with_contents
+    in
     let open Option.O in
     let* project = project in
     let* project_file = Dune_project.file project in
     let project_file = project_file in
-    let contents = Io.read_file (Path.source project_file) in
+    let contents = Io.read_file_exn (Path.source project_file) in
     let sexp =
       let lb = Lexbuf.from_string contents ~fname:(Path.Source.to_string project_file) in
       Dune_lang.Parser.parse lb ~mode:Many_as_one
@@ -247,12 +279,17 @@ module Dune_project = struct
            else replace_text !ofs !ofs ("\n" ^ version_field))
     in
     let s = Option.value (subst_string s ~map (Path.source filename)) ~default:s in
-    if s <> t.contents then Io.write_file (Path.source filename) s
+    if s <> t.contents then Io.write_file_exn (Path.source filename) s
   ;;
 end
 
 let make_watermark_map ~commit ~version ~dune_project ~info =
   let dune_project = Dune_project.project dune_project in
+  let version =
+    match version with
+    | Some _ -> version
+    | None -> Option.map ~f:Package_version.to_string (Dune_project.version dune_project)
+  in
   let version_num =
     let open Option.O in
     let+ version = version in
@@ -301,16 +338,12 @@ let subst vcs =
   let open Memo.O in
   (match vcs with
    | Some vcs ->
-     let+ version = Vcs.describe vcs
-     and+ commit_id = Vcs.commit_id vcs
-     and+ files = Vcs.files vcs in
+     let needed_for = "by 'dune subst' to infer version information and list files" in
+     let+ version = Vcs.describe ~needed_for vcs
+     and+ commit_id = Vcs.commit_id ~needed_for vcs
+     and+ files = Vcs.files ~needed_for vcs in
      Some (version, commit_id, files)
    | None ->
-     (* We have to do this because scanning the source tree evaluates [-p].
-        That's because [-p] is needed to interpret packages in dune projects
-        correctly. It should not be necessary, so we should probably make the
-        package loading lazier. *)
-     Dune_rules.Only_packages.Clflags.set No_restriction;
      let* root = Source_tree.root () in
      let project = Source_tree.Dir.project root in
      if Dune_project.dune_version project < (3, 17)
@@ -326,9 +359,11 @@ let subst vcs =
                ~trace_event_name:"Subst"
                ~f:(fun dir ->
                  Source_tree.Dir.filenames dir
-                 |> Filename.Set.fold ~init:Path.Source.Set.empty ~f:(fun fname acc ->
-                   Path.Source.relative (Source_tree.Dir.path dir) fname
-                   |> Path.Source.Set.add acc)
+                 |> Filename.Array.Set.fold
+                      ~init:Path.Source.Set.empty
+                      ~f:(fun fname acc ->
+                        Path.Source.relative_fname (Source_tree.Dir.path dir) fname
+                        |> Path.Source.Set.add acc)
                  |> Memo.return)
        in
        Some (None, None, Path.Source.Set.to_list files))
@@ -341,11 +376,10 @@ let subst vcs =
       (* CR-soon rgrinberg: unify this check with the above version check *)
       (let files =
          (* Filter-out files form sub-directories *)
-         List.fold_left files ~init:String.Set.empty ~f:(fun acc fn ->
+         List.filter_map files ~f:(fun fn ->
            let fn = Path.source fn in
-           if Path.is_root (Path.parent_exn fn)
-           then String.Set.add acc (Path.to_string fn)
-           else acc)
+           if Path.is_root (Path.parent_exn fn) then Some (Path.basename fn) else None)
+         |> Filename.Array.Set.of_list
        in
        Dune_project.load ~dir:Path.Source.root ~files ~infer_from_opam_files:true)
       >>| function
@@ -431,16 +465,7 @@ let subst vcs =
       then subst_file path ~map:watermarks opam_package_files))
 ;;
 
-let subst () =
-  (* CR-someday rgrinberg: use [Source_tree.nearest_vcs] *)
-  Sys.readdir "."
-  |> Array.to_list
-  |> String.Set.of_list
-  |> Vcs.Kind.of_dir_contents
-  |> Option.map ~f:(fun kind -> { Vcs.kind; root = Path.root })
-  |> subst
-  |> Memo.run
-;;
+let subst () = Source_tree.nearest_vcs Path.Source.root |> Memo.bind ~f:subst |> Memo.run
 
 (** A string that is "%%VERSION%%" but not expanded by [dune subst] *)
 let literal_version = "%%" ^ "VERSION%%"
@@ -500,27 +525,23 @@ let man =
 let info = Cmd.info "subst" ~doc ~man
 
 let term =
-  let+ () = Common.build_info
-  and+ debug_backtraces = Common.debug_backtraces in
+  let+ () = Common.No_build.term_and_set in
   let config : Dune_config.t =
     { Dune_config.default with
       display = Dune_config.Display.quiet
     ; concurrency = Fixed 1
     }
   in
-  Dune_engine.Clflags.debug_backtraces debug_backtraces;
+  (* We have to do this because scanning the source tree evaluates [-p].
+     That's because [-p] is needed to interpret packages in dune projects
+     correctly. It should not be necessary, so we should probably make the
+     package loading lazier. *)
+  Dune_rules.Only_packages.Clflags.set No_restriction;
   Path.set_root (Path.External.cwd ());
   Path.Build.set_build_dir (Path.Outside_build_dir.of_string Common.default_build_dir);
   Dune_config.init config ~watch:false;
-  Log.init_disabled ();
-  Dune_engine.Scheduler.Run.go
-    ~on_event:(fun _ _ -> ())
-    (Dune_config.for_scheduler
-       config
-       ~watch_exclusions:[]
-       None
-       ~print_ctrl_c_warning:false)
-    subst
+  Log.init No_log_file;
+  Scheduler_setup.no_build_no_rpc ~config subst
 ;;
 
 let command = Cmd.v info term

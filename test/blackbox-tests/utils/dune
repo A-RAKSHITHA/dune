@@ -1,13 +1,17 @@
 (executable
  (name dune_cmd)
  (modules dune_cmd)
- (libraries
-  stdune
-  dune-private-libs.dune_re
-  dune-configurator
-  build_path_prefix_map
-  str
-  unix))
+ (libraries stdune re dune-configurator build_path_prefix_map str unix))
+
+(executable
+ (name action_trace)
+ (modules action_trace)
+ (libraries stdune unix csexp dune_action_trace))
+
+(executable
+ (name action_plugin_helper)
+ (modules action_plugin_helper)
+ (libraries dune-rpc-lwt lwt lwt.unix unix))
 
 (ocamllex dunepp)
 
@@ -18,11 +22,12 @@
 (executable
  (modules melc_stdlib_prefix)
  (name melc_stdlib_prefix)
- (libraries stdune unix))
+ (libraries stdune fs_io unix))
 
 (executable
  (name refmt)
- (modules refmt))
+ (modules refmt)
+ (libraries compiler-libs.common))
 
 (executable
  (name sherlodoc)
@@ -37,3 +42,16 @@
 (executable
  (modules ocamlformat)
  (name ocamlformat))
+
+(rule
+ (alias runtest)
+ (deps fakegit.sh)
+ (action
+  (run %{bin:bash} -n %{deps})))
+
+(rule
+ (alias runtest)
+ (enabled_if %{bin-available:shellcheck})
+ (deps fakegit.sh)
+ (action
+  (run %{bin:shellcheck} -s bash %{deps})))

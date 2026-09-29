@@ -1,0 +1,180 @@
+Testing multiple aliases in rules stanza
+
+First we start with a dune-project before alias was introduced:
+  $ make_dune_project 1.9
+
+  $ cat > dune << EOF
+  > (rule
+  >  (alias a)
+  >  (action (echo "I have run")))
+  > EOF
+
+  $ dune build @a
+  File "dune", line 2, characters 1-10:
+  2 |  (alias a)
+       ^^^^^^^^^
+  Error: 'alias' is only available since version 2.0 of the dune language.
+  Please update your dune-project file to have (lang dune 2.0).
+  [1]
+
+Next we update the dune-project file to use dune 2.0:
+  $ make_dune_project 2.0
+
+  $ dune build @a
+  I have run
+
+We now update the dune file to use multiple aliases
+  $ cat > dune << EOF
+  > (rule
+  >  (alias a b)
+  >  (action (echo "I have run")))
+  > EOF
+
+  $ dune build @a
+  File "dune", line 2, characters 10-11:
+  2 |  (alias a b)
+                ^
+  Error: Too many arguments for "alias"
+  [1]
+
+That doesn't work so we use the aliases field
+  $ cat > dune << EOF
+  > (rule
+  >  (aliases a b)
+  >  (action (echo "I have run")))
+  > EOF
+
+  $ dune build @a @b
+  File "dune", line 2, characters 1-14:
+  2 |  (aliases a b)
+       ^^^^^^^^^^^^^
+  Error: 'aliases' is only available since version 3.5 of the dune language.
+  Please update your dune-project file to have (lang dune 3.5).
+  [1]
+
+Updating the dune-project file to use dune 3.5 allows the build to succeed:
+  $ make_dune_project 3.5
+
+  $ dune build @a
+  I have run
+  $ dune build @b
+
+Also note having both the alias and aliases fields in the same rule stanza is
+not allowed
+
+  $ cat > dune << EOF
+  > (rule
+  >  (alias a)
+  >  (aliases b)
+  >  (action (echo "I have run")))
+  > EOF
+
+  $ dune build @a
+  File "dune", lines 1-4, characters 0-60:
+  1 | (rule
+  2 |  (alias a)
+  3 |  (aliases b)
+  4 |  (action (echo "I have run")))
+  Error: fields "alias" and "aliases" are mutually exclusive.
+  [1]
+
+Even if the aliases list is empty
+  $ cat > dune << EOF
+  > (rule
+  >  (alias a)
+  >  (aliases)
+  >  (action (echo "I have run")))
+  > EOF
+
+  $ dune build @a
+  File "dune", lines 1-4, characters 0-58:
+  1 | (rule
+  2 |  (alias a)
+  3 |  (aliases)
+  4 |  (action (echo "I have run")))
+  Error: fields "alias" and "aliases" are mutually exclusive.
+  [1]
+
+Building both aliases at the same time should only run the action once
+  $ cat > dune << EOF
+  > (rule
+  >  (aliases a b)
+  >  (action (echo "I have run\n")))
+  > EOF
+
+  $ dune clean
+  $ dune build @a @b
+  I have run
+
+A similar test with a rule that produces a target
+  $ cat > dune << EOF
+  > (rule
+  >  (targets a)
+  >  (aliases b c)
+  >  (action
+  >   (progn
+  >    (echo "I have run\n")
+  >    (with-stdout-to a (echo "foo")))))
+  > EOF
+
+  $ dune clean
+  $ dune build @b @c
+  I have run
+
+A rule attached to several aliases must not make one alias pull in unrelated
+contributions to another alias. Here alias [a] also receives an unrelated
+action; building [b] must run only the shared action.
+  $ cat > dune << EOF
+  > (rule
+  >  (aliases a b)
+  >  (action (echo "a and b\n")))
+  > (rule
+  >  (alias a)
+  >  (action (echo "just a\n")))
+  > EOF
+
+  $ dune clean
+  $ dune build @b
+  a and b
+
+Building [a] still runs both the shared action and the action attached only
+to [a].
+  $ dune clean
+  $ dune build @a
+  a and b
+  just a
+
+The set of aliases determines the action's identity: neither duplicating an
+alias nor reordering the aliases should re-run the action.
+
+Duplicating an alias does not re-run the action:
+  $ cat > dune << EOF
+  > (rule
+  >  (aliases a)
+  >  (action (echo "I have run\n")))
+  > EOF
+  $ dune clean
+  $ dune build @a
+  I have run
+  $ cat > dune << EOF
+  > (rule
+  >  (aliases a a)
+  >  (action (echo "I have run\n")))
+  > EOF
+  $ dune build @a
+
+Reordering the aliases does not re-run the action:
+  $ cat > dune << EOF
+  > (rule
+  >  (aliases a b)
+  >  (action (echo "I have run\n")))
+  > EOF
+  $ dune clean
+  $ dune build @a @b
+  I have run
+  $ cat > dune << EOF
+  > (rule
+  >  (aliases b a)
+  >  (action (echo "I have run\n")))
+  > EOF
+  $ dune build @a @b

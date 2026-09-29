@@ -25,14 +25,16 @@ let dump sctx ~dir =
   and+ menhir_dump =
     Dune_rules.Menhir_rules.menhir_env ~dir
     |> Action_builder.of_memo
-    >>= Dune_rules.Menhir_env.dump
-  and+ coq_dump = Dune_rules.Coq.Coq_rules.coq_env ~dir >>| Dune_rules.Coq.Coq_flags.dump
+    >>= Dune_lang.Menhir_env.dump
+  and+ rocq_dump =
+    Dune_rules.Rocq.Rocq_rules.rocq_env ~dir
+    >>| Dune_rules.Rocq.Rocq_flags.dump ~dir:(Path.build dir)
   and+ jsoo_js_dump =
-    let module Js_of_ocaml = Dune_rules.Js_of_ocaml in
+    let module Js_of_ocaml = Dune_lang.Js_of_ocaml in
     let* jsoo = Action_builder.of_memo (Dune_rules.Jsoo_rules.jsoo_env ~dir ~mode:JS) in
     Js_of_ocaml.Flags.dump ~mode:JS jsoo.flags
   and+ jsoo_wasm_dump =
-    let module Js_of_ocaml = Dune_rules.Js_of_ocaml in
+    let module Js_of_ocaml = Dune_lang.Js_of_ocaml in
     let* jsoo = Action_builder.of_memo (Dune_rules.Jsoo_rules.jsoo_env ~dir ~mode:Wasm) in
     Js_of_ocaml.Flags.dump ~mode:Wasm jsoo.flags
   in
@@ -42,7 +44,7 @@ let dump sctx ~dir =
       ; c_dump
       ; link_flags_dump
       ; menhir_dump
-      ; coq_dump
+      ; rocq_dump
       ; jsoo_js_dump
       ; jsoo_wasm_dump
       ]
@@ -72,7 +74,8 @@ let pp ppf ~fields sexps =
 
 let term =
   let+ builder = Common.Builder.term
-  and+ dir = Arg.(value & pos 0 dir "" & info [] ~docv:"PATH")
+  (* CR-someday Alizter: document this option *)
+  and+ dir = Arg.(value & pos 0 dir "" & info [] ~docv:"PATH" ~doc:None)
   and+ fields =
     Arg.(
       value
@@ -81,51 +84,50 @@ let term =
           [ "field" ]
           ~docv:"FIELD"
           ~doc:
-            "Only print this field. This option can be repeated multiple times to print \
-             multiple fields.")
+            (Some
+               "Only print this field. This option can be repeated multiple times to \
+                print multiple fields."))
   in
   let common, config = Common.init builder in
-  Scheduler.go ~common ~config (fun () ->
-    let open Fiber.O in
-    let* setup = Import.Main.setup () in
-    let* setup = Memo.run setup in
-    let dir = Path.of_string dir in
-    let checked = Util.check_path setup.contexts dir in
-    let request =
-      Action_builder.all
-        (match checked with
-         | In_build_dir (ctx, _) ->
-           let sctx =
-             Dune_engine.Context_name.Map.find_exn setup.scontexts (Context.name ctx)
-           in
-           [ dump sctx ~dir:(Path.as_in_build_dir_exn dir) ]
-         | In_source_dir dir ->
-           Dune_engine.Context_name.Map.values setup.scontexts
-           |> List.map ~f:(fun sctx ->
-             let dir =
-               Path.Build.append_source
-                 (Context.build_dir (Super_context.context sctx))
-                 dir
-             in
-             dump sctx ~dir)
-         | In_private_context _ | External _ ->
-           User_error.raise [ Pp.text "Environment is not defined for external paths" ]
-         | In_install_dir _ ->
-           User_error.raise [ Pp.text "Environment is not defined in install dirs" ])
-    in
-    build_exn (fun () ->
+  Scheduler_setup.go_with_rpc_server ~common ~config (fun () ->
+    Build_system.run_exn (fun () ->
       let open Memo.O in
+      let* setup = Util.setup () in
+      let dir = Path.of_string dir in
+      let checked = Util.check_path setup.contexts dir in
+      let request =
+        Action_builder.all
+          (match checked with
+           | In_build_dir (ctx, _) ->
+             let sctx =
+               Dune_engine.Context_name.Map.find_exn setup.scontexts (Context.name ctx)
+             in
+             [ dump sctx ~dir:(Path.as_in_build_dir_exn dir) ]
+           | In_source_dir dir ->
+             Dune_engine.Context_name.Map.values setup.scontexts
+             |> List.map ~f:(fun sctx ->
+               let dir =
+                 Path.Build.append_source
+                   (Context.build_dir (Super_context.context sctx))
+                   dir
+               in
+               dump sctx ~dir)
+           | In_private_context _ | External _ ->
+             User_error.raise [ Pp.text "Environment is not defined for external paths" ]
+           | In_install_dir _ ->
+             User_error.raise [ Pp.text "Environment is not defined in install dirs" ])
+      in
       let+ res, _facts = Action_builder.evaluate_and_collect_facts request in
       res)
-    >>| function
-    | [ (_, env) ] -> Format.printf "%a" (pp ~fields) env
-    | l ->
-      List.iter l ~f:(fun (name, env) ->
-        Format.printf
-          "@[<v2>Environment for context %s:@,%a@]@."
-          (Dune_engine.Context_name.to_string name)
-          (pp ~fields)
-          env))
+    |> Fiber.map ~f:(function
+      | [ (_, env) ] -> Format.printf "%a" (pp ~fields) env
+      | l ->
+        List.iter l ~f:(fun (name, env) ->
+          Format.printf
+            "@[<v2>Environment for context %s:@,%a@]@."
+            (Dune_engine.Context_name.to_string name)
+            (pp ~fields)
+            env)))
 ;;
 
 let command =

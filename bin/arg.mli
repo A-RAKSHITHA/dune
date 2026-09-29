@@ -1,8 +1,19 @@
 open Stdune
 
 include module type of struct
-  include Cmdliner.Arg
-end
+    include Cmdliner.Arg
+  end
+  with type info := Cmdliner.Arg.info
+
+val info
+  :  ?deprecated:string
+  -> ?absent:string
+  -> ?docs:string
+  -> ?docv:string
+  -> doc:string option
+  -> ?env:Cmdliner.Cmd.Env.info
+  -> string list
+  -> Cmdliner.Arg.info
 
 module Path : sig
   module External : sig
@@ -21,16 +32,18 @@ end
 module Dep : sig
   type t = Dune_lang.Dep_conf.t
 
+  val equal : t -> t -> bool
   val file : string -> t
   val alias : dir:Stdune.Path.Local.t -> Dune_engine.Alias.Name.t -> t
   val alias_rec : dir:Stdune.Path.Local.t -> Dune_engine.Alias.Name.t -> t
   val to_string_maybe_quoted : t -> string
+  val alias_arg : t conv
+  val alias_rec_arg : t conv
 end
 
 val bytes : int64 conv
 val context_name : Dune_engine.Context_name.t conv
 val dep : Dep.t conv
-val graph_format : Dune_graph.Graph.File_format.t conv
 val path : Path.t conv
 val external_path : Path.External.t conv
 val package_name : Dune_lang.Package.Name.t conv

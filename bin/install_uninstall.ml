@@ -16,7 +16,7 @@ let synopsis =
   ]
 ;;
 
-let print_line ~(verbosity : Dune_engine.Display.t) fmt =
+let print_line ~(verbosity : Display.t) fmt =
   Printf.ksprintf
     (fun s ->
        match verbosity with
@@ -34,7 +34,9 @@ let interpret_destdir ~destdir path =
 let get_dirs context ~prefix_from_command_line ~from_command_line =
   let open Fiber.O in
   let module Roots = Install.Roots in
-  let prefix_from_command_line = Option.map ~f:Path.of_string prefix_from_command_line in
+  let prefix_from_command_line =
+    Option.map ~f:Path.of_string_allow_outside_workspace prefix_from_command_line
+  in
   let+ roots =
     match prefix_from_command_line with
     | None -> Memo.run (Context.roots context)
@@ -95,7 +97,7 @@ module Workspace = struct
       let name = Package.name p in
       let dir = Package.dir p in
       Ok
-        (Path.Source.relative
+        (Path.Source.relative_fname
            dir
            (Dune_rules.Install_rules.install_file ~package:name ~findlib_toolchain))
   ;;
@@ -132,7 +134,7 @@ module Special_file = struct
     match e.section with
     | Lib ->
       let dst = Install.Entry.Dst.to_string e.dst in
-      if dst = Dune_findlib.Findlib.Package.meta_fn
+      if String.equal dst (Filename.to_string Dune_findlib.Findlib.Package.meta_fn)
       then Some META
       else if dst = Dune_package.fn
       then Some Dune_package
@@ -165,8 +167,29 @@ module type File_operations = sig
   val remove_dir_if_exists : if_non_empty:rmdir_mode -> Path.t -> unit
 end
 
+let raise_file_should_be_deleted p =
+  User_error.raise
+    [ Pp.textf "Please delete file %s manually." (Path.to_string_maybe_quoted p) ]
+;;
+
+let raise_non_empty_dir_should_be_deleted dir =
+  User_error.raise
+    [ Pp.textf
+        "Please delete non-empty directory %s manually."
+        (Path.to_string_maybe_quoted dir)
+    ]
+;;
+
+let rec validate_dir_can_be_created dir =
+  match Unix.stat (Path.to_string dir) with
+  | { st_kind = S_DIR; _ } -> ()
+  | _ -> raise_file_should_be_deleted dir
+  | exception Unix.Unix_error ((ENOENT | ENOTDIR), _, _) ->
+    Option.iter (Path.parent dir) ~f:validate_dir_can_be_created
+;;
+
 module File_ops_dry_run (Verbosity : sig
-    val verbosity : Dune_engine.Display.t
+    val verbosity : Display.t
   end) : File_operations = struct
   open Verbosity
 
@@ -181,13 +204,19 @@ module File_ops_dry_run (Verbosity : sig
     Fiber.return ()
   ;;
 
-  let mkdir_p path = print_line "Creating directory %s" (Path.to_string_maybe_quoted path)
+  let mkdir_p path =
+    validate_dir_can_be_created path;
+    print_line "Creating directory %s" (Path.to_string_maybe_quoted path)
+  ;;
 
   let remove_file_if_exists path =
     print_line "Removing (if it exists) %s" (Path.to_string_maybe_quoted path)
   ;;
 
   let remove_dir_if_exists ~if_non_empty path =
+    (match if_non_empty, Path.readdir_unsorted path with
+     | Fail, Ok (_ :: _) -> raise_non_empty_dir_should_be_deleted path
+     | _, _ -> ());
     print_line
       "Removing directory (%s if not empty) %s"
       (match if_non_empty with
@@ -198,7 +227,7 @@ module File_ops_dry_run (Verbosity : sig
 end
 
 module File_ops_real (W : sig
-    val verbosity : Dune_engine.Display.t
+    val verbosity : Display.t
     val workspace : Workspace.t
   end) : File_operations = struct
   open W
@@ -226,7 +255,11 @@ module File_ops_real (W : sig
       in
       match packages with
       | None -> Fiber.return None
-      | Some vcs -> Memo.run (Vcs.describe vcs)
+      | Some vcs ->
+        Memo.run
+          (Vcs.describe
+             vcs
+             ~needed_for:"to infer package versions while installing files")
     in
     try f ~get_version ic ~src oc with
     | _ (* XXX should we really be catching everything here? *) ->
@@ -263,7 +296,7 @@ module File_ops_real (W : sig
   let process_dune_package ~get_version ~get_location ic ~src oc =
     let lb = Lexing.from_channel ic in
     let dune_version = Dune_lang.Syntax.greatest_supported_version_exn Stanza.syntax in
-    match Dune_package.Or_meta.parse src lb |> User_error.ok_exn with
+    match Dune_package.Or_meta.parse ~package:None src lb |> User_error.ok_exn with
     | Use_meta ->
       with_ppf oc ~f:(Dune_package.Or_meta.pp_use_meta ~dune_version);
       Fiber.return Done
@@ -300,7 +333,18 @@ module File_ops_real (W : sig
         ~package
         ~(conf : Artifact_substitution.Conf.t)
     =
-    let chmod = if executable then fun _ -> 0o755 else fun _ -> 0o644 in
+    let mode =
+      let open Permissions in
+      if executable
+      then
+        Mode.create
+          ~user:(read + write + execute)
+          ~group:(read + execute)
+          ~other:(read + execute)
+          ()
+      else Mode.create ~user:(read + write) ~group:read ~other:read ()
+    in
+    let chmod _ = mode in
     let plain_copy () = Io.copy_file ~chmod ~src ~dst () in
     match kind with
     | Substitute -> Artifact_substitution.copy_file ~conf ~src ~dst ~chmod ()
@@ -328,10 +372,10 @@ module File_ops_real (W : sig
   ;;
 
   let remove_file_if_exists dst =
-    if Path.exists dst
+    if Fpath.exists (Path.to_string dst)
     then (
       print_line "Deleting %s" (Path.to_string_maybe_quoted dst);
-      print_unix_error (fun () -> Path.unlink_exn dst))
+      print_unix_error (fun () -> Fpath.unlink_exn (Path.to_string dst)))
   ;;
 
   let remove_dir_if_exists ~if_non_empty dir =
@@ -339,33 +383,23 @@ module File_ops_real (W : sig
     | Error (Unix.ENOENT, _, _) -> ()
     | Ok [] ->
       print_line "Deleting empty directory %s" (Path.to_string_maybe_quoted dir);
-      print_unix_error (fun () -> Path.rmdir dir)
+      print_unix_error (fun () -> Unix.rmdir (Path.to_string dir))
     | Error (e, _, _) ->
       User_message.prerr (User_error.make [ Pp.text (Unix.error_message e) ])
     | _ ->
-      let dir = Path.to_string_maybe_quoted dir in
       (match if_non_empty with
+       | Fail -> raise_non_empty_dir_should_be_deleted dir
        | Warn ->
+         let dir = Path.to_string_maybe_quoted dir in
          User_message.prerr
            (User_error.make
-              [ Pp.textf "Directory %s is not empty, cannot delete (ignoring)." dir ])
-       | Fail ->
-         User_error.raise
-           [ Pp.textf "Please delete non-empty directory %s manually." dir ])
+              [ Pp.textf "Directory %s is not empty, cannot delete (ignoring)." dir ]))
   ;;
 
   let mkdir_p p =
-    (* CR-someday amokhov: We should really change [Path.mkdir_p dir] to fail if
-       it turns out that [dir] exists and is not a directory. Even better, make
-       [Path.mkdir_p] return an explicit variant to deal with. *)
-    match Fpath.mkdir_p (Path.to_string p) with
-    | Created -> ()
-    | Already_exists ->
-      (match Path.is_directory p with
-       | true -> ()
-       | false ->
-         User_error.raise
-           [ Pp.textf "Please delete file %s manually." (Path.to_string_maybe_quoted p) ])
+    match Fpath.mkdir_p_strict (Path.to_string p) with
+    | `Created | `Already_exists -> ()
+    | `Not_a_dir -> raise_file_should_be_deleted p
   ;;
 end
 
@@ -437,7 +471,7 @@ let install_entry
       ~package
       ~dir
       ~create_install_files
-      (entry : Path.t Install.Entry.t)
+      (entry : Path.t Install.Entry.Expanded.t)
       ~dst
       ~verbosity
   =
@@ -456,7 +490,8 @@ let install_entry
   | false -> Fiber.return entry
   | true ->
     let+ () =
-      (match Path.is_directory dst with
+      Ops.mkdir_p dir;
+      (match Fpath.is_directory (Path.to_string dst) with
        | true -> Ops.remove_dir_if_exists ~if_non_empty:Fail dst
        | false -> Ops.remove_file_if_exists dst);
       print_line
@@ -464,7 +499,6 @@ let install_entry
         "%s %s"
         (if create_install_files then "Copying to" else "Installing")
         (Path.to_string_maybe_quoted dst);
-      Ops.mkdir_p dir;
       let executable = Section.should_set_executable_bit entry.section in
       let kind =
         match special_file with
@@ -478,7 +512,7 @@ let install_entry
       in
       Ops.copy_file ~src:entry.src ~dst ~executable ~kind ~package ~conf
     in
-    Install.Entry.set_src entry dst
+    Install.Entry.Expanded.set_src entry dst
 ;;
 
 let run
@@ -521,6 +555,11 @@ let run
          User_error.raise
            [ Pp.textf "Context %S not found!" (Dune_engine.Context_name.to_string name) ])
   in
+  let* source_workspace = Memo.run (Source.Workspace.workspace ()) in
+  if Source.Workspace.pkg_enabled source_workspace
+  then
+    User_error.raise
+      [ Pp.text "dune install is not supported with Dune package management." ];
   let* pkgs =
     match pkgs with
     | _ :: _ -> Fiber.return pkgs
@@ -545,7 +584,7 @@ let run
           in
           Path.append_source (Path.build (Context.build_dir ctx)) fn
         in
-        if Path.exists fn then Left (ctx, (pkg, fn)) else Right fn))
+        if Fpath.exists (Path.to_string fn) then Left (ctx, (pkg, fn)) else Right fn))
     |> List.partition_map ~f:Fun.id
   in
   if missing_install_files <> []
@@ -582,14 +621,14 @@ let run
       let entries_per_package =
         List.map install_files ~f:(fun (package, install_file) ->
           let entries =
-            Install.Entry.load_install_file install_file Path.of_local
-            |> List.filter ~f:(fun (entry : Path.t Install.Entry.t) ->
+            Install.Entry.Expanded.load_install_file install_file Path.of_local
+            |> List.filter ~f:(fun (entry : Path.t Install.Entry.Expanded.t) ->
               Sections.should_install sections entry.section)
           in
           match
             List.filter_map entries ~f:(fun entry ->
-              (* CR rgrinberg: this is ignoring optional entries *)
-              Option.some_if (not (Path.exists entry.src)) entry.src)
+              (* CR-someday rgrinberg: this is ignoring optional entries *)
+              Option.some_if (not (Fpath.exists (Path.to_string entry.src))) entry.src)
           with
           | [] -> package, entries
           | missing_files ->
@@ -648,7 +687,7 @@ let run
         let conf = Artifact_substitution.Conf.of_install ~relocatable ~roots ~context in
         Fiber.sequential_iter entries_per_package ~f:(fun (package, entries) ->
           let+ entries =
-            (* CR rgrinberg: why don't we install things concurrently? *)
+            (* CR-someday rgrinberg: why don't we install things concurrently? *)
             Fiber.sequential_map entries ~f:(fun entry ->
               let dst =
                 let paths = Install.Paths.make ~relative:Path.relative ~package ~roots in
@@ -680,7 +719,8 @@ let run
                 ~findlib_toolchain:(Context.findlib_toolchain context)
                 package
             in
-            Install.Entry.gen_install_file entries |> Io.write_file (Path.source fn))))
+            Install.Entry.Expanded.gen_install_file entries
+            |> Io.write_file_exn (Path.source fn))))
   in
   Path.Set.to_list !files_deleted_in
   (* This [List.rev] is to ensure we process children directories before
@@ -691,7 +731,8 @@ let run
 
 let make ~what =
   let doc = Format.asprintf "%a packages defined in the workspace." pp_what what in
-  let name_ = Arg.info [] ~docv:"PACKAGE" in
+  (* CR-someday Alizter: document this option *)
+  let name_ = Arg.info [] ~docv:"PACKAGE" ~doc:None in
   let absolute_path =
     Arg.conv'
       ( (fun path ->
@@ -711,8 +752,9 @@ let make ~what =
             ~env:(Cmd.Env.info "DUNE_INSTALL_PREFIX")
             ~docv:"PREFIX"
             ~doc:
-              "Directory where files are copied. For instance binaries are copied into \
-               $(i,\\$prefix/bin), library files into $(i,\\$prefix/lib), etc...")
+              (Some
+                 "Directory where files are copied. For instance binaries are copied \
+                  into $(i,\\$prefix/bin), library files into $(i,\\$prefix/lib), etc..."))
     and+ destdir =
       Arg.(
         value
@@ -721,7 +763,7 @@ let make ~what =
             [ "destdir" ]
             ~env:(Cmd.Env.info "DESTDIR")
             ~docv:"PATH"
-            ~doc:"This directory is prepended to all installed paths.")
+            ~doc:(Some "This directory is prepended to all installed paths."))
     and+ libdir_from_command_line =
       Arg.(
         value
@@ -730,59 +772,80 @@ let make ~what =
             [ "libdir" ]
             ~docv:"PATH"
             ~doc:
-              "Directory where library files are copied, relative to $(b,prefix) or \
-               absolute. If $(b,--prefix) is specified the default is \
-               $(i,\\$prefix/lib). Only absolute path accepted.")
+              (Some
+                 "Directory where library files are copied, relative to $(b,prefix) or \
+                  absolute. If $(b,--prefix) is specified the default is \
+                  $(i,\\$prefix/lib). Only absolute path accepted."))
     and+ mandir_from_command_line =
       let doc =
         "Manually override the directory to install man pages. Only absolute path \
          accepted."
       in
-      Arg.(value & opt (some absolute_path) None & info [ "mandir" ] ~docv:"PATH" ~doc)
+      Arg.(
+        value
+        & opt (some absolute_path) None
+        & info [ "mandir" ] ~docv:"PATH" ~doc:(Some doc))
     and+ docdir_from_command_line =
       let doc =
         "Manually override the directory to install documentation files. Only absolute \
          path accepted."
       in
-      Arg.(value & opt (some absolute_path) None & info [ "docdir" ] ~docv:"PATH" ~doc)
+      Arg.(
+        value
+        & opt (some absolute_path) None
+        & info [ "docdir" ] ~docv:"PATH" ~doc:(Some doc))
     and+ etcdir_from_command_line =
       let doc =
         "Manually override the directory to install configuration files. Only absolute \
          path accepted."
       in
-      Arg.(value & opt (some absolute_path) None & info [ "etcdir" ] ~docv:"PATH" ~doc)
+      Arg.(
+        value
+        & opt (some absolute_path) None
+        & info [ "etcdir" ] ~docv:"PATH" ~doc:(Some doc))
     and+ bindir_from_command_line =
       let doc =
         "Manually override the directory to install public binaries. Only absolute path \
          accepted."
       in
-      Arg.(value & opt (some absolute_path) None & info [ "bindir" ] ~docv:"PATH" ~doc)
+      Arg.(
+        value
+        & opt (some absolute_path) None
+        & info [ "bindir" ] ~docv:"PATH" ~doc:(Some doc))
     and+ sbindir_from_command_line =
       let doc =
         "Manually override the directory to install files from sbin section. Only \
          absolute path accepted."
       in
-      Arg.(value & opt (some absolute_path) None & info [ "sbindir" ] ~docv:"PATH" ~doc)
+      Arg.(
+        value
+        & opt (some absolute_path) None
+        & info [ "sbindir" ] ~docv:"PATH" ~doc:(Some doc))
     and+ datadir_from_command_line =
       let doc =
         "Manually override the directory to install files from share section. Only \
          absolute path accepted."
       in
-      Arg.(value & opt (some absolute_path) None & info [ "datadir" ] ~docv:"PATH" ~doc)
+      Arg.(
+        value
+        & opt (some absolute_path) None
+        & info [ "datadir" ] ~docv:"PATH" ~doc:(Some doc))
     and+ libexecdir_from_command_line =
       let doc =
         "Manually override the directory to install executable library files. Only \
          absolute path accepted."
       in
       Arg.(
-        value & opt (some absolute_path) None & info [ "libexecdir" ] ~docv:"PATH" ~doc)
+        value
+        & opt (some absolute_path) None
+        & info [ "libexecdir" ] ~docv:"PATH" ~doc:(Some doc))
     and+ dry_run =
       Arg.(
         value
         & flag
         & info
             [ "dry-run" ]
-            ~doc:"Only display the file operations that would be performed.")
+            ~doc:(Some "Only display the file operations that would be performed."))
     and+ relocatable =
       Arg.(
         value
@@ -790,8 +853,9 @@ let make ~what =
         & info
             [ "relocatable" ]
             ~doc:
-              "Make the binaries relocatable (the installation directory can be moved). \
-               The installation directory must be specified with --prefix")
+              (Some
+                 "Make the binaries relocatable (the installation directory can be \
+                  moved). The installation directory must be specified with --prefix"))
     and+ create_install_files =
       Arg.(
         value
@@ -799,8 +863,10 @@ let make ~what =
         & info
             [ "create-install-files" ]
             ~doc:
-              "Do not directly install, but create install files in the root directory \
-               and create substituted files if needed in destdir (_destdir by default).")
+              (Some
+                 "Do not directly install, but create install files in the root \
+                  directory and create substituted files if needed in destdir (_destdir \
+                  by default)."))
     and+ pkgs = Arg.(value & pos_all package_name [] name_)
     and+ context =
       Arg.(
@@ -810,13 +876,15 @@ let make ~what =
             [ "context" ]
             ~docv:"CONTEXT"
             ~doc:
-              "Select context to install from. By default, install files from all \
-               defined contexts.")
+              (Some
+                 "Select context to install from. By default, install files from all \
+                  defined contexts."))
     and+ sections = Sections.term in
     let builder = Common.Builder.forbid_builds builder in
     let builder = Common.Builder.disable_log_file builder in
+    (* CR-soon rgrinberg: stop taking pointless args *)
     let common, config = Common.init builder in
-    Scheduler.go ~common ~config (fun () ->
+    Scheduler_setup.no_build_no_rpc ~config (fun () ->
       let from_command_line =
         { Install.Roots.lib_root = libdir_from_command_line
         ; etc_root = etcdir_from_command_line

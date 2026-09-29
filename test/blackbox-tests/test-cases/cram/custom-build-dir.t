@@ -1,27 +1,54 @@
 Create a cram test and try to run it with DUNE_BUILD_DIR set to an absolute
 path
 
-  $ cat >dune-project <<EOF
-  > (lang dune 3.5)
-  > EOF
+  $ make_dune_project 3.5
 
-  $ cat >foo.t <<EOF
+  $ cat >foo.t <<'EOF'
   >   $ echo "  $ echo bar" >bar.t
-  >   $ dune runtest
+  >   $ if [ -e "$DUNE_BUILD_DIR/.rpc" ]; then
+  >   >   echo ".rpc exists"
+  >   > else
+  >   >   echo ".rpc missing"
+  >   > fi
+  >   .rpc missing
+  >   $ env -u DUNE_RPC -u DUNE_BUILD_DIR dune runtest
   > EOF
 
   $ DUNE_BUILD_DIR=$PWD/tmp dune runtest --auto-promote
   File "foo.t", line 1, characters 0-0:
-  Error: Files
-  $TESTCASE_ROOT/tmp/default/foo.t
-  and
-  $TESTCASE_ROOT/tmp/default/foo.t.corrected
-  differ.
+  --- foo.t
+  +++ foo.t.corrected
+  @@ -4,5 +4,12 @@
+     > else
+     >   echo ".rpc missing"
+     > fi
+  -  .rpc missing
+  +  .rpc exists
+     $ env -u DUNE_RPC -u DUNE_BUILD_DIR dune runtest
+  +  File "bar.t", line 1, characters 0-0:
+  +  --- bar.t
+  +  +++ bar.t.corrected
+  +  @@ -1 +1,2 @@
+  +     $ echo bar
+  +  +  bar
+  +  [1]
   Promoting
     $TESTCASE_ROOT/tmp/default/foo.t.corrected
     to foo.t.
   [1]
-  $ sed -E '/\(pid: [0-9]+\)/{s//(pid: ###)/; s/instance.*/.../g; q;}' foo.t
+  $ cat foo.t
     $ echo "  $ echo bar" >bar.t
-    $ dune runtest
-    Error: A running dune (pid: ###) ...
+    $ if [ -e "$DUNE_BUILD_DIR/.rpc" ]; then
+    >   echo ".rpc exists"
+    > else
+    >   echo ".rpc missing"
+    > fi
+    .rpc exists
+    $ env -u DUNE_RPC -u DUNE_BUILD_DIR dune runtest
+    File "bar.t", line 1, characters 0-0:
+    --- bar.t
+    +++ bar.t.corrected
+    @@ -1 +1,2 @@
+       $ echo bar
+    +  bar
+    [1]

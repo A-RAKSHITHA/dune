@@ -1,9 +1,6 @@
 Begin by installing a library with C stubs.
 
-  $ cat >dune-project <<EOF
-  > (lang dune 3.7)
-  > (package (name libA))
-  > EOF
+  $ make_dune_project_with_package 3.7 libA
   $ cat >dune <<EOF
   > (library
   >  (name libA)
@@ -31,8 +28,8 @@ Begin by installing a library with C stubs.
   Installing install/lib/libA/liblibA_stubs.a
   Installing install/lib/libA/libA.cmxs
   Installing install/lib/stublibs/dlllibA_stubs.so
-  $ cat ./install/lib/libA/dune-package
-  (lang dune 3.18)
+  $ sed -E 's/lang dune [0-9.]+/lang dune XXX/' ./install/lib/libA/dune-package
+  (lang dune XXX)
   (name libA)
   (sections
    (lib
@@ -79,9 +76,7 @@ Begin by installing a library with C stubs.
 
 Now let us define an executable using that installed library.
 
-  $ cat >dune-project <<EOF
-  > (lang dune 3.7)
-  > EOF
+  $ make_dune_project 3.7
   $ cat >dune <<EOF
   > (executable
   >  (name exeA)

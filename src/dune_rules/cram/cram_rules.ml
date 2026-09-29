@@ -4,22 +4,34 @@ open Memo.O
 module Spec = struct
   type t =
     { loc : Loc.t
-    ; alias : Alias.Name.Set.t
+    ; test_name_alias : Alias.Name.t
+    ; extra_aliases : Alias.Name.Set.t
     ; deps : unit Action_builder.t list
-    ; sandbox : Sandbox_config.t
+    ; sandbox : Sandbox_config.t Action_builder.t
+    ; env : Env.t Action_builder.t
     ; enabled_if : (Expander.t * Blang.t) list
     ; locks : Path.Set.t Action_builder.t
     ; packages : Package.Name.Set.t
+    ; timeout : (Loc.t * Time.Span.t) option
+    ; conflict_markers : Cram_stanza.Conflict_markers.t
+    ; setup_scripts : Path.t list
+    ; shell : Cram_stanza.Shell.t
     }
 
-  let empty =
+  let make_empty ~test_name_alias =
     { loc = Loc.none
-    ; alias = Alias.Name.Set.empty
+    ; test_name_alias
+    ; extra_aliases = Alias.Name.Set.empty
     ; enabled_if = []
     ; locks = Action_builder.return Path.Set.empty
     ; deps = []
-    ; sandbox = Sandbox_config.needs_sandboxing
+    ; sandbox = Action_builder.return Sandbox_config.needs_sandboxing
+    ; env = Action_builder.return Env.empty
     ; packages = Package.Name.Set.empty
+    ; timeout = None
+    ; conflict_markers = Ignore
+    ; setup_scripts = []
+    ; shell = Sh
     }
   ;;
 end
@@ -27,85 +39,198 @@ end
 type error = Missing_run_t of Cram_test.t
 
 let missing_run_t (error : Cram_test.t) =
-  Action_builder.fail
-    { fail =
-        (fun () ->
-          let dir =
-            match error with
-            | File _ ->
-              (* This error is impossible for file tests *)
-              assert false
-            | Dir { dir; file = _ } -> dir
-          in
-          User_error.raise
-            ~loc:(Loc.in_dir (Path.source dir))
-            [ Pp.textf
-                "Cram test directory %s does not contain a run.t file."
-                (Path.Source.to_string dir)
-            ])
-    }
+  let dir =
+    match error with
+    | File _ ->
+      (* This error is impossible for file tests *)
+      assert false
+    | Dir { dir; file = _ } -> dir
+  in
+  User_error.raise
+    ~loc:(Loc.in_dir (Path.source dir))
+    [ Pp.textf
+        "Cram test directory %s does not contain a run.t file."
+        (Path.Source.to_string dir)
+    ]
 ;;
 
 let test_rule
       ~sctx
       ~dir
-      ({ alias; loc; enabled_if; deps; locks; sandbox; packages = _ } : Spec.t)
+      ({ test_name_alias
+       ; extra_aliases
+       ; loc
+       ; enabled_if
+       ; deps
+       ; locks
+       ; sandbox
+       ; env
+       ; packages = _
+       ; timeout
+       ; conflict_markers
+       ; setup_scripts
+       ; shell
+       } :
+        Spec.t)
       (test : (Cram_test.t, error) result)
   =
   let module Alias_rules = Simple_rules.Alias_rules in
-  let aliases = Alias.Name.Set.to_list_map alias ~f:(Alias.make ~dir) in
+  let extra_aliases =
+    Alias.Name.Set.remove extra_aliases test_name_alias
+    |> Alias.Name.Set.to_list_map ~f:(Alias.make ~dir)
+  in
+  let alias = Alias.make ~dir test_name_alias in
+  let add_extra_aliases_deps () =
+    Memo.parallel_iter extra_aliases ~f:(fun extra_alias ->
+      Rules.Produce.Alias.add_deps ~loc extra_alias (Action_builder.dep (Dep.alias alias)))
+  in
   match test with
   | Error (Missing_run_t test) ->
     (* We error out on invalid tests even if they are disabled. *)
-    Memo.parallel_iter aliases ~f:(fun alias ->
-      Alias_rules.add sctx ~alias ~loc (missing_run_t test))
+    let* () = add_extra_aliases_deps () in
+    Action_builder.fail { fail = (fun () -> missing_run_t test) }
+    |> Alias_rules.add sctx ~aliases:[ alias ] ~loc
   | Ok test ->
-    (* Morally, this is equivalent to evaluating them all concurrently and
-       taking the conjunction, but we do it this way to avoid evaluating things
-       unnecessarily *)
-    Memo.List.for_all enabled_if ~f:(fun (expander, blang) ->
-      Expander.eval_blang expander blang)
-    >>= (function
-     | false ->
-       Memo.parallel_iter aliases ~f:(fun alias -> Alias_rules.add_empty sctx ~alias ~loc)
-     | true ->
-       let cram =
-         let open Action_builder.O in
-         let prefix_with, _ = Path.Build.extract_build_context_dir_exn dir in
-         let script = Path.Build.append_source prefix_with (Cram_test.script test) in
-         let+ () = Action_builder.path (Path.build script)
-         and+ () = Action_builder.all_unit deps
-         and+ () =
+    (* enabled_if controls whether this test is included in @runtest (and other aliases),
+       but the test can always be run explicitly via its own alias. *)
+    let* enabled =
+      Memo.List.for_all enabled_if ~f:(fun (expander, blang) ->
+        Expander.eval_blang expander blang)
+    in
+    let* () = if enabled then add_extra_aliases_deps () else Memo.return () in
+    let prefix_with, _ = Path.Build.extract_build_context_dir_exn dir in
+    let script = Path.Build.append_source prefix_with (Cram_test.script test) in
+    let base_path =
+      Path.Build.append_source
+        prefix_with
+        (let path =
            match test with
-           | File _ -> Action_builder.return ()
-           | Dir { dir; file = _ } ->
-             let deps =
-               Path.Build.append_source prefix_with dir |> Path.build |> Source_deps.files
-             in
-             let+ (_ : Path.Set.t) = Action_builder.dyn_memo_deps deps in
-             ()
-         and+ locks = locks >>| Path.Set.to_list in
-         Action.progn
-           [ Cram_exec.action (Path.build script)
-           ; Promote.Diff_action.diff
-               ~optional:true
-               ~mode:Text
-               (Path.build script)
-               (Path.Build.extend_basename script ~suffix:".corrected")
-           ]
-         |> Action.Full.make ~locks ~sandbox
-       in
-       Memo.parallel_iter aliases ~f:(fun alias -> Alias_rules.add sctx ~alias ~loc cram))
+           | File f -> f
+           | Dir d -> d.dir
+         in
+         let dir = Path.Source.parent_exn path in
+         let basename = Path.Source.basename path |> Filename.to_string in
+         Path.Source.relative dir (".cram." ^ basename))
+    in
+    let script_sh = Path.Build.relative base_path "cram.sh" in
+    let output = Path.Build.relative base_path "cram.out" in
+    let* () =
+      (let open Action_builder.O in
+       let+ () = Action_builder.path (Path.build script) in
+       Cram_exec.make_script ~src:(Path.build script) ~script:script_sh ~conflict_markers
+       |> Action.Full.make)
+      |> Action_builder.with_file_targets ~file_targets:[ script_sh ]
+      |> Super_context.add_rule sctx ~dir ~loc
+    in
+    let* () =
+      (let open Action_builder.O in
+       let+ () = Action_builder.all_unit deps
+       and+ () = Action_builder.path (Path.build script_sh)
+       and+ () =
+         match test with
+         | File _ -> Action_builder.return ()
+         | Dir { dir; file } ->
+           let file = Path.Build.append_source prefix_with file |> Path.build in
+           let deps =
+             Path.Build.append_source prefix_with dir
+             |> Path.build
+             |> Source_deps.files_with_filter ~filter:(fun file' ->
+               not (Path.equal file file'))
+           in
+           let+ (_ : Path.Set.t) = Action_builder.dyn_memo_deps deps in
+           ()
+       and+ () = Action_builder.paths setup_scripts
+       and+ sandbox
+       and+ env
+       and+ locks = locks >>| Path.Set.to_list in
+       Cram_exec.run
+         ~src:(Path.build script)
+         ~dir:
+           (Path.build
+              (match test with
+               | File _ -> Path.Build.parent_exn script
+               | Dir d -> Path.Build.append_source prefix_with d.dir))
+         ~script:(Path.build script_sh)
+         ~output
+         ~timeout
+         ~setup_scripts
+         shell
+       |> Action.Full.make ~locks ~sandbox
+       |> Action.Full.add_env env)
+      |> Action_builder.with_file_targets ~file_targets:[ output ]
+      |> Super_context.add_rule sctx ~dir ~loc
+    in
+    Alias_rules.add sctx ~aliases:[ alias ] ~loc
+    @@
+    let open Action_builder.O in
+    let+ () = List.map ~f:Path.build [ script; output ] |> Action_builder.paths in
+    Action.progn
+      [ Cram_exec.diff ~src:(Path.build script) ~output:(Path.build output)
+      ; Action.diff
+          ~optional:true
+          ~mode:Text
+          (Path.build script)
+          (Path.Build.extend_basename script ~suffix:Filename.corrected)
+      ]
+    |> Action.Full.make
+;;
+
+type prepared_stanza =
+  { expander : Expander.t
+  ; deps : (Sandbox_config.t Action_builder.t * Env.t Action_builder.t) option
+  }
+
+type stanza =
+  { dir : Path.Build.t
+  ; stanza : Cram_stanza.t
+  ; prepared : prepared_stanza Memo.Lazy.t
+  }
+
+(* Whole-subtree stanzas can apply to tests in many directories. Keep their
+   prepared dependency builders in this memoized result so that all the tests
+   share them. Prepare lazily to avoid doing this work for unmatched stanzas. *)
+let stanzas_in_dir =
+  Memo.create
+    "cram-stanzas-in-dir"
+    ~input:(module Path.Build)
+    (fun dir ->
+       Dune_load.stanzas_in_dir dir
+       >>= function
+       | None -> Memo.return []
+       | Some (d : Dune_file.t) ->
+         let+ stanzas = Dune_file.find_stanzas d Cram_stanza.key in
+         List.map stanzas ~f:(fun (stanza : Cram_stanza.t) ->
+           let prepared =
+             Memo.Lazy.create ~name:"prepare-cram-stanza" (fun () ->
+               let+ expander =
+                 let* sctx =
+                   let context =
+                     let context, _ = Path.Build.extract_build_context_exn dir in
+                     Context_name.of_string (Filename.to_string context)
+                   in
+                   Super_context.find_exn context
+                 in
+                 Super_context.expander sctx ~dir
+               in
+               let deps =
+                 Option.map stanza.deps ~f:(fun deps ->
+                   let env, _, sandbox =
+                     Dep_conf_eval.named
+                       ~expander
+                       Sandbox_config.no_special_requirements
+                       deps
+                   in
+                   sandbox, env)
+               in
+               { expander; deps })
+           in
+           { dir; stanza; prepared }))
+  |> Memo.exec
 ;;
 
 let collect_stanzas =
   let stanzas dir ~f =
-    Dune_load.stanzas_in_dir dir
-    >>= function
-    | None -> Memo.return []
-    | Some (d : Dune_file.t) ->
-      Dune_file.find_stanzas d Cram_stanza.key
-      >>| List.filter_map ~f:(fun c -> Option.some_if (f c) (dir, c))
+    stanzas_in_dir dir >>| List.filter ~f:(fun { stanza; _ } -> f stanza)
   in
   let rec collect_whole_subtree acc dir =
     let* acc =
@@ -125,118 +250,190 @@ let collect_stanzas =
     | Some dir -> collect_whole_subtree [ acc ] dir
 ;;
 
-let rules ~sctx ~dir tests =
+let spec_for_test ~stanzas ~dune_version test =
+  let name =
+    match test with
+    | Ok test | Error (Missing_run_t test) -> Cram_test.name test ~dune_version
+  in
+  let test_name_alias = Cram_test.Name.to_alias name in
+  let init = None, Spec.make_empty ~test_name_alias in
+  let* runtest_alias, acc =
+    Memo.List.fold_left
+      stanzas
+      ~init
+      ~f:(fun (runtest_alias, (acc : Spec.t)) { dir; stanza; prepared } ->
+        match
+          match stanza.applies_to with
+          | Whole_subtree -> true
+          | Files_matching_in_this_dir pred ->
+            Predicate_lang.Glob.test
+              pred
+              ~standard:Predicate_lang.true_
+              (Cram_test.Name.to_string name)
+        with
+        | false -> Memo.return (runtest_alias, acc)
+        | true ->
+          let+ { expander; deps } = Memo.Lazy.force prepared in
+          let deps, sandbox, env =
+            match deps with
+            | None -> acc.deps, acc.sandbox, acc.env
+            | Some (sandbox, env) ->
+              let sandbox =
+                let open Action_builder.O in
+                let+ acc = acc.sandbox
+                and+ sandbox = sandbox in
+                Sandbox_config.inter acc sandbox
+              in
+              let env =
+                let open Action_builder.O in
+                let+ acc = acc.env
+                and+ env in
+                Install.Roots.extend_env_concat_path_vars acc env
+              in
+              acc.deps, sandbox, env
+          in
+          let locks =
+            let open Action_builder.O in
+            let+ more_locks =
+              Expander.expand_locks expander stanza.locks >>| Path.Set.of_list
+            and+ locks = acc.locks in
+            Path.Set.union locks more_locks
+          in
+          let runtest_alias =
+            match stanza.runtest_alias with
+            | None -> None
+            | Some (loc, set) ->
+              (match runtest_alias with
+               | None -> Some (loc, expander, set)
+               | Some (loc', _, _) ->
+                 let main_message =
+                   [ Pp.text
+                       "enabling or disabling the runtest alias for a cram test may only \
+                        be set once."
+                   ; Pp.textf
+                       "It's already set for the test %S"
+                       (Cram_test.Name.to_string name)
+                   ]
+                 in
+                 let compound =
+                   let main = User_message.make ~loc:loc' main_message in
+                   let related =
+                     [ User_message.make ~loc [ Pp.text "Already set here" ] ]
+                   in
+                   [ Compound_user_error.make ~main ~related ]
+                 in
+                 User_error.raise
+                   ~compound
+                   ~loc
+                   (main_message
+                    @ [ Pp.text "The first definition is at:"
+                      ; Pp.text (Loc.to_file_colon_line loc')
+                      ]))
+          in
+          let enabled_if = (expander, stanza.enabled_if) :: acc.enabled_if in
+          let extra_aliases =
+            match stanza.alias with
+            | None -> acc.extra_aliases
+            | Some a -> Alias.Name.Set.add acc.extra_aliases a
+          in
+          let packages =
+            match stanza.package with
+            | None -> acc.packages
+            | Some (p : Package.t) -> Package.Name.Set.add acc.packages (Package.name p)
+          in
+          let timeout =
+            Option.merge
+              acc.timeout
+              stanza.timeout
+              ~f:(Ordering.min (fun x y -> Time.Span.compare (snd x) (snd y)))
+          in
+          let conflict_markers =
+            Option.value ~default:acc.conflict_markers stanza.conflict_markers
+          in
+          let shell = Option.value ~default:acc.shell stanza.shell in
+          let setup_scripts =
+            let more_current_scripts =
+              List.map stanza.setup_scripts ~f:(fun (_loc, script) ->
+                (* Handle both relative and absolute paths *)
+                if Filename.is_relative script
+                then Path.build (Path.Build.relative dir script)
+                else Path.external_ (Path.External.of_string script))
+            in
+            (* This is a silly way to dedupe, but we aim to preserve the
+               order as much as possible. *)
+            more_current_scripts
+            @ List.filter acc.setup_scripts ~f:(fun x ->
+              not (List.mem more_current_scripts x ~equal:Path.equal))
+          in
+          ( runtest_alias
+          , { acc with
+              enabled_if
+            ; locks
+            ; deps
+            ; test_name_alias
+            ; extra_aliases
+            ; packages
+            ; sandbox
+            ; env
+            ; timeout
+            ; conflict_markers
+            ; setup_scripts
+            ; shell
+            } ))
+  in
+  let+ extra_aliases =
+    let+ to_add =
+      (match runtest_alias with
+       | None -> Memo.return true
+       | Some (_, expander, set) -> Expander.eval_blang expander set)
+      >>| function
+      | true -> Alias.Name.Set.singleton Alias0.runtest
+      | false -> Alias.Name.Set.empty
+    in
+    Alias.Name.Set.union to_add acc.extra_aliases
+  in
+  { acc with extra_aliases }
+;;
+
+let rules ~sctx ~dir tests project =
+  let dune_version = Dune_project.dune_version project in
   let* stanzas = collect_stanzas ~dir
   and* with_package_mask =
-    Dune_load.mask ()
-    >>| function
-    | None -> fun _packages f -> f ()
-    | Some only ->
-      let only = Package.Name.Set.of_keys only in
-      fun packages f ->
-        Memo.when_
-          (Package.Name.Set.is_empty packages
-           || Package.Name.Set.(not (is_empty (inter only packages))))
-          f
+    let+ mask = Dune_load.mask () >>| Only_packages.enumerate in
+    match
+      Dune_project.exclusive_package project ~dir:(Path.Build.drop_build_context_exn dir)
+      |> Option.map ~f:Package.Id.name
+    with
+    | None ->
+      (match mask with
+       | `All -> fun _packages f -> f ()
+       | `Set only ->
+         fun packages f ->
+           Memo.when_
+             (Package.Name.Set.is_empty packages
+              || Package.Name.Set.(not (is_empty (inter only packages))))
+             f)
+    | Some p ->
+      let singleton = Package.Name.Set.singleton p in
+      let with_validate_packages packages ~f =
+        if Package.Name.Set.is_empty packages || Package.Name.Set.equal packages singleton
+        then f ()
+        else
+          Code_error.raise
+            "All cram tests in this directory belong to a particular package by virtue \
+             of the dir stanza in the packge declaration itself. It's not possible to \
+             re-assign it to another package using the cram stanza"
+            [ "package", Package.Name.to_dyn p ]
+      in
+      (match mask with
+       | `All -> fun packages f -> with_validate_packages packages ~f
+       | `Set only ->
+         if Package.Name.Set.mem only p
+         then fun packages f -> with_validate_packages packages ~f
+         else fun packages _f -> with_validate_packages packages ~f:Memo.return)
   in
   Memo.parallel_iter tests ~f:(fun test ->
-    let* spec =
-      let name =
-        match test with
-        | Ok test -> Cram_test.name test
-        | Error (Missing_run_t test) -> Cram_test.name test
-      in
-      let init =
-        ( None
-        , let alias = Alias.Name.of_string name |> Alias.Name.Set.add Spec.empty.alias in
-          { Spec.empty with alias } )
-      in
-      let+ runtest_alias, acc =
-        Memo.List.fold_left
-          stanzas
-          ~init
-          ~f:(fun (runtest_alias, (acc : Spec.t)) (dir, (stanza : Cram_stanza.t)) ->
-            match
-              match stanza.applies_to with
-              | Whole_subtree -> true
-              | Files_matching_in_this_dir pred ->
-                Predicate_lang.Glob.test pred ~standard:Predicate_lang.true_ name
-            with
-            | false -> Memo.return (runtest_alias, acc)
-            | true ->
-              let+ expander = Super_context.expander sctx ~dir in
-              let deps, sandbox =
-                match stanza.deps with
-                | None -> acc.deps, acc.sandbox
-                | Some deps ->
-                  let (deps : unit Action_builder.t), _, sandbox =
-                    Dep_conf_eval.named ~expander deps
-                  in
-                  deps :: acc.deps, Sandbox_config.inter acc.sandbox sandbox
-              in
-              let locks =
-                let open Action_builder.O in
-                let+ more_locks =
-                  Expander.expand_locks expander stanza.locks >>| Path.Set.of_list
-                and+ locks = acc.locks in
-                Path.Set.union locks more_locks
-              in
-              let runtest_alias =
-                match stanza.runtest_alias with
-                | None -> None
-                | Some (loc, set) ->
-                  (match runtest_alias with
-                   | None -> Some (loc, set)
-                   | Some (loc', _) ->
-                     let main_message =
-                       [ Pp.text
-                           "enabling or disabling the runtest alias for a cram test may \
-                            only be set once."
-                       ; Pp.textf "It's already set for the test %S" name
-                       ]
-                     in
-                     let annots =
-                       let main = User_message.make ~loc:loc' main_message in
-                       let related =
-                         [ User_message.make ~loc [ Pp.text "Already set here" ] ]
-                       in
-                       User_message.Annots.singleton
-                         Compound_user_error.annot
-                         [ Compound_user_error.make ~main ~related ]
-                     in
-                     User_error.raise
-                       ~annots
-                       ~loc
-                       (main_message
-                        @ [ Pp.text "The first definition is at:"
-                          ; Pp.text (Loc.to_file_colon_line loc')
-                          ]))
-              in
-              let enabled_if = (expander, stanza.enabled_if) :: acc.enabled_if in
-              let alias =
-                match stanza.alias with
-                | None -> acc.alias
-                | Some a -> Alias.Name.Set.add acc.alias a
-              in
-              let packages =
-                match stanza.package with
-                | None -> acc.packages
-                | Some (p : Package.t) ->
-                  Package.Name.Set.add acc.packages (Package.name p)
-              in
-              ( runtest_alias
-              , { acc with enabled_if; locks; deps; alias; packages; sandbox } ))
-      in
-      let alias =
-        let to_add =
-          match runtest_alias with
-          | None | Some (_, true) -> Alias.Name.Set.singleton Alias0.runtest
-          | Some (_, false) -> Alias.Name.Set.empty
-        in
-        Alias.Name.Set.union to_add acc.alias
-      in
-      { acc with alias }
-    in
+    let* spec = spec_for_test ~stanzas ~dune_version test in
     with_package_mask spec.packages (fun () -> test_rule ~sctx ~dir spec test))
 ;;
 
@@ -247,15 +444,15 @@ let cram_tests dir =
     let path = Source_tree.Dir.path dir in
     let file_tests =
       Source_tree.Dir.filenames dir
-      |> Filename.Set.to_list
+      |> Filename.Array.Set.to_list
       |> List.filter_map ~f:(fun s ->
         if Cram_test.is_cram_suffix s
-        then Some (Ok (Cram_test.File (Path.Source.relative path s)))
+        then Some (Ok (Cram_test.File (Path.Source.relative_fname path s)))
         else None)
     in
     let+ dir_tests =
       Source_tree.Dir.sub_dirs dir
-      |> Filename.Map.to_list
+      |> Filename.Array.Map.to_list
       |> Memo.parallel_map ~f:(fun (name, sub_dir) ->
         match Cram_test.is_cram_suffix name with
         | false -> Memo.return None
@@ -264,15 +461,15 @@ let cram_tests dir =
           let fname = Cram_test.fname_in_dir_test in
           let test =
             let dir = Source_tree.Dir.path sub_dir in
-            let file = Path.Source.relative dir fname in
+            let file = Path.Source.relative_fname dir fname in
             Cram_test.Dir { file; dir }
           in
           let files = Source_tree.Dir.filenames sub_dir in
-          if Filename.Set.is_empty files
+          if Filename.Array.Set.is_empty files
           then None
           else
             Some
-              (if Filename.Set.mem files fname
+              (if Filename.Array.Set.mem files fname
                then Ok test
                else Error (Missing_run_t test)))
       >>| List.filter_opt
@@ -284,5 +481,5 @@ let rules ~sctx ~dir source_dir =
   cram_tests source_dir
   >>= function
   | [] -> Memo.return ()
-  | tests -> rules ~sctx ~dir tests
+  | tests -> rules ~sctx ~dir tests (Source_tree.Dir.project source_dir)
 ;;

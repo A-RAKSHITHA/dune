@@ -2,7 +2,6 @@ Ensure dune can handle the special string interpolation syntax used by opam for
 packages whose names contain a '+' character. This syntax is described in
 https://opam.ocaml.org/doc/Manual.html#Variables
 
-  $ . ./helpers.sh
   $ mkrepo
   $ add_mock_repo_if_needed
 
@@ -20,6 +19,6 @@ This is based on the build command of mingw-w64-shims.0.2.0
   >  (depends foo))
   > EOF
 
-  $ dune pkg lock
+  $ dune_pkg_lock_normalized
   Solution for dune.lock:
   - foo.0.0.1

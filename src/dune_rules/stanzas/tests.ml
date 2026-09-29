@@ -17,15 +17,16 @@ include Stanza.Make (struct
   end)
 
 let gen_parse names =
+  let* () = Dune_lang.Syntax.since Stanza.syntax (1, 0) in
   fields
-    (let* deps = field "deps" (Bindings.decode Dep_conf.decode) ~default:Bindings.empty in
+    (let* deps = field "deps" Dep_conf.decode_bindings ~default:Bindings.empty in
      String_with_vars.add_user_vars_to_decoding_env
        (Bindings.var_names deps)
        (let* dune_version = Dune_lang.Syntax.get_exn Stanza.syntax in
         let+ buildable = Buildable.decode Executable
-        and+ link_flags = Link_flags.Spec.decode ~check:None
+        and+ link_flags = Dune_lang.Link_flags.Spec.decode ~check:None
         and+ names = names
-        and+ package = field_o "package" Stanza_common.Pkg.decode
+        and+ package = Stanza_pkg.field_opt () >>| Option.map ~f:snd
         and+ locks = Locks.field ()
         and+ modes =
           field
@@ -57,7 +58,8 @@ let gen_parse names =
             ; modes
             ; optional = false
             ; buildable
-            ; names = Nonempty_list.of_list names |> Option.value_exn
+            ; names
+            ; public_names = None
             ; package = None
             ; promote = None
             ; install_conf = None
@@ -76,4 +78,7 @@ let gen_parse names =
 ;;
 
 let multi = gen_parse (field "names" (repeat1 (located string)))
-let single = gen_parse (field "name" (located string) >>| List.singleton)
+
+let single =
+  gen_parse (field "name" (located string) >>| fun name -> Nonempty_list.[ name ])
+;;

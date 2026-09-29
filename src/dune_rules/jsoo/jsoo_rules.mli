@@ -5,7 +5,7 @@ open Import
 module Config : sig
   type t
 
-  val all : t list
+  val of_string : string -> t
 end
 
 module Version : sig
@@ -15,15 +15,39 @@ module Version : sig
   val compare : t -> t -> Ordering.t
 end
 
-val build_cm
+val build_from_cm
   :  Super_context.t
   -> dir:Path.Build.t
   -> in_context:Js_of_ocaml.In_context.t
   -> mode:Js_of_ocaml.Mode.t
   -> src:Path.t
   -> obj_dir:Path.Build.t Obj_dir.t
+  -> shapes:Path.t list Action_builder.t
+  -> config:Config.t option
+  -> sourcemap:Js_of_ocaml.Sourcemap.t
+  -> Action.Full.t With_targets.t
+
+val build_cm
+  :  Compilation_context.t
+  -> dir:Path.Build.t
+  -> in_context:Js_of_ocaml.In_context.t
+  -> mode:Js_of_ocaml.Mode.t
+  -> src:Path.t
+  -> obj_dir:Path.Build.t Obj_dir.t
+  -> deps:Module.t list Action_builder.t
   -> config:Config.t option
   -> Action.Full.t Action_builder.With_targets.t
+
+type standalone_runtime =
+  | Shared of Digest.t
+  | Per_stanza of Path.Build.t
+
+val build_standalone_runtime
+  :  Compilation_context.t
+  -> loc:Loc.t
+  -> in_context:Js_of_ocaml.In_context.t
+  -> jsoo_mode:Js_of_ocaml.Mode.t
+  -> standalone_runtime option Memo.t
 
 val build_exe
   :  Compilation_context.t
@@ -32,10 +56,11 @@ val build_exe
   -> src:Path.Build.t
   -> obj_dir:Path.Build.t Obj_dir.t
   -> top_sorted_modules:Module.t list Action_builder.t
-  -> promote:Rule.Promote.t option
+  -> promote:Rule_mode.Promote.t option
   -> linkall:bool Action_builder.t
   -> link_time_code_gen:Link_time_code_gen_type.t Resolve.t
   -> jsoo_mode:Js_of_ocaml.Mode.t
+  -> standalone_runtime:standalone_runtime option
   -> unit Memo.t
 
 val setup_separate_compilation_rules : Super_context.t -> string list -> unit Memo.t

@@ -35,7 +35,7 @@ val equal : 'a t -> 'a t -> bool
 (** The source_root directory *)
 val dir : 'path t -> 'path
 
-(** The directory for ocamldep files *)
+(** The private object directory *)
 val obj_dir : 'path t -> 'path
 
 (** The private compiled native file directory *)
@@ -44,6 +44,7 @@ val native_dir : 'path t -> 'path
 (** The private compiled byte file directories, and all cmi *)
 val byte_dir : 'path t -> 'path
 
+val is_jsoo_dirname : Filename.t -> bool
 val jsoo_dir : 'path t -> 'path
 
 (** The private compiled melange file directories, and all cmi *)
@@ -74,11 +75,16 @@ val make_external_no_private : dir:Path.t -> Path.t t
 
 val encode : Path.t t -> Dune_lang.t list
 val decode : dir:Path.t -> Path.t t Dune_lang.Decoder.t
-val convert_to_external : Path.Build.t t -> dir:Path.t -> Path.t t
+
+val convert_to_external
+  :  Path.Build.t t
+  -> dir:Path.t
+  -> has_private_modules:bool
+  -> Path.t t
+
 val cm_dir : 'path t -> Lib_mode.Cm_kind.t -> Visibility.t -> 'path
 val to_dyn : _ t -> Dyn.t
-val make_exe : dir:Path.Build.t -> name:string -> Path.Build.t t
-val make_melange_emit : dir:Path.Build.t -> name:string -> Path.Build.t t
+val make_for_exe_target : dir:Path.Build.t -> Exe_target.t -> Path.Build.t t
 val for_pp : dir:Path.Build.t -> Path.Build.t t
 val as_local_exn : Path.t t -> Path.Build.t t
 
@@ -104,7 +110,20 @@ module Module : sig
     -> cm_kind:Lib_mode.Cm_kind.t
     -> 'path option
 
-  val obj_file : 'path t -> Module.t -> kind:Lib_mode.Cm_kind.t -> ext:string -> 'path
+  val obj_file_of_name
+    :  'path t
+    -> Module_name.Unique.t
+    -> kind:Lib_mode.Cm_kind.t
+    -> ext:Filename.Extension.t
+    -> visibility:Visibility.t
+    -> 'path
+
+  val obj_file
+    :  'path t
+    -> Module.t
+    -> kind:Lib_mode.Cm_kind.t
+    -> ext:Filename.Extension.t
+    -> 'path
 
   (** Same as [cm_file] but raises if [cm_kind] is [Cmo] or [Cmx] and the module
       has no implementation.*)
@@ -117,18 +136,17 @@ module Module : sig
   (** Either the .cmti, or .cmt if the module has no interface *)
   val cmti_file : 'path t -> Module.t -> cm_kind:Lib_mode.Cm_kind.t -> 'path
 
+  val cms_file
+    :  'path t
+    -> Module.t
+    -> ml_kind:Ml_kind.t
+    -> cm_kind:Lib_mode.Cm_kind.t
+    -> 'path option
+
   val odoc : 'path t -> Module.t -> 'path
 
   module L : sig
     val o_files : 'path t -> Module.t list -> ext_obj:Filename.Extension.t -> Path.t list
     val cm_files : 'path t -> Module.t list -> kind:Lib_mode.Cm_kind.t -> Path.t list
   end
-
-  module Dep : sig
-    type t =
-      | Immediate of Module.t * Ml_kind.t
-      | Transitive of Module.t * Ml_kind.t
-  end
-
-  val dep : Path.Build.t t -> Dep.t -> Path.Build.t
 end

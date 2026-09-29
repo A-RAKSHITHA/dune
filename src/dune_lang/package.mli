@@ -1,6 +1,7 @@
 (** Information about a package defined in the workspace *)
 
-open Stdune
+open Import
+module Id : module type of Package_id with type t = Package_id.t
 
 module Name : sig
   type t = Package_name.t
@@ -8,17 +9,10 @@ module Name : sig
   include module type of Package_name with type t := t
 end
 
-module Id : sig
-  type t
-
-  val name : t -> Name.t
-
-  include Comparable_intf.S with type key := t
-end
-
 type opam_file =
   | Exists of bool
   | Generated
+  | Generated_with_diff
 
 type t
 
@@ -27,9 +21,10 @@ val deprecated_package_names : t -> Loc.t Name.Map.t
 val sites : t -> Section.t Site.Map.t
 val name : t -> Name.t
 val dir : t -> Path.Source.t
+val exclusive_dir : t -> (Loc.t * Path.Source.t) option
 val set_inside_opam_dir : t -> dir:Path.Source.t -> t
-val encode : Name.t -> t Dune_sexp.Encoder.t
-val decode : dir:Path.Source.t -> t Dune_sexp.Decoder.t
+val encode : Name.t -> t Encoder.t
+val decode : dir:Path.Source.t -> t Decoder.t
 val opam_file : t -> Path.Source.t
 val to_dyn : t -> Dyn.t
 val hash : t -> int
@@ -42,6 +37,7 @@ val tags : t -> string list
 val synopsis : t -> string option
 val info : t -> Package_info.t
 val description : t -> string option
+val enabled_if : t -> Blang.t option
 val id : t -> Id.t
 
 val set_version_and_info
@@ -66,6 +62,7 @@ val create
   -> conflicts:Package_dependency.t list
   -> depends:Package_dependency.t list
   -> depopts:Package_dependency.t list
+  -> enabled_if:Blang.t option
   -> info:Package_info.t
   -> has_opam_file:opam_file
   -> dir:Path.Source.t
@@ -76,6 +73,8 @@ val create
   -> tags:string list
   -> original_opam_file:original_opam_file option
   -> deprecated_package_names:Loc.t Name.Map.t
+  -> contents_basename:(Loc.t * Filename.t) option
   -> t
 
 val original_opam_file : t -> original_opam_file option
+val duplicate_dep_warnings : t -> User_message.t list

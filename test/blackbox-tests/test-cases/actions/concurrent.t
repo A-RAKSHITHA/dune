@@ -1,8 +1,6 @@
 Specification of the concurrency action:
 
-  $ cat > dune-project << EOF
-  > (lang dune 3.7)
-  > EOF
+  $ make_dune_project 3.7
 
   $ cat > dune << EOF
   > (rule
@@ -20,9 +18,7 @@ Specification of the concurrency action:
 
 Requires Dune 3.8.
 
-  $ cat > dune-project << EOF
-  > (lang dune 3.8)
-  > EOF
+  $ make_dune_project 3.8
 
 (concurrent ...) runs actions concurrently. Here we mock up an example where two
 subactions rely on eachother to also be running in order to terminate.
@@ -56,3 +52,24 @@ When we run the rule, we see that the two actions are indeed run concurrently.
 
 Notice the need for a -j2. If Dune was configured with -j1 then the action would
 never terminate.
+
+Concurrent process actions clone a shared redirection without closing it early.
+
+  $ cat > dune <<'EOF'
+  > (rule
+  >  (action
+  >   (with-stdout-to concurrent-output
+  >    (concurrent
+  >     (run sh -c "echo output")
+  >     (run sh -c "echo output")))))
+  > EOF
+
+  $ dune build -j2 concurrent-output >escaped-output 2>&1
+  $ echo 'concurrent-output:'
+  concurrent-output:
+  $ cat _build/default/concurrent-output
+  output
+  output
+  $ echo 'escaped-output:'
+  escaped-output:
+  $ cat escaped-output

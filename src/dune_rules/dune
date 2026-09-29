@@ -3,54 +3,44 @@
 (library
  (name dune_rules)
  (libraries
-  stdune
+  build_path_prefix_map
   csexp
+  dune_config_file
+  dune_digest
+  dune_engine
+  dune_scheduler
+  dune_findlib
+  dune_lang
+  dune_patch
+  dune_pkg
+  re
+  dune_rpc
+  dune_section
+  dune_site_private
+  targets
+  dune_trace
+  dune_util
+  dune_vcs
   fiber
+  install
   memo
   ocaml
-  dune_re
-  predicate_lang
-  dune_console
-  dune_digest
-  install
-  dune_lang
-  dune_glob
   ocaml_config
-  dune_action_plugin
-  chrome_trace
-  dune_stats
-  dune_site_private
-  dune_util
-  dune_meta_parser
-  dune_section
   opam_format
-  dune_cache
-  dune_pkg
-  dune_targets
-  opam_core
-  promote
-  action_ext
-  build_path_prefix_map
-  dune_engine
-  dune_vcs
-  dune_cache_storage
-  dune_config
-  dune_config_file
-  dune_findlib
-  dune_patch
+  predicate_lang
   scheme
-  fs
+  source
+  stdune
   unix
   xdg)
- (synopsis "Internal Dune library, do not use!")
- (instrumentation
-  (backend bisect_ppx)))
+ (synopsis "Internal Dune library, do not use!"))
 
-(ocamllex ocamlobjinfo)
+(ocamllex
+ (modules ocamlobjinfo)
+ (flags -ml))
 
 (rule
- (mode promote)
- (target assets.ml)
+ (target assets.ml.gen)
  (action
   (with-stdout-to
    %{target}
@@ -63,15 +53,19 @@
     (echo "|jbp}")))))
 
 (rule
+ (alias check)
+ (action
+  (diff assets.ml assets.ml.gen)))
+
+(rule
  (targets setup.ml)
  (mode fallback)
  (action
   (copy# setup.defaults.ml setup.ml)))
 
 (rule
- (mode promote)
  (alias runtest)
- (targets setup.defaults.ml)
+ (target setup.defaults.ml.gen)
  (deps
   (:configure %{project_root}/boot/configure.ml))
  (action
@@ -79,5 +73,10 @@
    %{project_root}
    (setenv
     DUNE_CONFIGURE_OUTPUT
-    "src/dune_rules/setup.defaults.ml"
+    "%{target}"
     (run %{ocaml} %{configure})))))
+
+(rule
+ (alias runtest)
+ (action
+  (diff setup.defaults.ml setup.defaults.ml.gen)))

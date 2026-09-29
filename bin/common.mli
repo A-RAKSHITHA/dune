@@ -1,57 +1,93 @@
 open Dune_config_file
-open Stdune
 
 type t
 
+(* [x t] returns the [Context_name.t] of of the cross-compilation context, if
+  there is any *)
 val x : t -> Dune_engine.Context_name.t option
 val capture_outputs : t -> bool
 val root : t -> Workspace_root.t
+val build_loop : t -> Dune_engine.Build_loop.t
 
 val rpc
   :  t
-  -> [ `Allow of Dune_lang.Dep_conf.t Dune_rpc_impl.Server.t
+  -> [ `Allow of Dune_rpc_impl.Server.t
        (** Will run rpc if in watch mode and acquire the build lock *)
      | `Forbid_builds (** Promise not to build anything. For now, this isn't checked *)
      ]
 
 val watch_exclusions : t -> string list
-val stats : t -> Dune_stats.t option
-val print_metrics : t -> bool
-val dump_memo_graph_file : t -> Path.External.t option
-val dump_memo_graph_format : t -> Dune_graph.Graph.File_format.t
-val dump_memo_graph_with_timing : t -> bool
 val watch : t -> Dune_rpc_impl.Watch_mode_config.t
-val file_watcher : t -> Dune_engine.Scheduler.Run.file_watcher
+val file_watcher : t -> Dune_scheduler.Scheduler.Run.file_watcher
+val sandbox_actions : t -> bool
+val action_runner : t -> Dune_engine.Action_runner.t option
+val action_runner_requested : t -> bool
 val prefix_target : t -> string -> string
+
+(** Resolve a command-line path relative to the directory where Dune was
+    started, and require it to be inside the workspace. *)
+val source_path : t -> string -> Stdune.Path.Source.t
+
+val find_default_trace_file : unit -> string
+
+(** [No_build] describes the most basic command-line flags that don't affect
+    workspace or build configuration. *)
+module No_build : sig
+  type t
+
+  val debug_backtraces : bool Cmdliner.Term.t
+  val set_debug_backtraces : bool -> unit
+  val term : t Cmdliner.Term.t
+  val set : t -> unit
+  val term_and_set : unit Cmdliner.Term.t
+end
 
 (** [Builder] describes how to initialize Dune. *)
 module Builder : sig
   type t
 
+  val equal : t -> t -> bool
   val root : t -> string option
   val set_root : t -> string -> t
   val forbid_builds : t -> t
   val default_root_is_cwd : t -> bool
   val set_default_root_is_cwd : t -> bool -> t
-  val set_log_file : t -> Dune_util.Log.File.t -> t
   val disable_log_file : t -> t
-  val set_promote : t -> Dune_engine.Clflags.Promote.t -> t
+  val set_promote : t -> Stdune.Clflags.Promote.t -> t
   val default_target : t -> Arg.Dep.t
   val term : t Cmdliner.Term.t
+  val term_no_trace_no_pkg : t Cmdliner.Term.t
+  val default : t
 end
 
-(** [init] creates a [Common.t] by executing a sequence of side-effecting actions to
-    initialize Dune's working environment based on the options determined in the\
-    [Builder.t].
+(** [init_with_root] creates a [Common.t] by executing a sequence of
+    side-effecting actions to initialize Dune's working environment based on the
+    options determined in the\ [Builder.t].
 
     Return the [Common.t] and the final configuration, which is the same as the one
     returned in the [config] field of [Dune_rules.Workspace.workspace ()]) *)
+val init_with_root
+  :  root:Workspace_root.t
+  -> Builder.t
+  -> t * Dune_config_file.Dune_config.t
+
+val init_build : Builder.t -> t * Dune_config_file.Dune_config.t
+
+(** [init] is like [init_with_root], where [root] is the Workspace root
+    corresponding to the current working directory. *)
 val init : Builder.t -> t * Dune_config_file.Dune_config.t
 
 (** [examples [("description", "dune cmd foo"); ...]] is an [EXAMPLES] manpage
     section of enumerated examples illustrating how to run the documented
     commands. *)
 val examples : (string * string) list -> Cmdliner.Manpage.block
+
+val command_alias
+  :  ?orig_name:string
+  -> 'a Cmdliner.Cmd.t
+  -> 'b Cmdliner.Term.t
+  -> string
+  -> 'b Cmdliner.Cmd.t
 
 (** [command_synopsis subcommands] is a custom [SYNOPSIS] manpage section
     listing the given [subcommands]. Each subcommand is prefixed with the `dune`
@@ -61,21 +97,15 @@ val command_synopsis : string list -> Cmdliner.Manpage.block list
 val help_secs : Cmdliner.Manpage.block list
 val footer : Cmdliner.Manpage.block
 val envs : Cmdliner.Cmd.Env.info list
-val debug_backtraces : bool Cmdliner.Term.t
 val config_from_config_file : Dune_config.Partial.t Cmdliner.Term.t
 val display_term : Dune_config.Display.t option Cmdliner.Term.t
-val context_arg : doc:string -> Dune_engine.Context_name.t Cmdliner.Term.t
+val context_arg : doc:string option -> Dune_engine.Context_name.t Cmdliner.Term.t
 
 (** A [--build-info] command line argument that print build information
     (included in [term]) *)
 val build_info : unit Cmdliner.Term.t
 
 val default_build_dir : string
-
-module Let_syntax : sig
-  val ( let+ ) : 'a Cmdliner.Term.t -> ('a -> 'b) -> 'b Cmdliner.Term.t
-  val ( and+ ) : 'a Cmdliner.Term.t -> 'b Cmdliner.Term.t -> ('a * 'b) Cmdliner.Term.t
-end
 
 (** [one_of term1 term2] allows options from [term1] or exclusively options from
     [term2]. If the user passes options from both terms, an error is reported. *)

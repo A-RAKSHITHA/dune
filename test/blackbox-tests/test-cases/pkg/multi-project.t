@@ -1,7 +1,5 @@
 Multiple projects support
 
-  $ . ./helpers.sh
-
   $ mkrepo
   $ add_mock_repo_if_needed
 
@@ -19,7 +17,7 @@ Multiple projects support
   >  (depends a))
   > EOF
 
-  $ dune pkg lock
+  $ dune_pkg_lock_normalized
   Solution for dune.lock:
   (no dependencies to lock)
 
@@ -27,6 +25,6 @@ This should work without any toplevel projects as well:
 
   $ mkdir b
   $ mv dune-project b
-  $ dune pkg lock
+  $ dune_pkg_lock_normalized
   Solution for dune.lock:
   (no dependencies to lock)

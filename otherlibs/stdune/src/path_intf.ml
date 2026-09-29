@@ -4,7 +4,7 @@ module type S = sig
   val hash : t -> int
   val to_string : t -> string
   val of_string : string -> t
-  val parse_string_exn : loc:Loc0.t -> string -> t
+  val repr : t Repr.t
 
   (** a directory is smaller than its descendants *)
   include Comparator.S with type t := t
@@ -12,15 +12,18 @@ module type S = sig
   include Comparator.OPS with type t := t
 
   val to_dyn : t -> Dyn.t
-  val extension : t -> string
+  val extension : t -> Filename.Extension.Or_empty.t
 
   (** [set_extension path ~ext] replaces extension of [path] by [ext] *)
-  val set_extension : t -> ext:string -> t
+  val set_extension : t -> ext:Filename.Extension.t -> t
 
   (** [map_extension path ~f] replaces extension of [path] by [f extension]*)
-  val map_extension : t -> f:(string -> string) -> t
+  val map_extension
+    :  t
+    -> f:(Filename.Extension.Or_empty.t -> Filename.Extension.Or_empty.t)
+    -> t
 
-  val split_extension : t -> t * string
+  val split_extension : t -> t * Filename.Extension.Or_empty.t
   val basename : t -> Filename.t
   val basename_opt : t -> Filename.t option
   val extend_basename : t -> suffix:Filename.t -> t
@@ -31,22 +34,36 @@ module type S = sig
     include Set.S with type elt = t and type 'a map = 'a Map.t
 
     val to_dyn : t Dyn.builder
-    val of_listing : dir:elt -> filenames:string list -> t
+    val of_listing : dir:elt -> filenames:Filename.t list -> t
   end
 
   val equal : t -> t -> bool
-  val relative : ?error_loc:Loc0.t -> t -> string -> t
   val to_string_maybe_quoted : t -> string
   val is_descendant : t -> of_:t -> bool
   val is_root : t -> bool
   val parent_exn : t -> t
   val parent : t -> t option
-  val unlink_no_err : t -> unit
+end
+
+module type With_loc = sig
+  type t
+
+  val relative : ?error_loc:Loc0.t -> t -> string -> t
+  val relative_fname : t -> Filename.t -> t
+  val parse_string_exn : loc:Loc0.t -> string -> t
 end
 
 (** [Unspecified.w] is a type-level placeholder of an unspecified path. (see
     [Local_gen] for how it's used) *)
 module Unspecified = struct
+  type w
+end
+
+module Source = struct
+  type w
+end
+
+module Build = struct
   type w
 end
 
@@ -63,21 +80,24 @@ module type Local_gen = sig
      additionally ask for an object that fixes 'w *)
   val to_string : 'w t -> string
   val of_string : string -> 'w t
-  val parse_string_exn : loc:Loc0.t -> string -> 'w t
+  val relative_fname : 'w t -> Filename.t -> 'w t
 
   (** a directory is smaller than its descendants *)
   val compare : 'w t -> 'w t -> Ordering.t
 
   val to_dyn : 'w t -> Dyn.t
-  val extension : 'w t -> string
+  val extension : 'w t -> Filename.Extension.Or_empty.t
 
   (** [set_extension path ~ext] replaces extension of [path] by [ext] *)
-  val set_extension : 'w t -> ext:string -> 'w t
+  val set_extension : 'w t -> ext:Filename.Extension.t -> 'w t
 
   (** [map_extension path ~f] replaces extension of [path] by [f extension]*)
-  val map_extension : 'W t -> f:(string -> string) -> 'W t
+  val map_extension
+    :  'w t
+    -> f:(Filename.Extension.Or_empty.t -> Filename.Extension.Or_empty.t)
+    -> 'w t
 
-  val split_extension : 'w t -> 'w t * string
+  val split_extension : 'w t -> 'w t * Filename.Extension.Or_empty.t
   val basename : 'w t -> Filename.t
   val extend_basename : 'w t -> suffix:Filename.t -> 'w t
 
@@ -96,7 +116,6 @@ module type Local_gen = sig
     module Table : Hashtbl.S with type key = Root.w t
   end
 
-  val relative : ?error_loc:Loc0.t -> 'w t -> string -> 'w t
   val to_string_maybe_quoted : 'w t -> string
   val is_descendant : 'w t -> of_:'w t -> bool
   val is_root : 'w t -> bool
@@ -110,13 +129,9 @@ module type Local_gen = sig
   val split_first_component : 'w t -> (Filename.t * Unspecified.w t) option
 
   module L : sig
-    val relative : ?error_loc:Loc0.t -> 'w t -> string list -> 'w t
-
     val relative_result
       :  'w t
       -> string list
       -> ('w t, [ `Outside_the_workspace ]) Result.t
   end
-
-  val unlink_no_err : 'w t -> unit
 end

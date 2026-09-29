@@ -1,107 +1,6 @@
 open Import
 open Memo.O
 
-(* Encoded representation of a set of library names + scope *)
-module Key : sig
-  (* This module implements a bi-directional function between [encoded] and
-     [decoded] *)
-  type encoded = Digest.t
-
-  module Decoded : sig
-    type t = private
-      { pps : Lib_name.t list
-      ; project_root : Path.Source.t option
-      }
-
-    val of_libs : Lib.t list -> t
-  end
-
-  (* [decode y] fails if there hasn't been a previous call to [encode] such that
-     [encode x = y]. *)
-  val encode : Decoded.t -> encoded
-  val decode : encoded -> Decoded.t
-end = struct
-  type encoded = Digest.t
-
-  module Decoded = struct
-    (* Values of type type are preserved in a global table between builds, so
-       they must not embed values that are not safe to keep between builds, such
-       as [Dune_project.t] values *)
-    type t =
-      { pps : Lib_name.t list
-      ; project_root : Path.Source.t option
-      }
-
-    let equal x y =
-      List.equal Lib_name.equal x.pps y.pps
-      && Option.equal Path.Source.equal x.project_root y.project_root
-    ;;
-
-    let to_string { pps; project_root } =
-      let s = String.enumerate_and (List.map pps ~f:Lib_name.to_string) in
-      match project_root with
-      | None -> s
-      | Some dir ->
-        sprintf "%s (in project: %s)" s (Path.Source.to_string_maybe_quoted dir)
-    ;;
-
-    let of_libs libs =
-      let pps =
-        (let compare a b = Lib_name.compare (Lib.name a) (Lib.name b) in
-         List.sort libs ~compare)
-        |> List.map ~f:Lib.name
-      in
-      let project =
-        List.fold_left libs ~init:None ~f:(fun acc lib ->
-          let scope_for_key =
-            let info = Lib.info lib in
-            let status = Lib_info.status info in
-            match status with
-            | Private (scope_name, _) -> Some scope_name
-            | Installed_private | Public _ | Installed -> None
-          in
-          Option.merge acc scope_for_key ~f:(fun a b ->
-            assert (Dune_project.equal a b);
-            a))
-      in
-      { pps; project_root = Option.map project ~f:Dune_project.root }
-    ;;
-  end
-
-  (* This mutable table is safe. Even though it can have stale entries remaining
-     from previous runs, the entries themselves are correct, so this seems
-     harmless apart from the lack of error in [decode] in this situation. *)
-  let reverse_table : (Digest.t, Decoded.t) Table.t = Table.create (module Digest) 128
-
-  let encode ({ Decoded.pps; project_root } as x) =
-    let y = Digest.generic (pps, project_root) in
-    match Table.find reverse_table y with
-    | None ->
-      Table.set reverse_table y x;
-      y
-    | Some x' ->
-      if Decoded.equal x x'
-      then y
-      else
-        User_error.raise
-          [ Pp.textf "Hash collision between set of ppx drivers:"
-          ; Pp.textf "- cache : %s" (Decoded.to_string x')
-          ; Pp.textf "- fetch : %s" (Decoded.to_string x)
-          ]
-  ;;
-
-  let decode y =
-    match Table.find reverse_table y with
-    | Some x -> x
-    | None ->
-      User_error.raise
-        [ Pp.textf
-            "I don't know what ppx rewriters set %s correspond to."
-            (Digest.to_string y)
-        ]
-  ;;
-end
-
 module Driver = struct
   module M = struct
     module Info = struct
@@ -273,84 +172,85 @@ module Driver = struct
   ;;
 end
 
-let build_ppx_driver sctx ~scope ~target ~pps ~pp_names =
-  let* driver_and_libs =
-    let ( let& ) t f = Resolve.Memo.bind t ~f in
-    let& pps = Resolve.Memo.lift pps in
-    let& pps = Lib.closure ~linking:true pps in
-    Driver.select pps ~loc:(Dot_ppx (target, pp_names))
-    >>| Resolve.map ~f:(fun driver -> driver, pps)
-    >>|
-    (* Extend the dependency stack as we don't have locations at this
-           point *)
-    Resolve.push_stack_frame ~human_readable_description:(fun () ->
-      Dyn.pp (List [ String "pps"; Dyn.(list Lib_name.to_dyn) pp_names ]))
-  in
-  (* CR-someday diml: what we should do is build the .cmx/.cmo once and for all
+let for_ = Compilation_mode.Ocaml
+
+let build_ppx_driver =
+  let flags = Ocaml_flags.of_list [ "-g"; "-w"; "-24" ] in
+  fun sctx ~scope ~target ~pps ~pp_names ->
+    let* driver_and_libs =
+      let ( let& ) t f = Resolve.Memo.bind t ~f in
+      let& pps = Resolve.Memo.lift pps in
+      let& pps = Lib.closure ~linking:true pps ~for_ in
+      Driver.select pps ~loc:(Dot_ppx (target, pp_names))
+      >>| Resolve.map ~f:(fun driver -> driver, pps)
+      >>|
+      (* Extend the dependency stack as we don't have locations at this point *)
+      Resolve.push_stack_frame ~human_readable_description:(fun () ->
+        Dyn.pp (List [ String "pps"; Dyn.(list Lib_name.to_dyn) pp_names ]))
+    in
+    (* CR-someday diml: what we should do is build the .cmx/.cmo once and for all
      at the point where the driver is defined. *)
-  let dir = Path.Build.parent_exn target in
-  let main_module_name = Module_name.of_string_allow_invalid (Loc.none, "_ppx") in
-  let module_ = Module.generated ~kind:Impl ~src_dir:dir [ main_module_name ] in
-  let* () =
-    let ml_source =
-      Module.file ~ml_kind:Impl module_ |> Option.value_exn |> Path.as_in_build_dir_exn
+    let dir = Path.Build.parent_exn target in
+    let main_module_name =
+      Module_name.of_string_allow_invalid (Loc.none, "_ppx")
+      |> Module_name.Unchecked.allow_invalid
     in
-    Super_context.add_rule
-      sctx
-      ~dir
-      (Action_builder.write_file_dyn
-         ml_source
-         (Resolve.read
-            (let open Resolve.O in
-             let+ driver, _ = driver_and_libs in
-             sprintf "let () = %s ()\n" driver.info.main)))
-  and* linkages =
-    let ctx = Super_context.context sctx in
-    let+ ocaml = Context.ocaml ctx in
-    [ Exe.Linkage.native_or_custom ocaml ]
-  and+ cctx =
-    let obj_dir = Obj_dir.for_pp ~dir in
-    let requires_compile = Resolve.map driver_and_libs ~f:snd in
-    let requires_link = Memo.lazy_ (fun () -> Memo.return requires_compile) in
-    let flags = Ocaml_flags.of_list [ "-g"; "-w"; "-24" ] in
-    let opaque = Compilation_context.Explicit false in
-    let modules = Modules.With_vlib.singleton_exe module_ in
-    Compilation_context.create
-      ~super_context:sctx
-      ~scope
-      ~obj_dir
-      ~modules
-      ~flags
-      ~requires_compile:(Memo.return requires_compile)
-      ~requires_link
-      ~opaque
-      ~js_of_ocaml:(Js_of_ocaml.Mode.Pair.make None)
-      ~melange_package_name:None
-      ~package:None
-      ~bin_annot:false
-      ()
-  in
-  let+ (_ : Exe.dep_graphs) =
-    let program : Exe.Program.t =
-      { name = Filename.remove_extension (Path.Build.basename target)
-      ; main_module_name
-      ; loc = Loc.none
-      }
+    let module_ = Module.generated ~kind:Impl ~src_dir:dir ~for_ [ main_module_name ] in
+    let* () =
+      let ml_source =
+        Module.file ~ml_kind:Impl module_ |> Option.value_exn |> Path.as_in_build_dir_exn
+      in
+      Super_context.add_rule
+        sctx
+        ~dir
+        (Action_builder.write_file_dyn
+           ml_source
+           (Resolve.read
+              (let open Resolve.O in
+               let+ driver, _ = driver_and_libs in
+               sprintf "let () = %s ()\n" driver.info.main)))
+    and* linkages =
+      let ctx = Super_context.context sctx in
+      let+ ocaml = Context.ocaml ctx in
+      [ Exe.Linkage.native_or_custom ocaml ]
+    and+ cctx =
+      let obj_dir = Obj_dir.for_pp ~dir in
+      let requires_compile = Resolve.map driver_and_libs ~f:snd in
+      let requires_link = Memo.Lazy.of_val requires_compile in
+      let opaque = Compilation_context.Explicit false in
+      let modules = Modules.With_vlib.singleton_exe module_ in
+      Compilation_context.create
+        ~super_context:sctx
+        ~scope
+        ~obj_dir
+        ~modules
+        ~flags
+        ~requires_compile:(Memo.return requires_compile)
+        ~user_written_requires:None
+        ~requires_link
+        ~opaque
+        ~js_of_ocaml:(Js_of_ocaml.Mode.Pair.make None)
+        ~melange_package_name:None
+        ~package:None
+        ~bin_annot:false
+        for_
     in
-    Exe.build_and_link ~program ~linkages cctx ~promote:None
-  in
-  ()
-;;
-
-let ppx_exe_path (ctx : Build_context.t) ~key =
-  Path.Build.relative ctx.build_dir (".ppx/" ^ key ^ "/ppx.exe")
-;;
-
-let ppx_driver_exe (ctx : Context.t) libs =
-  let key = Digest.to_string (Key.Decoded.of_libs libs |> Key.encode) in
-  (* Make sure to compile ppx.exe for the compiling host. See: #2252, #2286 and
-     #3698 *)
-  Context.host ctx >>| Context.build_context >>| ppx_exe_path ~key
+    let+ (_ : Exe.dep_graphs) =
+      let program : Exe.Program.t =
+        { name =
+            Path.Build.basename target |> Filename.remove_extension |> Filename.to_string
+        ; main_module_name
+        ; loc = Loc.none
+        }
+      in
+      Exe.build_and_link
+        ~program
+        ~linkages
+        cctx
+        ~promote:None
+        ~env:(Action_builder.return Env.empty)
+    in
+    ()
 ;;
 
 let get_cookies ~loc ~expander ~lib_name libs =
@@ -369,9 +269,9 @@ let get_cookies ~loc ~expander ~lib_name libs =
     Memo.List.concat_map libs ~f:(fun t ->
       let info = Lib.info t in
       let kind = Lib_info.kind info in
-      match kind with
-      | Normal -> Memo.return []
-      | Ppx_rewriter { cookies } | Ppx_deriver { cookies } ->
+      match (kind : Lib_kind.t) with
+      | Virtual | Parameter | Dune_file Normal -> Memo.return []
+      | Dune_file (Ppx_rewriter { cookies } | Ppx_deriver { cookies }) ->
         Memo.List.map cookies ~f:(fun { Lib_kind.Ppx_args.Cookie.name; value } ->
           let+ value = Expander.No_deps.expand_str expander value in
           name, (value, Lib.name t)))
@@ -421,19 +321,23 @@ let ppx_driver_and_flags_internal
       Action_builder.List.concat_map flags ~f:(Expander.expand ~mode:Many expander)
       |> Action_builder.map
            ~f:(List.map ~f:(Value.to_string ~dir:(Path.build @@ Expander.dir expander)))
-  and+ cookies = Action_builder.of_memo (get_cookies ~loc ~lib_name ~expander libs)
-  and+ ppx_driver_exe = Action_builder.of_memo @@ ppx_driver_exe context libs in
+  and+ cookies =
+    let* libs = Resolve.Memo.read (Lib.closure libs ~linking:true ~for_) in
+    Action_builder.of_memo (get_cookies ~loc ~lib_name ~expander libs)
+  and+ ppx_driver_exe = Action_builder.of_memo @@ Ppx_exe.ppx_driver_exe context libs in
   ppx_driver_exe, flags @ cookies
 ;;
 
+let resolve_pps scope pps = Resolve.Memo.read (Lib.DB.resolve_pps (Scope.libs scope) pps)
+
 let ppx_driver_and_flags ctx ~lib_name ~expander ~scope ~loc ~flags pps =
   let open Action_builder.O in
-  let* libs = Resolve.Memo.read (Lib.DB.resolve_pps (Scope.libs scope) pps) in
+  let* libs = resolve_pps scope pps in
   let+ exe, flags =
     let dune_version = Scope.project scope |> Dune_project.dune_version in
     ppx_driver_and_flags_internal ctx ~loc ~expander ~dune_version ~lib_name ~flags libs
   and+ driver =
-    let* libs = Resolve.Memo.read (Lib.closure libs ~linking:true) in
+    let* libs = Resolve.Memo.read (Lib.closure libs ~linking:true ~for_) in
     Action_builder.of_memo (Driver.select libs ~loc:(User_file (loc, pps)))
     >>= Resolve.read
   in
@@ -442,13 +346,9 @@ let ppx_driver_and_flags ctx ~lib_name ~expander ~scope ~loc ~flags pps =
 
 let get_ppx_driver ctx ~loc ~expander ~scope ~lib_name ~flags pps =
   let open Action_builder.O in
-  let* libs = Resolve.Memo.read (Lib.DB.resolve_pps (Scope.libs scope) pps) in
+  let* libs = resolve_pps scope pps in
   let dune_version = Scope.project scope |> Dune_project.dune_version in
   ppx_driver_and_flags_internal ctx ~loc ~expander ~dune_version ~lib_name ~flags libs
 ;;
 
-let ppx_exe ctx ~scope pp =
-  let open Resolve.Memo.O in
-  let* libs = Lib.DB.resolve_pps (Scope.libs scope) [ Loc.none, pp ] in
-  ppx_driver_exe ctx libs |> Resolve.Memo.lift_memo
-;;
+let ppx_exe ctx ~scope pp = Ppx_exe.get_ppx_exe ctx ~scope [ Loc.none, pp ]

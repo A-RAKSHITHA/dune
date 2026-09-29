@@ -1,3 +1,5 @@
+Compares ordinary strings and block strings in actions, including raw escapes.
+
   $ dune build @old
   ARFLAGS=rsc
   CXX=g++
@@ -15,6 +17,7 @@
   cp libre2/obj/so/libre2.so dllre2_c_stubs.so
   ${.MAKE} -s -C libre2 clean
 
+  $ dune clean
   $ dune build @new
   ARFLAGS=rsc
   CXX=g++

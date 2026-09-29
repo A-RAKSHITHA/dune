@@ -2,16 +2,20 @@ open Import
 module Dialect = Dune_lang.Dialect
 
 let dialect_and_ml_kind file =
+  let file = Path.of_string file in
   let open Memo.O in
-  let _base, ext =
-    let file = Path.of_string file in
-    Path.split_extension file
-  in
+  let _base, ext = Path.split_extension file in
   let+ project = Source_tree.root () >>| Source_tree.Dir.project in
   let dialects = Dune_project.dialects project in
-  match Dialect.DB.find_by_extension dialects ext with
-  | None -> User_error.raise [ Pp.textf "unsupported extension: %s" ext ]
-  | Some x -> x
+  if Filename.Extension.Or_empty.is_empty ext
+  then User_error.raise [ Pp.textf "file %s has no extension" (Path.to_string file) ]
+  else (
+    let ext = Filename.Extension.Or_empty.extension_exn ext in
+    match Dialect.DB.find_by_extension dialects ext with
+    | None ->
+      User_error.raise
+        [ Pp.textf "unsupported extension: %s" (Filename.Extension.to_string ext) ]
+    | Some x -> x)
 ;;
 
 let execute_pp_action ~sctx file pp_file dump_file =
@@ -43,6 +47,7 @@ let execute_pp_action ~sctx file pp_file dump_file =
         let+ build =
           Dune_rules.For_tests.Action_unexpanded.expand_no_targets
             action
+            Dune_engine.Sandbox_config.no_special_requirements
             ~chdir:build_dir
             ~loc
             ~expander
@@ -69,6 +74,7 @@ let execute_pp_action ~sctx file pp_file dump_file =
     ; env
     ; rule_loc = Loc.none
     ; execution_parameters
+    ; sandbox = None
     ; action
     }
   in
@@ -86,9 +92,9 @@ let print_pped_file =
     Path.set_extension
       pp_file
       ~ext:
-        (match (ml_kind : Ocaml.Ml_kind.t) with
-         | Intf -> ".cmi.dump"
-         | Impl -> ".cmo.dump")
+        (match (ml_kind : Root.Ocaml.Ml_kind.t) with
+         | Intf -> Filename.Extension.cmi_dump
+         | Impl -> Filename.Extension.cmo_dump)
     |> Path.as_in_build_dir_exn
   in
   fun ~sctx file pp_file ~ml_kind ->
@@ -99,7 +105,7 @@ let print_pped_file =
     match Path.stat dump_file with
     | Ok { st_kind = S_REG; _ } ->
       Io.cat dump_file;
-      Path.unlink_no_err dump_file
+      Fpath.unlink_no_err (Path.to_string dump_file)
     | _ ->
       User_error.raise
         [ Pp.textf "cannot find a dump file: %s" (Path.to_string dump_file) ]
@@ -114,7 +120,7 @@ let find_module ~sctx file =
   | Some (m, _, _, origin) ->
     (match
        Dune_rules.Ml_sources.Origin.preprocess origin
-       |> Dune_rules.Preprocess.Per_module.find (Dune_rules.Module.name m)
+       |> Dune_lang.Preprocess.Per_module.find (Dune_rules.Module.path m)
      with
      | Pps { staged = true; loc; _ } -> Some (`Staged_pps loc)
      | _ -> Some (`Module m))
@@ -157,23 +163,18 @@ let get_pped_file super_context file =
 
 let term =
   let+ builder = Common.Builder.term
-  and+ context_name = Common.context_arg ~doc:"Build context to use."
+  and+ context_name = Common.context_arg ~doc:(Some "Build context to use.")
   and+ _ = Describe_lang_compat.arg
-  and+ file = Arg.(required & pos 0 (some string) None (Arg.info [] ~docv:"FILE")) in
-  let common, config = Common.init builder in
-  Scheduler.go ~common ~config
-  @@ fun () ->
-  let open Fiber.O in
-  let* setup = Import.Main.setup () in
-  let* setup = Memo.run setup in
-  let sctx = Import.Main.find_scontext_exn setup ~name:context_name in
-  build_exn
-  @@ fun () ->
-  let open Memo.O in
-  let* result = get_pped_file sctx file in
-  match result with
-  | Error file -> Io.cat file |> Memo.return
-  | Ok (pp_file, ml_kind) -> print_pped_file ~sctx file pp_file ~ml_kind
+  and+ file =
+    (* CR-someday Alizter: document this option *)
+    Arg.(required & pos 0 (some string) None (Arg.info [] ~docv:"FILE" ~doc:None))
+  in
+  Build.describe builder ~context_name (fun _common _setup sctx ->
+    let open Memo.O in
+    let* result = get_pped_file sctx file in
+    match result with
+    | Error file -> Io.cat file |> Memo.return
+    | Ok (pp_file, ml_kind) -> print_pped_file ~sctx file pp_file ~ml_kind)
 ;;
 
 let command =

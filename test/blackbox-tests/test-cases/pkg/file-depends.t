@@ -4,18 +4,16 @@ field which is a list of external files, together with their checksums, that
 the package depends on. We make sure that such a package really does depend on
 the files found in files-depend. 
 
-  $ . ./helpers.sh
   $ make_lockdir
-
   $ foo=$PWD/foo
-  > cat > dune.lock/file-depends.pkg <<EOF
+  $ make_lockpkg file-depends <<EOF
   > (version 0.0.1)
   > (build
   >  (system "\| echo Building file-depends
-  >          "\| cat > file-depends.config <<EOF
+  >          "\| cat > file-depends.config <<INNER
   >          "\| opam-version: "2.0"
   >          "\| file-depends: [ "$foo" "md5=00000000000000000000000000000000" ]
-  >          "\| EOF
+  >          "\| INNER
   >  ))
   > EOF
 
@@ -24,7 +22,7 @@ checksum is not parsable.
 
 Now we make a package depending on file-depends.
 
-  $ cat > dune.lock/dep.pkg <<EOF
+  $ make_lockpkg dep <<EOF
   > (version 0.0.1)
   > (depends file-depends)
   > (build

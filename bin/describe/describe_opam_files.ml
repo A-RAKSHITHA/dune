@@ -3,11 +3,17 @@ open Import
 let term =
   let+ builder = Common.Builder.term
   and+ format = Describe_format.arg
-  and+ _ = Describe_lang_compat.arg in
+  and+ _ = Describe_lang_compat.arg
+  and+ filenames_only =
+    let doc =
+      "Print opam filenames, each on their own line. This ignores the --format argument."
+    in
+    Arg.(value & flag & info [ "files" ] ~doc:(Some doc))
+  in
   let common, config = Common.init builder in
-  Scheduler.go ~common ~config
+  Scheduler_setup.go_with_rpc_server ~common ~config
   @@ fun () ->
-  build_exn
+  Build_system.run_exn
   @@ fun () ->
   let open Memo.O in
   let+ project = Source_tree.root () >>| Source_tree.Dir.project in
@@ -19,16 +25,23 @@ let term =
       then (
         let template_file = Dune_rules.Opam_create.template_file opam_file in
         let template =
-          if Path.exists template_file
-          then Some (template_file, Io.read_file template_file)
+          if Fpath.exists (Path.to_string template_file)
+          then Some (template_file, Io.read_file_exn template_file)
           else None
         in
         Dune_rules.Opam_create.generate project pkg ~template)
-      else Io.read_file opam_file
+      else Io.read_file_exn opam_file
     in
     Dyn.Tuple [ String (Path.to_string opam_file); String contents ]
   in
-  packages |> Dyn.list opam_file_to_dyn |> Describe_format.print_dyn format
+  if filenames_only
+  then
+    Console.print
+      [ Pp.vbox
+          (Pp.concat_map ~sep:Pp.cut packages ~f:(fun pkg ->
+             Package.opam_file pkg |> Path.source |> Path.pp))
+      ]
+  else packages |> Dyn.list opam_file_to_dyn |> Describe_format.print_dyn format
 ;;
 
 let command =

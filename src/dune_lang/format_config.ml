@@ -1,10 +1,9 @@
-open Stdune
-open Dune_sexp
+open Import
 open Decoder
 
 let syntax =
   Syntax.create
-    ~name:"fmt"
+    ~name:(Syntax.Name.parse "fmt")
     ~desc:"integration with automatic formatters"
     [ (1, 0), `Since (1, 4); (1, 1), `Since (1, 7); (1, 2), `Since (1, 11) ]
 ;;

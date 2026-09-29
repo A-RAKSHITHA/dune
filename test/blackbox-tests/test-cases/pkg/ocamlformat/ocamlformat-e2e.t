@@ -1,6 +1,5 @@
 Exercises end to end, locking and building ocamlformat dev tool.
 
-  $ . ./helpers.sh
   $ mkrepo
 
   $ make_fake_ocamlformat "0.26.2"
@@ -25,14 +24,15 @@ Make dune-project that uses the mocked dev-tool opam-reposiotry.
 Without a ".ocamlformat" file, "dune fmt" takes the latest version of
 OCamlFormat.
   $ DUNE_CONFIG__LOCK_DEV_TOOL=enabled dune fmt --preview
-  Solution for dev-tools.locks/ocamlformat:
+  Solution for _build/.dev-tools.locks/ocamlformat:
   - ocamlformat.0.26.3
   File "foo.ml", line 1, characters 0-0:
-  Error: Files _build/default/foo.ml and _build/default/.formatted/foo.ml
-  differ.
+  --- foo.ml
+  +++ foo.ml.corrected
+  @@ -1 +1 @@
+  -let () = print_endline "Hello, world"
+  +formatted with version 0.26.3
   [1]
-  $ cat _build/default/.formatted/foo.ml
-  formatted with version 0.26.3
 
 Create .ocamlformat file
   $ cat > .ocamlformat <<EOF
@@ -40,36 +40,42 @@ Create .ocamlformat file
   > EOF
 
 An important cleaning here, "dune fmt" will relock and build the new version(0.26.2) of OCamlFormat.
-  $ rm -r dev-tools.locks/ocamlformat
+  $ rm -r "${dev_tool_lock_dir}"
   $ dune clean
 
 With a ".ocamlformat" file, "dune fmt" takes the version mentioned inside ".ocamlformat"
 file.
   $ DUNE_CONFIG__LOCK_DEV_TOOL=enabled dune fmt --preview
-  Solution for dev-tools.locks/ocamlformat:
+  Solution for _build/.dev-tools.locks/ocamlformat:
   - ocamlformat.0.26.2
   File "foo.ml", line 1, characters 0-0:
-  Error: Files _build/default/foo.ml and _build/default/.formatted/foo.ml
-  differ.
+  --- foo.ml
+  +++ foo.ml.corrected
+  @@ -1 +1 @@
+  -let () = print_endline "Hello, world"
+  +formatted with version 0.26.2
   [1]
-  $ cat _build/default/.formatted/foo.ml
-  formatted with version 0.26.2
 
 Formating a second time would not trigger the lock/solve.
   $ DUNE_CONFIG__LOCK_DEV_TOOL=enabled dune fmt --preview
   File "foo.ml", line 1, characters 0-0:
-  Error: Files _build/default/foo.ml and _build/default/.formatted/foo.ml
-  differ.
+  --- foo.ml
+  +++ foo.ml.corrected
+  @@ -1 +1 @@
+  -let () = print_endline "Hello, world"
+  +formatted with version 0.26.2
   [1]
-  $ cat _build/default/.formatted/foo.ml
-  formatted with version 0.26.2
 
-When "dev-tools.locks" is removed, the solving/lock is renewed
-  $ rm -r dev-tools.locks/ocamlformat
+When the lock dir is removed, the solving/lock is renewed:
+
+  $ rm -r "${dev_tool_lock_dir}"
   $ DUNE_CONFIG__LOCK_DEV_TOOL=enabled dune fmt --preview
-  Solution for dev-tools.locks/ocamlformat:
+  Solution for _build/.dev-tools.locks/ocamlformat:
   - ocamlformat.0.26.2
   File "foo.ml", line 1, characters 0-0:
-  Error: Files _build/default/foo.ml and _build/default/.formatted/foo.ml
-  differ.
+  --- foo.ml
+  +++ foo.ml.corrected
+  @@ -1 +1 @@
+  -let () = print_endline "Hello, world"
+  +formatted with version 0.26.2
   [1]

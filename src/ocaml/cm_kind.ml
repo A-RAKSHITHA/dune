@@ -24,8 +24,25 @@ let choose cmi cmo cmx = function
   | Cmx -> cmx
 ;;
 
-let ext = choose ".cmi" ".cmo" ".cmx"
+let ext = Filename.Extension.(choose cmi cmo cmx)
 let source = choose Ml_kind.Intf Impl Impl
+
+let repr =
+  Repr.variant
+    "cm-kind"
+    [ Repr.case0 "cmi" ~test:(function
+        | Cmi -> true
+        | Cmo | Cmx -> false)
+    ; Repr.case0 "cmo" ~test:(function
+        | Cmo -> true
+        | Cmi | Cmx -> false)
+    ; Repr.case0 "cmx" ~test:(function
+        | Cmx -> true
+        | Cmi | Cmo -> false)
+    ]
+;;
+
+let to_dyn = Repr.to_dyn repr
 
 module Dict = struct
   type 'a t =
@@ -43,11 +60,3 @@ module Dict = struct
   let of_func f = { cmi = f ~cm_kind:Cmi; cmo = f ~cm_kind:Cmo; cmx = f ~cm_kind:Cmx }
   let make_all x = { cmi = x; cmo = x; cmx = x }
 end
-
-let to_dyn =
-  let open Dyn in
-  function
-  | Cmi -> variant "cmi" []
-  | Cmo -> variant "cmo" []
-  | Cmx -> variant "cmx" []
-;;

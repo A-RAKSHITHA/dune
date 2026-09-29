@@ -6,9 +6,6 @@ type t
 (** Driver for tarballs, possibly compressed *)
 val tar : t
 
-(** Driver for zip files *)
-val zip : t
-
 (** Returns the driver that can extract a file of a given name. The decision is
     made based on the file's suffix. *)
 val choose_for_filename : string -> t option

@@ -1,6 +1,6 @@
-  $ cat >dune-project <<EOF
-  > (lang dune 3.3)
-  > EOF
+Tests unwrapped public modules in virtual library implementations.
+
+  $ make_dune_project 3.3
 
   $ mkdir vlib impl
   $ touch vlib/foo.mli

@@ -1,0 +1,44 @@
+(env
+ (_
+  (binaries ../../utils/action_plugin_helper.exe)))
+
+(cram
+ (applies_to landlock-policy.t)
+ (deps %{bin:action_plugin_helper})
+ (enabled_if
+  (= %{system} linux)))
+
+(cram
+ (applies_to shared-cache.t))
+
+(cram
+ (applies_to basic.t with-bwrap.t)
+ (alias runtest-bwrap)
+ (runtest_alias
+  (<> %{env:CI=false} true))
+ (deps %{bin:bwrap})
+ (enabled_if %{bin-available:bwrap}))
+
+(cram
+ (applies_to shared-cache.t)
+ (runtest_alias
+  (or
+   (= %{system} macosx)
+   (<> %{env:CI=false} true)))
+ (enabled_if
+  (or
+   (and
+    (= %{system} linux)
+    %{bin-available:bwrap})
+   (and
+    (= %{system} macosx)
+    %{bin-available:sandbox-exec}))))
+
+(cram
+ (applies_to with-sandbox-exec.t)
+ (alias runtest-sandbox-exec)
+ (deps %{bin:sandbox-exec})
+ (enabled_if
+  (and
+   (= %{system} macosx)
+   %{bin-available:sandbox-exec})))

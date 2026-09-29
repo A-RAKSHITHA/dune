@@ -28,7 +28,7 @@ end
 
 module T = struct
   type t =
-    | Lock_dir
+    | Lock_dir of Source_tree.Dir.t
     | Generated
     | Source_only of Source_tree.Dir.t
     | (* Directory not part of a multi-directory group *)
@@ -47,7 +47,7 @@ type enclosing_group =
   | Group_root of Path.Build.t
 
 let current_group dir = function
-  | Lock_dir | Generated | Source_only _ | Standalone _ -> No_group
+  | Lock_dir _ | Generated | Source_only _ | Standalone _ -> No_group
   | Group_root _ -> Group_root dir
   | Is_component_of_a_group_but_not_the_root { group_root; _ } -> Group_root group_root
 ;;
@@ -81,7 +81,7 @@ let error_no_module_consumer ~loc (qualification : Include_subdirs.qualification
          (include_subdirs %s)."
         (match qualification with
          | Unqualified -> "unqualified"
-         | Qualified -> "qualified")
+         | Qualified _ -> "qualified")
     ]
 ;;
 
@@ -158,7 +158,11 @@ let directory_targets_of_executables
        | true ->
          Nonempty_list.to_list names
          |> List.fold_left ~init:Path.Build.Map.empty ~f:(fun acc (_, name) ->
-           let dir_target = Path.Build.relative dir (name ^ Js_of_ocaml.Ext.wasm_dir) in
+           let dir_target =
+             Path.Build.relative
+               dir
+               (name ^ Filename.Extension.to_string Js_of_ocaml.Ext.wasm_dir)
+           in
            Path.Build.Map.set acc dir_target buildable.loc))
   in
   when_enabled ~dir ~enabled_if directory_targets
@@ -184,7 +188,8 @@ let directory_targets_of_library
            in
            Path.Build.relative
              inline_test_dir
-             (Inline_tests_info.inline_test_runner ^ Js_of_ocaml.Ext.wasm_dir)
+             (Inline_tests_info.inline_test_runner
+              ^ Filename.Extension.to_string Js_of_ocaml.Ext.wasm_dir)
          in
          Path.Build.Map.singleton dir_target loc)
       >>= when_enabled ~dir ~enabled_if
@@ -200,10 +205,7 @@ let extract_directory_targets ~jsoo_enabled ~dir stanzas =
     | Executables.T exes | Tests.T { exes; _ } ->
       directory_targets_of_executables ~jsoo_enabled ~dir exes
     | Library.T lib -> directory_targets_of_library ~jsoo_enabled ~dir lib
-    | Coq_stanza.Theory.T m ->
-      (* It's unfortunate that we need to pull in the coq rules here. But
-         we don't have a generic mechanism for this yet. *)
-      Coq_doc.coqdoc_directory_targets ~dir m
+    | Rocq_stanza.Theory.T m -> Rocq_doc.rocqdoc_directory_targets ~dir m
     | _ -> Memo.return Path.Build.Map.empty)
   >>| Path.Build.Map.union_all ~f:(fun path loc1 loc2 ->
     User_error.raise
@@ -226,11 +228,19 @@ end = struct
     | Some parent_dir -> get ~dir:parent_dir >>| current_group parent_dir
   ;;
 
+  let group_component_or ~dir status =
+    enclosing_group ~dir
+    >>| function
+    | No_group -> status
+    | Group_root group_root ->
+      Is_component_of_a_group_but_not_the_root { stanzas = None; group_root }
+  ;;
+
   let collect_group =
     let rec walk st_dir ~dir ~local =
       DB.get ~dir
       >>= function
-      | Lock_dir | Generated | Source_only _ | Standalone _ | Group_root _ ->
+      | Lock_dir _ | Generated | Source_only _ | Standalone _ | Group_root _ ->
         Memo.return Appendable_list.empty
       | Is_component_of_a_group_but_not_the_root { stanzas; group_root = _ } ->
         let* stanzas =
@@ -249,10 +259,10 @@ end = struct
     and walk_children st_dir ~dir ~local =
       (* TODO take account of directory targets *)
       Source_tree.Dir.sub_dirs st_dir
-      |> Filename.Map.to_list
+      |> Filename.Array.Map.to_list
       |> Memo.parallel_map ~f:(fun (basename, st_dir) ->
         let* st_dir = Source_tree.Dir.sub_dir_as_t st_dir in
-        let dir = Path.Build.relative dir basename in
+        let dir = Path.Build.relative_fname dir basename in
         let local = basename :: local in
         walk st_dir ~dir ~local)
       >>| Appendable_list.concat
@@ -265,7 +275,9 @@ end = struct
     >>| get_include_subdirs
     >>= function
     | Some (loc, Include mode) ->
-      let components = Memo.Lazy.create (fun () -> collect_group st_dir ~dir) in
+      let components =
+        Memo.Lazy.create ~name:"group-components" (fun () -> collect_group st_dir ~dir)
+      in
       Memo.return
       @@ T.Group_root
            { source_dir = st_dir
@@ -310,20 +322,15 @@ end = struct
         | None -> None
         | Some src_dir -> Some (ctx, src_dir)))
     >>= function
-    | None ->
-      enclosing_group ~dir
-      >>| (function
-       | No_group -> Generated
-       | Group_root group_root ->
-         Is_component_of_a_group_but_not_the_root { stanzas = None; group_root })
+    | None -> group_component_or ~dir Generated
     | Some (ctx, st_dir) ->
       let src_dir = Source_tree.Dir.path st_dir in
-      Pkg_rules.lock_dir_path (Context_name.of_string ctx)
+      Pkg_rules.lock_dir_path (Context_name.of_string (Filename.to_string ctx))
       >>| (function
        | None -> false
-       | Some of_ -> Path.Source.is_descendant ~of_ src_dir)
+       | Some of_ -> Path.is_descendant ~of_ (Path.source src_dir))
       >>= (function
-       | true -> Memo.return Lock_dir
+       | true -> Memo.return (Lock_dir st_dir)
        | false ->
          let build_dir_is_project_root = build_dir_is_project_root st_dir in
          Dune_load.stanzas_in_dir dir
@@ -332,12 +339,7 @@ end = struct
           | None ->
             if build_dir_is_project_root
             then Memo.return (Source_only st_dir)
-            else
-              enclosing_group ~dir
-              >>| (function
-               | No_group -> Source_only st_dir
-               | Group_root group_root ->
-                 Is_component_of_a_group_but_not_the_root { stanzas = None; group_root })))
+            else group_component_or ~dir (Source_only st_dir)))
   ;;
 
   let get =
@@ -348,7 +350,7 @@ end
 
 let directory_targets t ~jsoo_enabled ~dir =
   match t with
-  | Lock_dir | Generated | Source_only _ | Is_component_of_a_group_but_not_the_root _ ->
+  | Lock_dir _ | Generated | Source_only _ | Is_component_of_a_group_but_not_the_root _ ->
     Memo.return Path.Build.Map.empty
   | Standalone (_, dune_file) ->
     Dune_file.stanzas dune_file >>= extract_directory_targets ~jsoo_enabled ~dir
@@ -364,4 +366,26 @@ let directory_targets t ~jsoo_enabled ~dir =
     components
     >>= Memo.List.fold_left ~init ~f:(fun acc { Group_component.dir; stanzas; _ } ->
       f ~dir stanzas acc)
+;;
+
+let find_directory_target_ancestor =
+  let rec find_directory_target_ancestor ~dir ~jsoo_enabled src =
+    DB.get ~dir
+    >>= function
+    | Lock_dir _ -> Memo.return None
+    | Generated ->
+      let parent = Path.Build.parent_exn dir in
+      find_directory_target_ancestor ~dir:parent ~jsoo_enabled src
+    | ( Group_root _
+      | Is_component_of_a_group_but_not_the_root _
+      | Source_only _
+      | Standalone _ ) as dir_status ->
+      let+ directory_targets = directory_targets dir_status ~jsoo_enabled ~dir in
+      Path.Build.Map.find_key directory_targets ~f:(fun dir_target ->
+        Path.Build.is_descendant ~of_:dir_target src)
+  in
+  fun src ~jsoo_enabled ->
+    match Path.Build.parent src with
+    | None -> Memo.return None
+    | Some dir -> find_directory_target_ancestor ~dir ~jsoo_enabled src
 ;;

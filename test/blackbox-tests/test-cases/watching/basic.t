@@ -1,11 +1,9 @@
 Basic tests for the file-watching mode.
 
-  $ . ./helpers.sh
-
 ----------------------------------------------------------------------------------
 * Compile a simple rule
 
-  $ echo "(lang dune 2.0)" > dune-project
+  $ make_dune_project 2.0
 
   $ cat > x <<EOF
   > original-contents
@@ -45,11 +43,13 @@ Basic tests for the file-watching mode.
   $ mv x z
   $ build y
   Failure
+  [1]
 
   $ echo new-contents3 > z
 
   $ build y
   Failure
+  [1]
 
   $ mv z x
   $ build y
@@ -77,3 +77,5 @@ Basic tests for the file-watching mode.
   Error: No rule found for x
   Had 1 error, waiting for filesystem changes...
   Success, waiting for filesystem changes...
+
+  $ wait_for_dune_exit

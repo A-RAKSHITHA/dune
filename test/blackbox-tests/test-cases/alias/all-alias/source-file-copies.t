@@ -1,0 +1,32 @@
+@all does not depend directly on file copies from the source tree
+
+  $ make_dune_project 3.0
+
+Add two files
+
+  $ touch a.ml b.ml
+
+An empty project, should not copy any file.
+
+  $ dune build
+  $ [ -d _build/default ] && find _build/default -name '*.ml'
+  [1]
+
+A project that only uses a.ml, should not copy b.ml
+
+  $ cat > dune <<EOF
+  > (library (name a) (modules a))
+  > EOF
+  $ dune build
+  $ find _build/default -name '*.ml'
+  _build/default/a.ml
+
+A project that uses both files, should copy both.
+
+  $ cat > dune <<EOF
+  > (library (name a))
+  > EOF
+  $ dune build
+  $ find _build/default -name '*.ml' | sort
+  _build/default/a.ml
+  _build/default/b.ml

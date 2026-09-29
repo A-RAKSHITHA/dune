@@ -1,13 +1,17 @@
-open Stdune
+open Import
 include Dune_section
 
 let compare : t -> t -> Ordering.t = Poly.compare
+let equal : t -> t -> bool = Poly.equal
 
-let to_dyn x =
-  let s = Dune_section.to_string x in
-  let open Dyn in
-  variant (String.uppercase_ascii s) []
+let repr =
+  Repr.variant
+    "section"
+    (List.map Dune_section.all ~f:(fun (section, name) ->
+       Repr.case0 (String.uppercase_ascii name) ~test:(equal section)))
 ;;
+
+let to_dyn = Repr.to_dyn repr
 
 module Key = struct
   type nonrec t = t
@@ -27,7 +31,7 @@ let parse_string s =
 ;;
 
 let enum_decoder = Dune_section.all |> List.map ~f:(fun (x, y) -> y, x)
-let decode = Dune_sexp.Decoder.enum enum_decoder
+let decode = Decoder.enum enum_decoder
 
 let encode v =
   let open Dune_sexp.Encoder in

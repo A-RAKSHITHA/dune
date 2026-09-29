@@ -1,5 +1,4 @@
-open Stdune
-open Dune_sexp
+open Import
 
 module Glob_files : sig
   (** A glob stored in a [String_with_vars.t] and functions for expanding the
@@ -22,7 +21,10 @@ module Sandbox_config : sig
 
   val fold
     :  t
-    -> f:([ `None | `Always | `Preserve_file_kind ] -> 'acc -> 'acc)
+    -> f:
+         ([ `None | `Always | `Preserve_file_kind | `Patch_back_source_tree ]
+          -> 'acc
+          -> 'acc)
     -> init:'acc
     -> 'acc
 end
@@ -43,9 +45,13 @@ type t =
   | Sandbox_config of Sandbox_config.t
   | Include of string
 
+val equal : t -> t -> bool
 val remove_locs : t -> t
+val repr : t Repr.t
 
 include Conv.S with type t := t
 
 val decode_no_files : t Decoder.t
+val decode_bindings : t Bindings.t Decoder.t
+val command_line_parser : stanza_version:Syntax.Version.t -> t Decoder.t
 val to_dyn : t Dyn.builder

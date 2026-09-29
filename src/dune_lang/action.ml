@@ -1,11 +1,11 @@
-open Stdune
+open Import
+open Stdune.Action_types
 open Dune_sexp
-open Dune_util.Action
 
 module Action_plugin = struct
   let syntax =
     Syntax.create
-      ~name:"action-plugin"
+      ~name:(Syntax.Name.parse "action-plugin")
       ~desc:"action plugin extension"
       ~experimental:true
       [ (0, 1), `Since (2, 0) ]
@@ -17,17 +17,24 @@ module Diff = struct
 
   let decode path target ~optional =
     let open Decoder in
-    let+ file1 = path
+    let+ version = Syntax.get_exn Stanza.syntax
+    and+ file1 = path
     and+ file2 = target in
-    { Diff.optional; file1; file2; mode = Text }
+    { Diff.optional; mode = Text; directory_diffs = version >= (3, 23); file1; file2 }
   ;;
 
   let decode_binary path target =
     let open Decoder in
     let+ () = Syntax.since Stanza.syntax (1, 0)
+    and+ version = Syntax.get_exn Stanza.syntax
     and+ file1 = path
     and+ file2 = target in
-    { Diff.optional = false; file1; file2; mode = Binary }
+    { Diff.optional = false
+    ; mode = Binary
+    ; directory_diffs = version >= (3, 23)
+    ; file1
+    ; file2
+    }
   ;;
 end
 
@@ -63,8 +70,8 @@ module File_perm = struct
   ;;
 
   let to_unix_perm = function
-    | Normal -> 0o666
-    | Executable -> 0o777
+    | Normal -> Permissions.Mode.default_file
+    | Executable -> Permissions.Mode.executable_file
   ;;
 end
 
@@ -78,16 +85,35 @@ module Env_update = struct
       | EqColon
       | EqPlusEq
 
-    let equal a b =
-      match a, b with
-      | Eq, Eq
-      | PlusEq, PlusEq
-      | EqPlus, EqPlus
-      | ColonEq, ColonEq
-      | EqColon, EqColon
-      | EqPlusEq, EqPlusEq -> true
-      | _ -> false
+    let repr =
+      Repr.variant
+        "env-update-op"
+        [ Repr.case0 "=" ~test:(function
+            | Eq -> true
+            | PlusEq | EqPlus | ColonEq | EqColon | EqPlusEq -> false)
+        ; Repr.case0 "+=" ~test:(function
+            | PlusEq -> true
+            | Eq | EqPlus | ColonEq | EqColon | EqPlusEq -> false)
+        ; Repr.case0 "=+" ~test:(function
+            | EqPlus -> true
+            | Eq | PlusEq | ColonEq | EqColon | EqPlusEq -> false)
+        ; Repr.case0 ":=" ~test:(function
+            | ColonEq -> true
+            | Eq | PlusEq | EqPlus | EqColon | EqPlusEq -> false)
+        ; Repr.case0 "=:" ~test:(function
+            | EqColon -> true
+            | Eq | PlusEq | EqPlus | ColonEq | EqPlusEq -> false)
+        ; Repr.case0 "=+=" ~test:(function
+            | EqPlusEq -> true
+            | Eq | PlusEq | EqPlus | ColonEq | EqColon -> false)
+        ]
     ;;
+
+    include Repr.Poly (struct
+        type nonrec t = t
+
+        let repr = repr
+      end)
 
     let all =
       [ "=", Eq
@@ -97,12 +123,6 @@ module Env_update = struct
       ; "=:", EqColon
       ; "=+=", EqPlusEq
       ]
-    ;;
-
-    let to_dyn t =
-      List.find_map all ~f:(fun (k, t') ->
-        if equal t t' then Some (Dyn.string k) else None)
-      |> Option.value_exn
     ;;
   end
 
@@ -124,16 +144,28 @@ module Env_update = struct
     && value_equal value other_value
   ;;
 
-  let to_dyn value_to_dyn { op; var; value } =
-    Dyn.record
-      [ "op", Op.to_dyn op; "var", Env.Var.to_dyn var; "value", value_to_dyn value ]
+  let repr value_repr =
+    Repr.record
+      "env-update"
+      [ Repr.field "op" Op.repr ~get:(fun t -> t.op)
+      ; Repr.field "var" Env.Var.repr ~get:(fun t -> t.var)
+      ; Repr.field "value" value_repr ~get:(fun t -> t.value)
+      ]
   ;;
+
+  module Repr_derived = Repr.Make1 (struct
+      type nonrec 'a t = 'a t
+
+      let repr = repr
+    end)
+
+  let to_dyn = Repr_derived.to_dyn
 
   let decode =
     let open Decoder in
     let env_update_op = enum Op.all in
     let+ op, var, value = triple env_update_op string String_with_vars.decode in
-    { op; var; value }
+    { op; var = Env.Var.of_string var; value }
   ;;
 
   let encode { op; var; value } =
@@ -141,12 +173,13 @@ module Env_update = struct
       List.find_map Op.all ~f:(fun (k, v) -> if Poly.equal v op then Some k else None)
       |> Option.value_exn
     in
-    List [ atom op; atom var; String_with_vars.encode value ]
+    List [ atom op; atom (Env.Var.to_string var); String_with_vars.encode value ]
   ;;
 end
 
 type t =
   | Run of Slang.t list
+  | Runexec of Slang.t list
   | With_accepted_exit_codes of int Predicate_lang.t * t
   | Dynamic_run of String_with_vars.t * String_with_vars.t list
   | Chdir of String_with_vars.t * t
@@ -196,7 +229,7 @@ let two_or_more decode =
 
 let decode_with_accepted_exit_codes =
   let rec is_ok loc ~nesting_support ~nesting_support_version = function
-    | Run _ | Bash _ | System _ -> true
+    | Run _ | Bash _ | System _ | Dynamic_run _ -> true
     | Chdir (_, t)
     | Setenv (_, _, t)
     | Ignore (_, t)
@@ -236,6 +269,7 @@ let decode_with_accepted_exit_codes =
                 (String.enumerate_and
                  @@ quote
                       [ "run"
+                      ; "dynamic-run"
                       ; "bash"
                       ; "system"
                       ; "chdir"
@@ -251,7 +285,7 @@ let decode_with_accepted_exit_codes =
             ~loc
             [ Pp.textf
                 "with-accepted-exit-codes can only be used with %s"
-                (String.enumerate_or (quote [ "run"; "bash"; "system" ]))
+                (String.enumerate_or (quote [ "run"; "dynamic-run"; "bash"; "system" ]))
             ]
 ;;
 
@@ -303,10 +337,10 @@ let cstrs_dune_file t =
       Echo (x :: xs) )
   ; ( "cat"
     , let* xs = repeat1 sw in
-      (if List.length xs > 1
+      (if Nonempty_list.length xs > 1
        then Syntax.since ~what:"Passing several arguments to 'cat'" Stanza.syntax (3, 4)
        else return ())
-      >>> return (Cat xs) )
+      >>> return (Cat (Nonempty_list.to_list xs)) )
   ; ( "copy"
     , let+ src = sw
       and+ dst = sw in
@@ -372,6 +406,14 @@ let decode_dune_file =
           Slang.Literal prog :: List.map args ~f:(fun arg -> Slang.Literal arg)
         in
         Run slang )
+    ; ( "runexec"
+      , Syntax.since Stanza.syntax (3, 21)
+        >>> let+ prog = sw
+            and+ args = repeat sw in
+            let slang =
+              Slang.Literal prog :: List.map args ~f:(fun arg -> Slang.Literal arg)
+            in
+            Runexec slang )
     ]
   in
   Decoder.fix @@ fun t -> Decoder.sum (cstrs_dune_file t @ dune_file_specific)
@@ -396,7 +438,7 @@ let decode_pkg =
             Withenv (ops, t) )
     ; ( "when"
       , Syntax.since Stanza.syntax (0, 1)
-        >>> let+ condition = Slang.decode_blang
+        >>> let+ condition = Slang.Blang.decode
             and+ action = t in
             When (condition, action) )
     ; ( "run"
@@ -407,6 +449,10 @@ let decode_pkg =
           repeat Slang.decode
         in
         Run args )
+    ; ( "runexec"
+      , Syntax.since Stanza.syntax (3, 21)
+        >>> let+ args = repeat Slang.decode in
+            Runexec args )
     ]
   in
   Decoder.fix @@ fun t -> Decoder.sum (cstrs_dune_file t @ cstrs_pkg t)
@@ -416,6 +462,7 @@ let rec encode =
   let sw = String_with_vars.encode in
   function
   | Run xs -> List (atom "run" :: List.map xs ~f:Slang.encode)
+  | Runexec xs -> List (atom "runexec" :: List.map xs ~f:Slang.encode)
   | With_accepted_exit_codes (pred, t) ->
     List
       [ atom "with-accepted-exit-codes"
@@ -447,12 +494,12 @@ let rec encode =
   | Write_file (x, perm, y) ->
     List [ atom ("write-file" ^ File_perm.suffix perm); sw x; sw y ]
   | Mkdir x -> List [ atom "mkdir"; sw x ]
-  | Diff { optional; file1; file2; mode = Binary } ->
+  | Diff { optional; file1; file2; mode = Binary; directory_diffs = _ } ->
     assert (not optional);
     List [ atom "cmp"; sw file1; sw file2 ]
-  | Diff { optional = false; file1; file2; mode = _ } ->
+  | Diff { optional = false; file1; file2; mode = _; directory_diffs = _ } ->
     List [ atom "diff"; sw file1; sw file2 ]
-  | Diff { optional = true; file1; file2; mode = _ } ->
+  | Diff { optional = true; file1; file2; mode = _; directory_diffs = _ } ->
     List [ atom "diff?"; sw file1; sw file2 ]
   | No_infer r -> List [ atom "no-infer"; encode r ]
   | Pipe (outputs, l) ->
@@ -463,88 +510,32 @@ let rec encode =
   | Withenv (ops, t) ->
     List [ atom "withenv"; List (List.map ~f:Env_update.encode ops); encode t ]
   | When (condition, action) ->
-    List [ atom "when"; Slang.encode_blang condition; encode action ]
+    List [ atom "when"; Slang.Blang.encode condition; encode action ]
   | Format_dune_file (src, dst) -> List [ atom "format-dune-file"; sw src; sw dst ]
 ;;
-
-(* In [Action_exec] we rely on one-to-one mapping between the cwd-relative paths
-   seen by the action and [Path.t] seen by dune.
-
-   Having more than one dynamic_run with different cwds could break that. Also,
-   we didn't really want to think about how multiple dynamic actions would
-   interact (do we want dependencies requested by one to be visible to the
-   other?).
-
-   Moreover, we also check that 'dynamic-run' is not used within
-   'with-exit-codes', since the meaning of this interaction is not clear. *)
-let ensure_at_most_one_dynamic_run ~loc action =
-  let rec loop : t -> bool = function
-    | Dynamic_run _ -> true
-    | Chdir (_, t)
-    | Setenv (_, _, t)
-    | Redirect_out (_, _, _, t)
-    | Redirect_in (_, _, t)
-    | Ignore (_, t)
-    | With_accepted_exit_codes (_, t)
-    | Withenv (_, t)
-    | When (_, t)
-    | No_infer t -> loop t
-    | Run _
-    | Echo _
-    | Cat _
-    | Copy _
-    | Symlink _
-    | Copy_and_add_line_directive _
-    | System _
-    | Bash _
-    | Write_file _
-    | Mkdir _
-    | Diff _
-    | Substitute _
-    | Patch _
-    | Cram _
-    | Format_dune_file _ -> false
-    | Pipe (_, ts) | Progn ts | Concurrent ts ->
-      List.fold_left ts ~init:false ~f:(fun acc t ->
-        let have_dyn = loop t in
-        if acc && have_dyn
-        then
-          User_error.raise
-            ~loc
-            [ Pp.text
-                "Multiple 'dynamic-run' commands within single action are not supported."
-            ]
-        else acc || have_dyn)
-  in
-  ignore (loop action)
-;;
-
-let validate ~loc t = ensure_at_most_one_dynamic_run ~loc t
 
 let rec blang_map_string_with_vars ~f = function
   | Blang.Const _ as c -> c
   | Not blang -> Not (blang_map_string_with_vars ~f blang)
-  | Expr sw -> Expr (f sw)
+  | Expr sw -> Expr (slang_map_string_with_vars ~f sw)
   | And blangs -> And (List.map blangs ~f:(blang_map_string_with_vars ~f))
   | Or blangs -> Or (List.map blangs ~f:(blang_map_string_with_vars ~f))
-  | Compare (op, a, b) -> Compare (op, f a, f b)
-;;
+  | Compare (op, a, b) ->
+    Compare (op, slang_map_string_with_vars ~f a, slang_map_string_with_vars ~f b)
 
-let rec slang_map_string_with_vars ~f = function
+and slang_map_string_with_vars ~f = function
   | Slang.Nil -> Slang.Nil
+  | Slang.Undefined -> Slang.Undefined
   | Literal sw -> Literal (f sw)
   | Form (loc, form) ->
     let form =
       match form with
       | Slang.Concat ts -> Slang.Concat (List.map ts ~f:(slang_map_string_with_vars ~f))
       | When (condition, t) ->
-        When
-          ( blang_map_string_with_vars condition ~f:(slang_map_string_with_vars ~f)
-          , slang_map_string_with_vars t ~f )
+        When (blang_map_string_with_vars condition ~f, slang_map_string_with_vars t ~f)
       | If { condition; then_; else_ } ->
         If
-          { condition =
-              blang_map_string_with_vars condition ~f:(slang_map_string_with_vars ~f)
+          { condition = blang_map_string_with_vars condition ~f
           ; then_ = slang_map_string_with_vars then_ ~f
           ; else_ = slang_map_string_with_vars else_ ~f
           }
@@ -555,69 +546,84 @@ let rec slang_map_string_with_vars ~f = function
           ; fallback = slang_map_string_with_vars fallback ~f
           }
       | And_absorb_undefined_var blangs ->
-        And_absorb_undefined_var
-          (List.map
-             blangs
-             ~f:(blang_map_string_with_vars ~f:(slang_map_string_with_vars ~f)))
+        And_absorb_undefined_var (List.map blangs ~f:(blang_map_string_with_vars ~f))
       | Or_absorb_undefined_var blangs ->
-        Or_absorb_undefined_var
-          (List.map
-             blangs
-             ~f:(blang_map_string_with_vars ~f:(slang_map_string_with_vars ~f)))
-      | Blang b -> Blang (blang_map_string_with_vars b ~f:(slang_map_string_with_vars ~f))
+        Or_absorb_undefined_var (List.map blangs ~f:(blang_map_string_with_vars ~f))
+      | Blang b -> Blang (blang_map_string_with_vars b ~f)
     in
     Form (loc, form)
 ;;
 
-let rec map_string_with_vars t ~f =
+let rec map t ~string_with_vars ~slang ~blang =
   match t with
-  | Run xs -> Run (List.map ~f:(slang_map_string_with_vars ~f) xs)
+  | Run xs ->
+    Run
+      (List.map
+         ~f:(fun slang_ -> slang slang_ |> slang_map_string_with_vars ~f:string_with_vars)
+         xs)
+  | Runexec xs ->
+    Runexec
+      (List.map
+         ~f:(fun slang_ -> slang slang_ |> slang_map_string_with_vars ~f:string_with_vars)
+         xs)
   | With_accepted_exit_codes (lang, t) ->
-    With_accepted_exit_codes (lang, map_string_with_vars t ~f)
-  | Dynamic_run (sw, sws) -> Dynamic_run (f sw, List.map sws ~f)
-  | Chdir (sw, t) -> Chdir (f sw, map_string_with_vars ~f t)
-  | Setenv (sw1, sw2, t) -> Setenv (f sw1, f sw2, map_string_with_vars t ~f)
-  | Redirect_out (o, sw, p, t) -> Redirect_out (o, f sw, p, map_string_with_vars t ~f)
-  | Redirect_in (i, sw, t) -> Redirect_in (i, f sw, t)
-  | Ignore (o, t) -> Ignore (o, map_string_with_vars t ~f)
-  | Progn xs -> Progn (List.map xs ~f:(map_string_with_vars ~f))
-  | Concurrent xs -> Concurrent (List.map xs ~f:(map_string_with_vars ~f))
-  | Echo xs -> Echo (List.map ~f xs)
-  | Cat xs -> Cat (List.map ~f xs)
-  | Copy (sw1, sw2) -> Copy (f sw1, f sw2)
-  | Symlink (sw1, sw2) -> Symlink (f sw1, f sw2)
-  | Copy_and_add_line_directive (sw1, sw2) -> Copy_and_add_line_directive (f sw1, f sw2)
-  | System sw -> System (f sw)
-  | Bash sw -> Bash (f sw)
-  | Write_file (sw1, perm, sw2) -> Write_file (f sw1, perm, f sw2)
-  | Mkdir sw -> Mkdir (f sw)
-  | Diff diff -> Diff (Diff.map diff ~path:f ~target:f)
-  | No_infer t -> No_infer (map_string_with_vars t ~f)
-  | Pipe (o, ts) -> Pipe (o, List.map ts ~f:(map_string_with_vars ~f))
-  | Cram sw -> Cram (f sw)
-  | Patch i -> Patch (f i)
-  | Substitute (i, o) -> Substitute (f i, f o)
+    With_accepted_exit_codes (lang, map t ~string_with_vars ~slang ~blang)
+  | Dynamic_run (sw, sws) ->
+    Dynamic_run (string_with_vars sw, List.map sws ~f:string_with_vars)
+  | Chdir (sw, t) -> Chdir (string_with_vars sw, map ~string_with_vars ~slang ~blang t)
+  | Setenv (sw1, sw2, t) ->
+    Setenv
+      (string_with_vars sw1, string_with_vars sw2, map t ~string_with_vars ~slang ~blang)
+  | Redirect_out (o, sw, p, t) ->
+    Redirect_out (o, string_with_vars sw, p, map t ~string_with_vars ~slang ~blang)
+  | Redirect_in (i, sw, t) -> Redirect_in (i, string_with_vars sw, t)
+  | Ignore (o, t) -> Ignore (o, map t ~string_with_vars ~slang ~blang)
+  | Progn xs -> Progn (List.map xs ~f:(map ~string_with_vars ~slang ~blang))
+  | Concurrent xs -> Concurrent (List.map xs ~f:(map ~string_with_vars ~slang ~blang))
+  | Echo xs -> Echo (List.map ~f:string_with_vars xs)
+  | Cat xs -> Cat (List.map ~f:string_with_vars xs)
+  | Copy (sw1, sw2) -> Copy (string_with_vars sw1, string_with_vars sw2)
+  | Symlink (sw1, sw2) -> Symlink (string_with_vars sw1, string_with_vars sw2)
+  | Copy_and_add_line_directive (sw1, sw2) ->
+    Copy_and_add_line_directive (string_with_vars sw1, string_with_vars sw2)
+  | System sw -> System (string_with_vars sw)
+  | Bash sw -> Bash (string_with_vars sw)
+  | Write_file (sw1, perm, sw2) ->
+    Write_file (string_with_vars sw1, perm, string_with_vars sw2)
+  | Mkdir sw -> Mkdir (string_with_vars sw)
+  | Diff diff -> Diff (Diff.map diff ~path:string_with_vars ~target:string_with_vars)
+  | No_infer t -> No_infer (map t ~string_with_vars ~slang ~blang)
+  | Pipe (o, ts) -> Pipe (o, List.map ts ~f:(map ~string_with_vars ~slang ~blang))
+  | Cram sw -> Cram (string_with_vars sw)
+  | Patch i -> Patch (string_with_vars i)
+  | Substitute (i, o) -> Substitute (string_with_vars i, string_with_vars o)
   | Withenv (ops, t) ->
     Withenv
-      ( List.map ops ~f:(fun (op : _ Env_update.t) -> { op with value = f op.value })
-      , map_string_with_vars t ~f )
+      ( List.map ops ~f:(fun (op : _ Env_update.t) ->
+          { op with value = string_with_vars op.value })
+      , map t ~string_with_vars ~slang ~blang )
   | When (condition, t) ->
     When
-      ( blang_map_string_with_vars condition ~f:(slang_map_string_with_vars ~f)
-      , map_string_with_vars t ~f )
-  | Format_dune_file (src, dst) -> Format_dune_file (f src, f dst)
+      ( blang condition |> blang_map_string_with_vars ~f:string_with_vars
+      , map t ~string_with_vars ~slang ~blang )
+  | Format_dune_file (src, dst) ->
+    Format_dune_file (string_with_vars src, string_with_vars dst)
 ;;
 
-let remove_locs = map_string_with_vars ~f:String_with_vars.remove_locs
+let remove_locs =
+  map
+    ~string_with_vars:String_with_vars.remove_locs
+    ~slang:Slang.remove_locs
+    ~blang:Slang.Blang.remove_locs
+;;
+
 let compare_no_locs t1 t2 = Poly.compare (remove_locs t1) (remove_locs t2)
 let equal_no_locs t1 t2 = Ordering.is_eq (compare_no_locs t1 t2)
 
 open Decoder
 
 let make_decode decode =
-  (let+ loc, action = located decode in
-   validate ~loc action;
-   action)
+  decode
   <|> let+ loc = loc in
       User_error.raise
         ~loc
@@ -628,6 +634,7 @@ let make_decode decode =
 
 let decode_dune_file = make_decode decode_dune_file
 let decode_pkg = make_decode decode_pkg
+let repr = Repr.view Dune_sexp.repr ~to_:encode
 let to_dyn a = to_dyn (encode a)
 let equal x y = Poly.equal x y
 let chdir dir t = Chdir (dir, t)

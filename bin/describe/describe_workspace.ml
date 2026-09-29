@@ -7,6 +7,16 @@ module Options = struct
     ; with_pps : bool
       (* whether to include the dependencies to ppx-rewriters (that are
        used at compile time) *)
+    ; no_recursive : bool
+      (* whether to only consider the provided directories and not descendants *)
+    ; split_public_names : bool
+      (* whether to report private names in the [name(s)] fields and public
+         names in a separate [public_name(s)] field, rather than reporting the
+         public name (falling back to the private name) in [name(s)] *)
+    ; with_origin_deps : bool
+      (* whether to include the dependencies of modules generated from [rule] stanzas *)
+    ; with_origin_deps_expanded : bool
+      (* whether to include the expanded dependencies of modules generated from [rule] stanzas *)
     }
 
   (* whether to sanitize absolute paths of workspace items, and their UIDs, to
@@ -19,7 +29,7 @@ module Options = struct
     & flag
     & info
         [ "with-deps" ]
-        ~doc:"Whether the dependencies between modules should be printed."
+        ~doc:(Some "Whether the dependencies between modules should be printed.")
   ;;
 
   let arg_with_pps =
@@ -29,8 +39,9 @@ module Options = struct
     & info
         [ "with-pps" ]
         ~doc:
-          "Whether the dependencies towards ppx-rewriters (that are called at compile \
-           time) should be taken into account."
+          (Some
+             "Whether the dependencies towards ppx-rewriters (that are called at compile \
+              time) should be taken into account.")
   ;;
 
   let arg_sanitize_for_tests =
@@ -40,16 +51,70 @@ module Options = struct
     & info
         [ "sanitize-for-tests" ]
         ~doc:
-          "Sanitize the absolute paths in workspace items, and the associated UIDs, so \
-           that the output is reproducible."
+          (Some
+             "Sanitize the absolute paths in workspace items, and the associated UIDs, \
+              so that the output is reproducible.")
+  ;;
+
+  let arg_no_recursive =
+    let open Arg in
+    value
+    & flag
+    & info
+        [ "no-recursive" ]
+        ~doc:
+          (Some
+             "Do not traverse subdirectories. Only consider the provided directories, or \
+              the workspace root when none are given.")
+  ;;
+
+  let arg_split_public_names =
+    let open Arg in
+    value
+    & flag
+    & info
+        [ "split-public-names" ]
+        ~doc:
+          (Some
+             "Report private names in the 'name'/'names' fields and public names in a \
+              separate 'public_name'/'public_names' field, rather than reporting the \
+              public name (falling back to the private name) in 'name'/'names'.")
+  ;;
+
+  let arg_with_origin_deps =
+    let open Arg in
+    value
+    & flag
+    & info
+        [ "with-origin-deps" ]
+        ~doc:(Some "Include dependencies of generated module sources.")
+  ;;
+
+  let arg_with_origin_deps_expanded =
+    let open Arg in
+    value
+    & flag
+    & info
+        [ "with-origin-deps-expanded" ]
+        ~doc:(Some "Include expanded dependencies of generated module sources.")
   ;;
 
   let arg : t Term.t =
     let+ with_deps = arg_with_deps
     and+ with_pps = arg_with_pps
-    and+ sanitize_for_tests_value = arg_sanitize_for_tests in
+    and+ sanitize_for_tests_value = arg_sanitize_for_tests
+    and+ no_recursive = arg_no_recursive
+    and+ split_public_names = arg_split_public_names
+    and+ with_origin_deps = arg_with_origin_deps
+    and+ with_origin_deps_expanded = arg_with_origin_deps_expanded in
     sanitize_for_tests := sanitize_for_tests_value;
-    { with_deps; with_pps }
+    { with_deps
+    ; with_pps
+    ; no_recursive
+    ; split_public_names
+    ; with_origin_deps
+    ; with_origin_deps_expanded
+    }
   ;;
 end
 
@@ -71,9 +136,9 @@ module Descr = struct
   (* Description of the dependencies of a module *)
   module Mod_deps = struct
     type t =
-      { for_intf : Dune_rules.Module_name.t list
+      { for_intf : Dune_lang.Module_name.t list
         (* direct module dependencies for the interface *)
-      ; for_impl : Dune_rules.Module_name.t list
+      ; for_impl : Dune_lang.Module_name.t list
         (* direct module dependencies for the implementation *)
       }
 
@@ -81,44 +146,80 @@ module Descr = struct
     let to_dyn { for_intf; for_impl } =
       let open Dyn in
       record
-        [ "for_intf", list Dune_rules.Module_name.to_dyn for_intf
-        ; "for_impl", list Dune_rules.Module_name.to_dyn for_impl
+        [ "for_intf", list Dune_lang.Module_name.to_dyn for_intf
+        ; "for_impl", list Dune_lang.Module_name.to_dyn for_impl
         ]
     ;;
   end
 
   (* Description of modules *)
   module Mod = struct
+    (* How the source files of a module came to exist in the build tree *)
+    module Origin = struct
+      type t =
+        | Source (* a plain source file written by the user *)
+        | Dune of
+            { dune_file : Path.t (* the dune file containing the generating rule *)
+            ; deps : Dep.t list option (* the rule's dependencies *)
+            ; expanded_deps : Path.t list option (* the rule's expanded dependencies *)
+            }
+          (* generated by a rule *)
+        | Ocamllex of Path.t (* generated by ocamllex; path to the .mll file *)
+        | Ocamlyacc of Path.t (* generated by ocamlyacc; path to the .mly file *)
+        | Menhir of Path.t (* generated by menhir; path to the .mly file *)
+        | Wrapper of Path.t
+      (* synthesised by dune itself for wrapping (alias, root, or
+           wrapped-compatibility module); path to the responsible dune file *)
+
+      let to_dyn : t -> Dyn.t =
+        let open Dyn in
+        function
+        | Source -> variant "source" []
+        | Dune { dune_file; deps; expanded_deps } ->
+          let fields =
+            [ Some ("dune_file", dyn_path dune_file)
+            ; Option.map deps ~f:(fun deps -> "deps", list (Repr.to_dyn Dep.repr) deps)
+            ; Option.map expanded_deps ~f:(fun expanded_deps ->
+                "expanded_deps", list dyn_path expanded_deps)
+            ]
+          in
+          variant "dune" [ record (List.filter_map ~f:Fun.id fields) ]
+        | Ocamllex p -> variant "ocamllex" [ dyn_path p ]
+        | Ocamlyacc p -> variant "ocamlyacc" [ dyn_path p ]
+        | Menhir p -> variant "menhir" [ dyn_path p ]
+        | Wrapper p -> variant "wrapper" [ dyn_path p ]
+      ;;
+    end
+
     type t =
-      { name : Dune_rules.Module_name.t (* name of the module *)
+      { name : Dune_lang.Module_name.t (* name of the module *)
       ; impl : Path.t option (* path to the .ml file, if any *)
       ; intf : Path.t option (* path to the .mli file, if any *)
       ; cmt : Path.t option (* path to the .cmt file, if any *)
       ; cmti : Path.t option (* path to the .cmti file, if any *)
+      ; origin : Origin.t (* how the module's source files were produced *)
       ; module_deps : Mod_deps.t (* direct module dependencies *)
       }
 
     (* Conversion to the [Dyn.t] type *)
-    let to_dyn { Options.with_deps; _ } { name; impl; intf; cmt; cmti; module_deps }
+    let to_dyn
+          { Options.with_deps; _ }
+          { name; impl; intf; cmt; cmti; origin; module_deps }
       : Dyn.t
       =
       let open Dyn in
       let optional_fields =
-        let module_deps =
-          if with_deps then Some ("module_deps", Mod_deps.to_dyn module_deps) else None
-        in
-        (* we build a list of options, that is later filtered, so that adding
-           new optional fields in the future can be done easily *)
-        match module_deps with
-        | None -> []
-        | Some module_deps -> [ module_deps ]
+        [ ("module_deps", if with_deps then Some (Mod_deps.to_dyn module_deps) else None)
+        ]
+        |> List.filter_map ~f:(fun (k, v) -> Option.map v ~f:(fun v -> k, v))
       in
       record
-      @@ [ "name", Dune_rules.Module_name.to_dyn name
+      @@ [ "name", Dune_lang.Module_name.to_dyn name
          ; "impl", option dyn_path impl
          ; "intf", option dyn_path intf
          ; "cmt", option dyn_path cmt
          ; "cmti", option dyn_path cmti
+         ; "origin", Origin.to_dyn origin
          ]
       @ optional_fields
     ;;
@@ -127,7 +228,10 @@ module Descr = struct
   (* Description of executables *)
   module Exe = struct
     type t =
-      { names : string list (* names of the executable *)
+      { names : string list (* private names of the executables *)
+      ; public_names : string option list option
+        (* public names of the executables, if the stanza declares any (one
+           entry per executable, [None] for those without a public name) *)
       ; requires : Digest.t list
         (* list of direct dependencies to libraries, identified by their
              digests *)
@@ -138,11 +242,21 @@ module Descr = struct
     let map_path t ~f = { t with include_dirs = List.map ~f t.include_dirs }
 
     (* Conversion to the [Dyn.t] type *)
-    let to_dyn options { names; requires; modules; include_dirs } : Dyn.t =
+    let to_dyn
+          (options : Options.t)
+          { names; public_names; requires; modules; include_dirs }
+      : Dyn.t
+      =
       let open Dyn in
+      let name_fields =
+        Describe_format.name_fields
+          ~split_public_names:options.split_public_names
+          ~names
+          ~public_names
+      in
       record
-        [ "names", List (List.map ~f:(fun name -> String name) names)
-        ; "requires", Dyn.(list string) (List.map ~f:Digest.to_string requires)
+      @@ name_fields
+      @ [ "requires", Dyn.(list string) (List.map ~f:Digest.to_string requires)
         ; "modules", list (Mod.to_dyn options) modules
         ; "include_dirs", list dyn_path include_dirs
         ]
@@ -153,7 +267,8 @@ module Descr = struct
 
   module Lib = struct
     type t =
-      { name : Lib_name.t (* name of the library *)
+      { name : Lib_name.t (* private name of the library *)
+      ; public_name : Lib_name.t option (* public name of the library, if any *)
       ; uid : Digest.t (* digest of the library *)
       ; local : bool (* whether this library is local *)
       ; requires : Digest.t list
@@ -169,14 +284,29 @@ module Descr = struct
       { t with source_dir = f t.source_dir; include_dirs = List.map ~f t.include_dirs }
     ;;
 
+    (* [best_name] is the public name when there is one, and the private name
+       otherwise *)
+    let best_name { name; public_name; _ } = Option.value public_name ~default:name
+
     (* Conversion to the [Dyn.t] type *)
-    let to_dyn options { name; uid; local; requires; source_dir; modules; include_dirs }
+    let to_dyn
+          options
+          ({ name; public_name; uid; local; requires; source_dir; modules; include_dirs }
+           as t)
       : Dyn.t
       =
       let open Dyn in
+      let name_fields =
+        if options.Options.split_public_names
+        then
+          [ "name", Lib_name.to_dyn name
+          ; "public_name", option Lib_name.to_dyn public_name
+          ]
+        else [ "name", Lib_name.to_dyn (best_name t) ]
+      in
       record
-        [ "name", Lib_name.to_dyn name
-        ; "uid", String (Digest.to_string uid)
+      @@ name_fields
+      @ [ "uid", String (Digest.to_string uid)
         ; "local", Bool local
         ; "requires", (list string) (List.map ~f:Digest.to_string requires)
         ; "source_dir", dyn_path source_dir
@@ -245,7 +375,7 @@ module Lang = struct
            & info
                [ "lang" ]
                ~docv:"VERSION"
-               ~doc:"Behave the same as this version of Dune.")
+               ~doc:(Some "Behave the same as this version of Dune."))
        in
        if v = (0, 1)
        then `Ok v
@@ -329,26 +459,119 @@ module Crawl = struct
     if Lib.is_local lib
     then (
       let source_dir = Lib_info.src_dir (Lib.info lib) in
-      Digest.generic (name, Path.to_string source_dir))
-    else Digest.generic name
+      Digest.Feed.compute_digest
+        (Digest.Feed.tuple2 Digest.Feed.string Digest.Feed.string)
+        (Lib_name.to_string name, Path.to_string source_dir))
+    else Digest.string (Lib_name.to_string name)
   ;;
 
-  let immediate_deps_of_module ~options ~obj_dir ~modules unit =
+  let immediate_deps_of_module ~sctx ~options ~obj_dir ~modules unit =
     match (options : Options.t) with
     | { with_deps = false; _ } ->
-      Action_builder.return { Ocaml.Ml_kind.Dict.intf = []; impl = [] }
+      Action_builder.return { Root.Ocaml.Ml_kind.Dict.intf = []; impl = [] }
     | { with_deps = true; _ } ->
       let deps ml_kind =
-        Dune_rules.Dep_rules.immediate_deps_of unit modules ~obj_dir ~ml_kind
+        Dune_rules.Dep_rules.read_immediate_deps_of
+          ~sandbox:Compilation_mode.default_sandbox
+          ~sctx
+          ~obj_dir
+          ~modules
+          ~ml_kind
+          unit
       in
       let open Action_builder.O in
       let+ intf, impl = Action_builder.both (deps Intf) (deps Impl) in
-      { Ocaml.Ml_kind.Dict.intf; impl }
+      { Root.Ocaml.Ml_kind.Dict.intf; impl }
+  ;;
+
+  (* The unpreprocessed source file of a module, preferring the implementation *)
+  let module_source_file (m : Module.t) =
+    match Module.source m ~ml_kind:Impl with
+    | Some _ as file -> file
+    | None -> Module.source m ~ml_kind:Intf
+  ;;
+
+  (* The dune file a location points into. This is where the stanza is actually
+     written, which is not necessarily [<dir>/dune] (e.g. a stanza declared
+     under a [(subdir ...)] lives in the parent directory's dune file). *)
+  let dune_file_of_loc loc = Path.of_string (Loc.start loc).Lexing.pos_fname
+
+  (* Determines how a module's source files were produced, from its [kind], the
+     [parser_gen_origins] map, or the rule that produces the source file. *)
+  let origin_of_module
+        ~(options : Options.t)
+        ~dune_file
+        ~parser_gen_origins
+        (m : Module.t)
+    : Descr.Mod.Origin.t Memo.t
+    =
+    let open Descr.Mod.Origin in
+    match Module.kind m with
+    | Alias _ | Root | Wrapped_compat -> Memo.return (Wrapper dune_file)
+    | Intf_only | Virtual | Impl | Impl_vmodule | Parameter ->
+      (match Dune_lang.Module_name.Path.Map.find parser_gen_origins (Module.path m) with
+       | Some kind ->
+         let ext, wrap =
+           let open Filename.Extension in
+           match (kind : Ml_sources.Parser_gen_origin.t) with
+           | Ocamllex -> mll, fun p -> Ocamllex p
+           | Ocamlyacc -> mly, fun p -> Ocamlyacc p
+           | Menhir -> mly, fun p -> Menhir p
+         in
+         let origin path =
+           (* Point at the source-tree generator input (e.g. [foo.mll]), like
+              the other generated-origin variants, rather than its build-tree
+              copy. *)
+           Path.set_extension (Module.File.path path) ~ext
+           |> Path.drop_optional_build_context
+           |> wrap
+         in
+         (match module_source_file m with
+          | Some file -> Memo.return (origin file)
+          | None -> Memo.return Source)
+       | None ->
+         (match module_source_file m with
+          | None -> Memo.return Source
+          | Some file ->
+            let path = Module.File.path file in
+            Load_rules.get_rule path
+            >>= (function
+             | None -> Memo.return Source
+             | Some rule ->
+               (* [rule.info] gives the dune file the rule is written in; a rule
+                  with no user-facing location (internal, or an empty loc) is
+                  attributed to the stanza's own dune file. A source-file copy is
+                  not really generated, so is reported as a plain source. *)
+               let mk_dune_origin dune_file =
+                 let+ deps, expanded_deps =
+                   match options.with_origin_deps_expanded, options.with_origin_deps with
+                   | false, false -> Memo.return (None, None)
+                   | false, true ->
+                     let+ _, deps =
+                       Action_builder.evaluate_and_collect_deps rule.action
+                     in
+                     Some (Dep.Set.to_list deps), None
+                   | true, with_deps ->
+                     let+ { Reflection.Rule.deps; expanded_deps; _ } =
+                       Reflection.evaluate_rule rule
+                     in
+                     let deps = if with_deps then Some (Dep.Set.to_list deps) else None in
+                     let expanded_deps = Some (Path.Set.to_list expanded_deps) in
+                     deps, expanded_deps
+                 in
+                 Dune { dune_file; deps; expanded_deps }
+               in
+               (match rule.info with
+                | From_dune_file loc when not (Loc.is_none loc) ->
+                  mk_dune_origin (dune_file_of_loc loc)
+                | From_dune_file _ | Internal -> mk_dune_origin dune_file
+                | Source_file_copy _ -> Memo.return Source))))
   ;;
 
   (* Builds the description of a module from a module and its object directory *)
   let module_
         ~obj_dir
+        ~origin
         ~(deps_for_intf : Module.t list)
         ~(deps_for_impl : Module.t list)
         (m : Module.t)
@@ -363,6 +586,7 @@ module Crawl = struct
     ; intf = source Intf
     ; cmt = cmt Impl
     ; cmti = cmt Intf
+    ; origin
     ; module_deps =
         { for_intf = List.map ~f:Module.name deps_for_intf
         ; for_impl = List.map ~f:Module.name deps_for_impl
@@ -371,16 +595,26 @@ module Crawl = struct
   ;;
 
   (* Builds the list of modules *)
-  let modules ~obj_dir ~deps_of modules_ : Descr.Mod.t list Memo.t =
+  let modules ~options ~obj_dir ~dune_file ~parser_gen_origins ~deps_of modules_
+    : Descr.Mod.t list Memo.t
+    =
     modules_
     |> Modules.With_vlib.drop_vlib
     |> Modules.fold ~init:(Memo.return []) ~f:(fun m macc ->
       let* acc = macc in
       let deps = deps_of m in
-      let+ { Ocaml.Ml_kind.Dict.intf = deps_for_intf; impl = deps_for_impl }, _ =
+      let* origin = origin_of_module ~options ~dune_file ~parser_gen_origins m in
+      let+ { Root.Ocaml.Ml_kind.Dict.intf = deps_for_intf; impl = deps_for_impl }, _ =
         Dune_engine.Action_builder.evaluate_and_collect_facts deps
       in
-      module_ ~obj_dir ~deps_for_intf ~deps_for_impl m :: acc)
+      module_ ~obj_dir ~origin ~deps_for_intf ~deps_for_impl m :: acc)
+  ;;
+
+  let for_ = Compilation_mode.Ocaml
+
+  let pp_map sctx preprocess =
+    let+ ocaml = Super_context.context sctx |> Context.ocaml in
+    Staged.unstage (Pp_spec.pped_modules_map preprocess ocaml.version)
   ;;
 
   (* Builds a workspace item for the provided executables object *)
@@ -392,43 +626,42 @@ module Crawl = struct
     >>= function
     | false -> Memo.return None
     | true ->
-      let first_exe = snd (Nonempty_list.hd exes.names) in
       let* scope =
         Scope.DB.find_by_project (Super_context.context sctx |> Context.name) project
       in
+      let* ml_sources = Dir_contents.get sctx ~dir >>= Dir_contents.ml ~for_ in
+      let parser_gen_origins = Ml_sources.parser_gen_origins ml_sources in
       let* modules_, obj_dir =
         let+ modules_, obj_dir =
-          Dir_contents.get sctx ~dir
-          >>= Dir_contents.ocaml
-          >>= Ml_sources.modules_and_obj_dir
-                ~libs:(Scope.libs scope)
-                ~for_:(Exe { first_exe })
+          Ml_sources.modules_and_obj_dir
+            ml_sources
+            ~libs:(Scope.libs scope)
+            ~for_:(Exe_target (Executables.exe_target exes))
         in
         Modules.With_vlib.modules modules_, obj_dir
       in
       let* pp_map =
-        let+ version =
-          let+ ocaml = Super_context.context sctx |> Context.ocaml in
-          ocaml.version
-        in
-        Staged.unstage
-        @@ Pp_spec.pped_modules_map
-             (Preprocess.Per_module.without_instrumentation exes.buildable.preprocess)
-             version
+        pp_map
+          sctx
+          (Dune_lang.Preprocess.Per_module.without_instrumentation
+             exes.buildable.preprocess.config)
       in
       let deps_of module_ =
         let module_ = pp_map module_ in
-        immediate_deps_of_module ~options ~obj_dir ~modules:modules_ module_
+        immediate_deps_of_module ~sctx ~options ~obj_dir ~modules:modules_ module_
       in
       let obj_dir = Obj_dir.of_local obj_dir in
-      let* modules_ = modules ~obj_dir ~deps_of modules_ in
+      let dune_file = dune_file_of_loc exes.buildable.loc in
+      let* modules =
+        modules ~options ~obj_dir ~dune_file ~parser_gen_origins ~deps_of modules_
+      in
       let+ requires =
         let* compile_info = Exe_rules.compile_info ~scope exes in
         let open Resolve.Memo.O in
-        let* requires = Lib.Compile.direct_requires compile_info in
+        let* requires = Lib.Compile.direct_requires compile_info ~for_ in
         if options.with_pps
         then
-          let+ pps = Lib.Compile.pps compile_info in
+          let+ pps = Lib.Compile.pps compile_info ~for_ in
           pps @ requires
         else Resolve.Memo.return requires
       in
@@ -437,9 +670,11 @@ module Crawl = struct
        | Ok libs ->
          let include_dirs = Obj_dir.all_cmis obj_dir in
          let exe_descr =
-           { Descr.Exe.names = List.map ~f:snd (Nonempty_list.to_list exes.names)
+           { Descr.Exe.names = Nonempty_list.to_list_map exes.names ~f:snd
+           ; public_names =
+               Option.map exes.public_names ~f:(Nonempty_list.to_list_map ~f:snd)
            ; requires = List.map ~f:uid_of_library libs
-           ; modules = modules_
+           ; modules
            ; include_dirs
            }
          in
@@ -448,55 +683,62 @@ module Crawl = struct
 
   (* Builds a workspace item for the provided library object *)
   let library sctx ~options (lib : Lib.t) : Descr.Item.t option Memo.t =
-    let* requires = Lib.requires lib in
+    let* requires = Lib.requires lib ~for_ in
     match Resolve.peek requires with
     | Error () -> Memo.return None
     | Ok requires ->
-      let name = Lib.name lib in
       let info = Lib.info lib in
+      let name = Lib_id.name (Lib_info.lib_id info) in
+      let public_name =
+        match Lib_info.status info with
+        | Public _ | Installed _ -> Some (Lib.name lib)
+        | Private _ | Installed_private _ -> None
+      in
       let src_dir = Lib_info.src_dir info in
       let obj_dir = Lib_info.obj_dir info in
       let+ modules_ =
         match Lib.is_local lib with
         | false -> Memo.return []
         | true ->
+          let* ml_sources =
+            Dir_contents.get sctx ~dir:(Path.as_in_build_dir_exn src_dir)
+            >>= Dir_contents.ml ~for_
+          in
+          let parser_gen_origins = Ml_sources.parser_gen_origins ml_sources in
           (* XXX why do we have a second object directory? *)
           let* modules_, obj_dir_ =
             let* libs =
               Scope.DB.find_by_dir (Path.as_in_build_dir_exn src_dir) >>| Scope.libs
             in
             let+ modules_, obj_dir_ =
-              Dir_contents.get sctx ~dir:(Path.as_in_build_dir_exn src_dir)
-              >>= Dir_contents.ocaml
-              >>= Ml_sources.modules_and_obj_dir
-                    ~libs
-                    ~for_:(Library (Lib_info.lib_id info |> Lib_id.to_local_exn))
+              Ml_sources.modules_and_obj_dir
+                ml_sources
+                ~libs
+                ~for_:(Library (Lib_info.lib_id info |> Lib_id.to_local_exn))
             in
             Modules.With_vlib.modules modules_, obj_dir_
           in
           let* pp_map =
-            let+ version =
-              let+ ocaml = Super_context.context sctx |> Context.ocaml in
-              ocaml.version
-            in
-            Staged.unstage
-            @@ Pp_spec.pped_modules_map
-                 (Preprocess.Per_module.without_instrumentation
-                    (Lib_info.preprocess info))
-                 version
+            pp_map
+              sctx
+              (Dune_lang.Preprocess.Per_module.without_instrumentation
+                 (Lib_info.preprocess info ~for_))
           in
           let deps_of module_ =
             immediate_deps_of_module
+              ~sctx
               ~options
               ~obj_dir:obj_dir_
               ~modules:modules_
               (pp_map module_)
           in
-          modules ~obj_dir ~deps_of modules_
+          let dune_file = dune_file_of_loc (Lib_info.loc info) in
+          modules ~options ~obj_dir ~dune_file ~parser_gen_origins ~deps_of modules_
       in
       let include_dirs = Obj_dir.all_cmis obj_dir in
       let lib_descr =
         { Descr.Lib.name
+        ; public_name
         ; uid = uid_of_library lib
         ; local = Lib.is_local lib
         ; requires = List.map requires ~f:uid_of_library
@@ -510,24 +752,29 @@ module Crawl = struct
 
   (* [source_path_is_in_dirs dirs p] tests whether the source path [p] is a
      descendant of some of the provided directory [dirs]. If [dirs = None],
-     then it always succeeds. If [dirs = Some l], then a matching directory is
-     search in the list [l]. *)
-  let source_path_is_in_dirs dirs (p : Path.Source.t) =
+     then it always succeeds, unless [options.no_recursive] is set in which
+     case it only matches the workspace root. If [dirs = Some l], then a
+     matching directory is search in the list [l]. *)
+  let source_path_is_in_dirs ~no_recursive dirs (p : Path.Source.t) =
     match dirs with
-    | None -> true
-    | Some dirs -> List.exists ~f:(fun dir -> Path.Source.is_descendant p ~of_:dir) dirs
+    | None -> if no_recursive then Path.Source.equal p Path.Source.root else true
+    | Some dirs ->
+      if no_recursive
+      then List.exists ~f:(fun dir -> Path.Source.equal p dir) dirs
+      else List.exists ~f:(fun dir -> Path.Source.is_descendant p ~of_:dir) dirs
   ;;
 
   (* Tests whether a dune file is located in a path that is a descendant of
      some directory *)
-  let dune_file_is_in_dirs dirs dune_file =
-    Dune_file.dir dune_file |> source_path_is_in_dirs dirs
+  let dune_file_is_in_dirs ~no_recursive dirs dune_file =
+    Dune_file.dir dune_file |> source_path_is_in_dirs ~no_recursive dirs
   ;;
 
   (* Tests whether a library is located in a path that is a descendant of some
      directory *)
-  let lib_is_in_dirs dirs (lib : Lib.t) =
+  let lib_is_in_dirs ~no_recursive dirs (lib : Lib.t) =
     source_path_is_in_dirs
+      ~no_recursive
       dirs
       (Path.drop_build_context_exn @@ Lib_info.best_src_dir @@ Lib.info lib)
   ;;
@@ -548,11 +795,13 @@ module Crawl = struct
         dirs
     : Descr.Workspace.t Memo.t
     =
+    let { Options.no_recursive; _ } = options in
     let context_name = Context.name context in
     let sctx = Context_name.Map.find_exn scontexts context_name in
     let open Memo.O in
     let* dune_files =
-      Dune_load.dune_files context_name >>| List.filter ~f:(dune_file_is_in_dirs dirs)
+      Dune_load.dune_files context_name
+      >>| List.filter ~f:(dune_file_is_in_dirs ~no_recursive dirs)
     in
     let* exes, exe_libs =
       (* the list of workspace items that describe executables, and the list of
@@ -586,13 +835,13 @@ module Crawl = struct
         >>| Scope.libs
         >>= Lib.DB.all)
       >>| Lib.Set.union_all
-      >>| Lib.Set.filter ~f:(lib_is_in_dirs dirs)
+      >>| Lib.Set.filter ~f:(lib_is_in_dirs ~no_recursive dirs)
     in
     let+ libs =
       (* the executables' libraries, and the project's libraries *)
       Lib.Set.union exe_libs project_libs
-      |> Lib.Set.to_list
-      |> Lib.descriptive_closure ~with_pps:options.with_pps
+      |> Lib.Set.to_list (* TODO(anmonteiro): support Melange *)
+      |> Lib.descriptive_closure ~with_pps:options.with_pps ~for_
       >>= Memo.parallel_map ~f:(library ~options sctx)
       >>| List.filter_opt
     in
@@ -603,11 +852,11 @@ module Crawl = struct
 end
 
 let find_dir common dir =
-  let p = Path.Source.(relative root) (Common.prefix_target common dir) in
+  let p = Common.source_path common dir in
   let s = Path.source p in
-  if not @@ Path.exists s
+  if not @@ Fpath.exists (Path.to_string s)
   then User_error.raise [ Pp.textf "No such file or directory: %s" (Path.to_string s) ];
-  if not @@ Path.is_directory s
+  if not @@ Fpath.is_directory (Path.to_string s)
   then
     User_error.raise
       [ Pp.textf "File exists, but is not a directory: %s" (Path.to_string s) ];
@@ -624,13 +873,14 @@ let term : unit Term.t =
           []
           ~docv:"DIRS"
           ~doc:
-            "prints a description of the workspace's structure. If some directories DIRS \
-             are provided, then only those directories of the workspace are considered.")
-  and+ context_name = Common.context_arg ~doc:"Build context to use."
+            (Some
+               "prints a description of the workspace's structure. If some directories \
+                DIRS are provided, then only those directories of the workspace are \
+                considered."))
+  and+ context_name = Common.context_arg ~doc:(Some "Build context to use.")
   and+ format = Describe_format.arg
   and+ lang = Lang.arg
   and+ options = Options.arg in
-  let common, config = Common.init builder in
   let dirs =
     let args = "workspace" :: what in
     let parse =
@@ -639,7 +889,7 @@ let term : unit Term.t =
       let open Dune_lang.Decoder in
       fields
       @@ field "workspace"
-      @@ let+ dirs = repeat relative_file in
+      @@ let+ dirs = repeat string in
          (* [None] means that all directories should be accepted,
             whereas [Some l] means that only the directories in the
             list [l] should be accepted. The checks on whether the
@@ -655,25 +905,18 @@ let term : unit Term.t =
     in
     Dune_lang.Decoder.parse parse Univ_map.empty ast
   in
-  Scheduler.go ~common ~config
-  @@ fun () ->
-  let open Fiber.O in
-  let* setup = Import.Main.setup () in
-  build_exn
-  @@ fun () ->
-  let open Memo.O in
-  let* setup = setup in
-  let super_context = Import.Main.find_scontext_exn setup ~name:context_name in
-  let context = Super_context.context super_context in
-  let* findlib_paths = Context.findlib_paths context in
-  (* prefix directories with the workspace root, so that the
-     command also works correctly when it is run from a
-     subdirectory *)
-  Memo.Option.map dirs ~f:(Memo.List.map ~f:(find_dir common))
-  >>= Crawl.workspace options setup context
-  >>| Sanitize_for_tests.Workspace.sanitize ~findlib_paths
-  >>| Descr.Workspace.to_dyn options
-  >>| Describe_format.print_dyn format
+  Build.describe builder ~context_name (fun common setup super_context ->
+    let open Memo.O in
+    let context = Super_context.context super_context in
+    let* findlib_paths = Context.findlib_paths context in
+    (* prefix directories with the workspace root, so that the
+       command also works correctly when it is run from a
+       subdirectory *)
+    Memo.Option.map dirs ~f:(Memo.List.map ~f:(find_dir common))
+    >>= Crawl.workspace options setup context
+    >>| Sanitize_for_tests.Workspace.sanitize ~findlib_paths
+    >>| Descr.Workspace.to_dyn options
+    >>| Describe_format.print_dyn format)
 ;;
 
 let command =

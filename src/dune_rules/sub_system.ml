@@ -82,9 +82,8 @@ module Register_backend (M : Backend) = struct
   open Selection_error
 
   let written_by_user_or_scan ~written_by_user ~to_scan =
-    (match written_by_user with
-     | Some l -> Memo.return l
-     | None -> Memo.parallel_map to_scan ~f:get >>| List.filter_opt)
+    Memo.Option.value written_by_user ~default:(fun () ->
+      Memo.parallel_map to_scan ~f:get >>| List.filter_opt)
     >>| function
     | [] -> Error No_backend_found
     | l -> Ok l
@@ -135,8 +134,8 @@ module Register_end_point (M : End_point) = struct
   let gen info (c : Library_compilation_context.t) =
     let* backends =
       let ( let& ) t f = Resolve.Memo.bind t ~f in
-      let& deps = Lib.Compile.direct_requires c.compile_info in
-      let& pps = Lib.Compile.pps c.compile_info in
+      let& deps = Lib.Compile.direct_requires c.compile_info ~for_:c.for_ in
+      let& pps = Lib.Compile.pps c.compile_info ~for_:c.for_ in
       let& written_by_user =
         match M.Info.backends info with
         | None -> Memo.return (Resolve.return None)

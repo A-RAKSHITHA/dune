@@ -9,7 +9,7 @@ let meta_file ~dir { name; libraries = _; site = _, (pkg, site); _ } =
     ; Package.Name.to_string pkg
     ; Site.to_string site
     ; Package.Name.to_string name
-    ; Dune_findlib.Package.meta_fn
+    ; Dune_findlib.Package.meta_fn |> Filename.to_string
     ]
 ;;
 
@@ -17,14 +17,11 @@ let resolve_libs t public_libs =
   Resolve.Memo.List.map t.libraries ~f:(Lib.DB.resolve public_libs)
 ;;
 
+let public_libs sctx = Super_context.context sctx |> Context.name |> Scope.DB.public_libs
+
 let setup_rules ~sctx ~dir t =
   (let open Action_builder.O in
-   let* public_libs =
-     Super_context.context sctx
-     |> Context.name
-     |> Scope.DB.public_libs
-     |> Action_builder.of_memo
-   in
+   let* public_libs = Action_builder.of_memo (public_libs sctx) in
    Resolve.Memo.read
    @@
    let open Resolve.Memo.O in
@@ -42,9 +39,7 @@ let setup_rules ~sctx ~dir t =
 
 let install_rules ~sctx ~package_db ~dir ({ name; site = loc, (pkg, site); _ } as t) =
   let* skip_files =
-    let* public_libs =
-      Super_context.context sctx |> Context.name |> Scope.DB.public_libs
-    in
+    let* public_libs = public_libs sctx in
     if t.optional
     then Resolve.Memo.is_error (resolve_libs t public_libs)
     else Memo.return false
@@ -55,11 +50,15 @@ let install_rules ~sctx ~package_db ~dir ({ name; site = loc, (pkg, site); _ } a
     let meta = meta_file ~dir t in
     let+ entry =
       Install_entry_with_site.make_with_site
-        ~dst:(sprintf "%s/%s" (Package.Name.to_string name) Dune_findlib.Package.meta_fn)
+        ~dst:
+          (sprintf
+             "%s/%s"
+             (Package.Name.to_string name)
+             (Dune_findlib.Package.meta_fn |> Filename.to_string))
         (Site { pkg; site; loc })
         (Package_db.section_of_site package_db)
-        ~kind:`File
+        ~kind:File
         meta
     in
-    [ Install.Entry.Sourced.create ~loc entry ])
+    [ Install.Entry.Sourced.Unexpanded.create ~loc entry ])
 ;;

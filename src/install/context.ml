@@ -18,14 +18,17 @@ let lib_dir ~context ~package =
 ;;
 
 let of_path path =
-  match Dune_engine.Dpath.analyse_dir (Path.build path) with
-  | Build (Regular (With_context (name, src))) ->
+  match Dune_engine.Dpath.Target_dir.of_target path with
+  | Regular (With_context (name, src)) ->
     Some
       (if Context_name.equal name install_context.name
-       then Context_name.of_string (Path.Source.basename src)
+       then (
+         match Path.Source.split_first_component src with
+         | Some (ctx, _) -> Context_name.of_string (Filename.to_string ctx)
+         | None -> name)
        else name)
-  | Build (Anonymous_action (With_context (name, _))) -> Some name
-  | _ -> None
+  | Anonymous_action (With_context (name, _)) -> Some name
+  | Regular Root | Anonymous_action Root | Invalid _ -> None
 ;;
 
 type analyze_path =
@@ -39,5 +42,6 @@ let analyze_path ctx_name source =
   | true ->
     (match Path.Source.split_first_component source with
      | None -> Invalid
-     | Some (ctx, path) -> Install (Context_name.of_string ctx, Path.Source.of_local path))
+     | Some (ctx, path) ->
+       Install (Context_name.of_string (Filename.to_string ctx), Path.Source.of_local path))
 ;;

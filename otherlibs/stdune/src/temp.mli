@@ -10,14 +10,14 @@ type what =
 
 (** Create a temporary file or directory inside an existing directory. *)
 val temp_in_dir
-  :  ?perms:int
+  :  ?perms:Permissions.Mode.t
   -> what
   -> dir:Path.t
   -> prefix:string
   -> suffix:string
   -> Path.t
 
-val create : ?perms:int -> what -> prefix:string -> suffix:string -> Path.t
+val create : ?perms:Permissions.Mode.t -> what -> prefix:string -> suffix:string -> Path.t
 val destroy : what -> Path.t -> unit
 
 (** Delete the contents of a temporary directory without deleting the directory
@@ -32,6 +32,8 @@ val clear_dir : Path.t -> unit
     safely use any file name there. *)
 val temp_file : dir:Path.t -> prefix:string -> suffix:string -> Path.t
 
+val temp_dir : parent_dir:Path.t -> prefix:string -> suffix:string -> Path.t
+
 (** Like [temp_file], but passes the temporary file to the callback [f], and
     makes sure the temporary file is deleted when [f] completes. If [f] raises
     an exception, the exception is re-raised (and the file is still deleted). *)
@@ -40,6 +42,19 @@ val with_temp_file
   -> prefix:string
   -> suffix:string
   -> f:(Path.t Or_exn.t -> 'a)
+  -> 'a
+
+(** Like [with_temp_file], but keeps the write-only creation descriptor open.
+    [perm] defaults to [Permissions.Mode.private_file] and is subject to umask.
+    The callback must not close the descriptor. It is closed before the temporary
+    name is removed, whether the callback returns or raises. *)
+val with_temp_file_fd
+  :  ?perm:Permissions.Mode.t
+  -> dir:Path.t
+  -> prefix:string
+  -> suffix:string
+  -> f:((Path.t * Fd.t) Or_exn.t -> 'a)
+  -> unit
   -> 'a
 
 (** Like [with_temp_file], but creates a temporary directory. *)

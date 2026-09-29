@@ -1,18 +1,17 @@
 Test that Dune mkdirs the right set of directories in the sandbox.
 
-  $ . ./helpers.sh
-
 ----------------------------------------------------------------------------------
 * Compile a simple rule
 
-  $ echo "(lang dune 2.0)" > dune-project
+  $ make_dune_project 2.0
 
   $ mkdir test
+  $ touch test/baz
   $ cat >test/dune <<EOF
   > (rule
   >  (target target)
   >  (mode promote)
-  >  (deps (sandbox always))
+  >  (deps (sandbox always) baz)
   >  (action (chdir subdir (system "echo hello > ../target; pwd"))))
   > EOF
 
@@ -26,12 +25,11 @@ Test that Dune mkdirs the right set of directories in the sandbox.
 Now force a rebuild. This succeeds (in the past it could fail due to [mkdir]
 memoization).
 
-  $ rm _build/default/test/target test/target
+  $ echo foo > test/baz
   $ build test
   Success
 
-  $ with_timeout dune shutdown
-  $ cat .#dune-output | sed -e 's#.sandbox/[^/]*/default/test/subdir#.sandbox/<hash>/default/test/subdir#'
+  $ stop_dune | sed -e 's#.sandbox/[^/]*/default/test/subdir#.sandbox/<hash>/default/test/subdir#'
   $TESTCASE_ROOT/_build/.sandbox/<hash>/default/test/subdir
   Success, waiting for filesystem changes...
   $TESTCASE_ROOT/_build/.sandbox/<hash>/default/test/subdir

@@ -75,6 +75,8 @@ module Spec = struct
 
   let name = "source-fetch"
   let version = 2
+  let runs_process = false
+  let can_run_in_action_runner = false
   let bimap t _ g = { t with target = g t.target }
   let is_useful_to ~memoize = memoize
 
@@ -99,6 +101,7 @@ module Spec = struct
   let action { target; url = loc_url, url; checksum; kind } ~ectx:_ ~eenv:_ =
     let open Fiber.O in
     let* () = Fiber.return () in
+    let target = Path.build target in
     (let checksum = Option.map checksum ~f:snd in
      Dune_pkg.Fetch.fetch
        ~unpack:
@@ -106,7 +109,7 @@ module Spec = struct
           | `File -> false
           | `Directory -> true)
        ~checksum
-       ~target:(Path.build target)
+       ~target
        ~url:(loc_url, url))
     >>= function
     | Ok () -> Fiber.return ()
@@ -117,6 +120,7 @@ module Spec = struct
            ~loc:loc_url
            [ Pp.text "No checksum provided. It should be:"; Checksum.pp actual_checksum ]
        | Some (loc, _) ->
+         let loc = Dune_pkg.Lock_dir.loc_in_source_tree loc in
          User_error.raise
            ~loc
            [ Pp.text "Invalid checksum, got"; Dune_pkg.Checksum.pp actual_checksum ])
@@ -133,25 +137,25 @@ module A = Action_ext.Make (Spec)
 let action ~url ~checksum ~target ~kind = A.action { Spec.target; checksum; url; kind }
 
 let extract_checksums_and_urls (lockdir : Dune_pkg.Lock_dir.t) =
-  Package.Name.Map.fold
-    lockdir.packages
-    ~init:(Checksum.Map.empty, Dune_digest.Map.empty)
-    ~f:(fun package acc ->
-      let sources =
-        let sources = package.info.extra_sources |> List.rev_map ~f:snd in
-        match package.info.source with
-        | None -> sources
-        | Some source -> source :: sources
-      in
-      List.fold_left sources ~init:acc ~f:(fun (checksums, urls) (source : Source.t) ->
-        match Source.kind source with
-        | `Directory_or_archive _ -> checksums, urls
-        | `Fetch ->
-          let url = source.url in
-          (match source.checksum with
-           | Some ((_, checksum) as checksum_with_loc) ->
-             Checksum.Map.set checksums checksum (url, checksum_with_loc), urls
-           | None -> checksums, Digest.Map.set urls (digest_of_url (snd url)) url)))
+  Dune_pkg.Lock_dir.Packages.to_pkg_list lockdir.packages
+  |> List.fold_left
+       ~init:(Checksum.Map.empty, Dune_digest.Map.empty)
+       ~f:(fun acc (package : Lock_dir.Pkg.t) ->
+         let sources =
+           let sources = package.info.extra_sources |> List.rev_map ~f:snd in
+           match package.info.source with
+           | None -> sources
+           | Some source -> source :: sources
+         in
+         List.fold_left sources ~init:acc ~f:(fun (checksums, urls) (source : Source.t) ->
+           match Source.kind source with
+           | `Directory_or_archive _ -> checksums, urls
+           | `Fetch ->
+             let url = source.url in
+             (match source.checksum with
+              | Some ((_, checksum) as checksum_with_loc) ->
+                Checksum.Map.set checksums checksum (url, checksum_with_loc), urls
+              | None -> checksums, Digest.Map.set urls (digest_of_url (snd url)) url)))
 ;;
 
 let find_checksum, find_url =
@@ -160,20 +164,35 @@ let find_checksum, find_url =
     Checksum.Map.superpose checksums checksums', Digest.Map.superpose urls urls'
   in
   let all =
-    Memo.lazy_ (fun () ->
+    Memo.lazy_ ~name:"all-fetches" (fun () ->
       let* init =
         Memo.List.fold_left
           Dune_pkg.Dev_tool.all
           ~init:(Checksum.Map.empty, Digest.Map.empty)
           ~f:(fun acc dev_tool ->
-            Fs_memo.dir_exists
-              (In_source_dir (Dune_pkg.Lock_dir.dev_tool_lock_dir_path dev_tool))
-            >>= function
+            let dir = Lock_dir.dev_tool_external_lock_dir dev_tool in
+            let exists =
+              (* Note we use [Fpath.exists] here rather than [Fs_memo] because a
+                 tool's lockdir may be generated part way through a build. *)
+              Fpath.exists (Path.to_string (Path.external_ dir))
+            in
+            match exists with
             | false -> Memo.return acc
             | true -> Lock_dir.of_dev_tool dev_tool >>| add_checksums_and_urls acc)
       in
       Per_context.list ()
-      >>= Memo.parallel_map ~f:Lock_dir.get
+      >>= Memo.parallel_map ~f:(fun ctx_name ->
+        let* active = Lock_dir.lock_dir_active ctx_name in
+        match active with
+        | true -> Lock_dir.get ctx_name
+        | false ->
+          Memo.return
+          @@ Error
+               (User_message.make
+                  [ Pp.textf
+                      "Context %S has no lock dir"
+                      (Context_name.to_string ctx_name)
+                  ]))
       >>| List.filter_map ~f:Result.to_option
       >>| List.fold_left ~init ~f:add_checksums_and_urls)
   in
@@ -194,6 +213,7 @@ let find_checksum, find_url =
 ;;
 
 let gen_rules_for_checksum_or_url (loc_url, (url : OpamUrl.t)) checksum =
+  let loc_url = Dune_pkg.Lock_dir.loc_in_source_tree loc_url in
   let checksum_or_url =
     match checksum with
     | Some (_, checksum) -> `Checksum checksum
@@ -206,8 +226,7 @@ let gen_rules_for_checksum_or_url (loc_url, (url : OpamUrl.t)) checksum =
   let rules =
     Rules.collect_unit
     @@ fun () ->
-    let* url = resolve_url url in
-    (* CR-rgrinberg: it's possible to share the downloading step between the
+    (* CR-someday rgrinberg: it's possible to share the downloading step between the
        directory and file actions. Though it's unlikely to be of any use in real
        world situations. *)
     let rule =
@@ -216,11 +235,18 @@ let gen_rules_for_checksum_or_url (loc_url, (url : OpamUrl.t)) checksum =
         Rules.Produce.rule (Rule.make ~info ~targets build)
     in
     let make_target = make_target checksum_or_url in
-    let action ~target ~kind =
-      action ~url:(loc_url, url) ~checksum ~target ~kind
-      |> Action.Full.make ~can_go_in_shared_cache:true
-      |> Action_builder.return
-      |> Action_builder.with_no_targets
+    let action =
+      let url =
+        let open Action_builder.O in
+        let* () = Action_builder.return () in
+        Action_builder.of_memo (resolve_url url)
+      in
+      fun ~target ~kind ->
+        Action_builder.with_no_targets
+          (let open Action_builder.O in
+           let+ url = url in
+           action ~url:(loc_url, url) ~checksum ~target ~kind
+           |> Action.Full.make ~can_go_in_shared_cache:true)
     in
     let dir_rule =
       let target = make_target ~kind:`Directory in
@@ -240,21 +266,13 @@ let gen_rules_for_checksum_or_url (loc_url, (url : OpamUrl.t)) checksum =
 ;;
 
 let gen_rules ~dir ~components =
+  let components = Filename.L.to_string components in
   match components with
   | [] ->
-    Memo.return Rules.empty
-    |> Gen_rules.make
-         ~build_dir_only_sub_dirs:
-           (Gen_rules.Build_only_sub_dirs.singleton
-              ~dir
-              (Subdir_set.of_list [ "checksum"; "url" ]))
+    Subdir_set.of_list [ Filename.checksum; Filename.url ]
+    |> Gen_rules.make_empty ~dir
     |> Memo.return
-  | [ ("url" | "checksum") ] ->
-    Memo.return Rules.empty
-    |> Gen_rules.make
-         ~build_dir_only_sub_dirs:
-           (Gen_rules.Build_only_sub_dirs.singleton ~dir Subdir_set.all)
-    |> Memo.return
+  | [ ("url" | "checksum") ] -> Gen_rules.make_empty ~dir Subdir_set.all |> Memo.return
   | [ "checksum"; checksum ] ->
     let checksum = Dune_pkg.Checksum.parse_string_exn (Loc.none, checksum) in
     let+ url, checksum = find_checksum checksum in
@@ -278,6 +296,8 @@ module Copy = struct
 
     let name = "copy-dir"
     let version = 2
+    let runs_process = false
+    let can_run_in_action_runner = false
     let bimap t f g = { src_dir = f t.src_dir; dst_dir = g t.dst_dir }
     let is_useful_to ~memoize = memoize
 
@@ -294,11 +314,12 @@ module Copy = struct
         ~init:()
         ~dir:(Path.to_string src_dir)
         ~on_dir:(fun ~dir fname () ->
-          Path.L.relative dst_dir [ dir; fname ] |> Path.mkdir_p)
+          Path.relative_fname (Path.relative dst_dir dir) fname |> Path.mkdir_p)
         ~on_file:(fun ~dir fname () ->
-          let src = Path.L.relative src_dir [ dir; fname ] in
-          let dst = Path.L.relative dst_dir [ dir; fname ] in
+          let src = Path.relative_fname (Path.relative src_dir dir) fname in
+          let dst = Path.relative_fname (Path.relative dst_dir dir) fname in
           Io.copy_file ~src ~dst ())
+        ()
     ;;
   end
 

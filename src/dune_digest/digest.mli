@@ -1,8 +1,55 @@
 open Stdune
 
-(** Digests (MD5) *)
+(** Digests (BLAKE3) *)
 
 type t
+
+module Feed : sig
+  type digest := t
+  type hasher
+
+  (** Type for incrementally building up the computation of a hash. A ['a t]
+      can consume a value of type ['a] and incorporate it into a hash value. *)
+  type 'a t = hasher -> 'a -> unit
+
+  val contramap : 'a t -> f:('b -> 'a) -> 'b t
+  val string : string t
+  val bool : bool t
+  val int : int t
+  val repr : 'a Repr.t -> 'a t
+  val list : 'a t -> 'a list t
+  val option : 'a t -> 'a option t
+  val tuple2 : 'a t -> 'b t -> ('a * 'b) t
+  val tuple3 : 'a t -> 'b t -> 'c t -> ('a * 'b * 'c) t
+
+  (** Feed a digest into a hasher. *)
+  val digest : digest t
+
+  (** Compute the digest of a value given a feed for the type of that value. *)
+  val compute_digest : 'a t -> 'a -> digest
+end
+
+module Manual : sig
+  (** A manual API for constucting a digest without allocating. Not thread safe *)
+  type digest := t
+
+  type t
+
+  val create : unit -> t
+  val bool : t -> bool -> unit
+  val int : t -> int -> unit
+  val string : t -> string -> unit
+
+  (** Feed the same representation as [string t (left ^ separator ^ right)]
+      without constructing the concatenated string. *)
+  val string_with_separator : t -> string -> separator:string -> string -> unit
+
+  val option : t -> f:(t -> 'a -> unit) -> 'a option -> unit
+  val list : t -> f:(t -> 'a -> unit) -> 'a list -> unit
+  val repr : t -> 'a Repr.t -> 'a -> unit
+  val digest : t -> digest -> unit
+  val get : t -> digest
+end
 
 include Comparable_intf.S with type key := t
 
@@ -13,9 +60,10 @@ val compare : t -> t -> Ordering.t
 val to_string : t -> string
 val from_hex : string -> t option
 val file : Path.t -> t
+val file_async : Path.t -> t Fiber.t
 val string : string -> t
 val to_string_raw : t -> string
-val generic : 'a -> t
+val repr : 'a Repr.t -> 'a -> t
 
 (** The subset of fields of [Unix.stats] used by this module.
 
@@ -24,16 +72,17 @@ val generic : 'a -> t
 module Stats_for_digest : sig
   type t =
     { st_kind : Unix.file_kind
-    ; st_perm : Unix.file_perm
+    ; executable : bool
     }
 
   val of_unix_stats : Unix.stats -> t
+  val of_time_stat : Stat.t -> t
 end
 
 module Path_digest_error : sig
   type nonrec t =
     | Unexpected_kind
-    | Unix_error of Dune_filesystem_stubs.Unix_error.Detailed.t
+    | Unix_error of Unix_error.Detailed.t
     (** A Unix error, e.g., [(ENOENT, _, _)] if the path doesn't exist. *)
 end
 
@@ -57,16 +106,14 @@ val path_with_stats
   -> Stats_for_digest.t
   -> (t, Path_digest_error.t) result
 
+val path_with_stats_async
+  :  allow_dirs:bool
+  -> Path.t
+  -> Stats_for_digest.t
+  -> (t, Path_digest_error.t) result Fiber.t
+
 (** Digest a file taking the [executable] bit into account. Should not be called
-    on a directory. *)
-val file_with_executable_bit : executable:bool -> Path.t -> t
-
-(** Override the implementations of digest computation. Can be used to record
-    the reverse digest map. *)
-val override_impl : file:(string -> t) -> string:(string -> t) -> unit
-
-(** [Direct_impl] does a plain hashing, with no heed to the overrides given by
-    [override_impl]. *)
-module Direct_impl : sig
-  val string : string -> t
-end
+    on a directory. Digesting is done in the background thread pool, with the
+    number of concurrent calls capped by a global throttle so that we do not
+    exceed the process's open file descriptor limit. *)
+val file_with_executable_bit : executable:bool -> Path.t -> t Fiber.t

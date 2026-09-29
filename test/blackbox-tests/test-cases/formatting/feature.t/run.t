@@ -31,38 +31,91 @@ Formatting can be checked using the @fmt target:
   > EOF
   $ dune build @fmt
   File "enabled/dune", line 1, characters 0-0:
-  Error: Files _build/default/enabled/dune and
-  _build/default/enabled/.formatted/dune differ.
+  --- enabled/dune
+  +++ enabled/dune.corrected
+  @@ -1,7 +1,2 @@
+   (library
+  -
+  -(name
+  -lib_reason
+  -
+  -)
+  -)
+  + (name lib_reason))
   File "enabled/ocaml_file.ml", line 1, characters 0-0:
-  Error: Files _build/default/enabled/ocaml_file.ml and
-  _build/default/enabled/.formatted/ocaml_file.ml differ.
+  --- enabled/ocaml_file.ml
+  +++ enabled/ocaml_file.ml.corrected
+  @@ -1 +1,2 @@
+  -let  y=()
+  +Sys.argv: ../install/default/bin/ocamlformat --impl enabled/ocaml_file.ml
+  +ocamlformat output
   File "enabled/ocaml_file.mli", line 1, characters 0-0:
-  Error: Files _build/default/enabled/ocaml_file.mli and
-  _build/default/enabled/.formatted/ocaml_file.mli differ.
+  --- enabled/ocaml_file.mli
+  +++ enabled/ocaml_file.mli.corrected
+  @@ -1,2 +1,2 @@
+  -val y   :
+  -  unit
+  +Sys.argv: ../install/default/bin/ocamlformat --intf enabled/ocaml_file.mli
+  +ocamlformat output
   File "enabled/reason_file.re", line 1, characters 0-0:
-  Error: Files _build/default/enabled/reason_file.re and
-  _build/default/enabled/.formatted/reason_file.re differ.
+  --- enabled/reason_file.re
+  +++ enabled/reason_file.re.corrected
+  @@ -1 +1,2 @@
+  -let  y = ();
+  +Sys.argv: ../install/default/bin/refmt enabled/reason_file.re
+  +refmt output
   File "enabled/reason_file.rei", line 1, characters 0-0:
-  Error: Files _build/default/enabled/reason_file.rei and
-  _build/default/enabled/.formatted/reason_file.rei differ.
+  --- enabled/reason_file.rei
+  +++ enabled/reason_file.rei.corrected
+  @@ -1 +1,2 @@
+  -let y : unit;
+  +Sys.argv: ../install/default/bin/refmt enabled/reason_file.rei
+  +refmt output
   File "enabled/subdir/dune", line 1, characters 0-0:
-  Error: Files _build/default/enabled/subdir/dune and
-  _build/default/enabled/subdir/.formatted/dune differ.
+  --- enabled/subdir/dune
+  +++ enabled/subdir/dune.corrected
+  @@ -1,3 +1,2 @@
+   (library
+  - (name lib)
+  -)
+  + (name lib))
   File "enabled/subdir/lib.ml", line 1, characters 0-0:
-  Error: Files _build/default/enabled/subdir/lib.ml and
-  _build/default/enabled/subdir/.formatted/lib.ml differ.
+  --- enabled/subdir/lib.ml
+  +++ enabled/subdir/lib.ml.corrected
+  @@ -1 +1,2 @@
+  -let   x = 2
+  +Sys.argv: ../install/default/bin/ocamlformat --impl enabled/subdir/lib.ml
+  +ocamlformat output
   File "lang2/default/dune", line 1, characters 0-0:
-  Error: Files _build/default/lang2/default/dune and
-  _build/default/lang2/default/.formatted/dune differ.
+  --- lang2/default/dune
+  +++ lang2/default/dune.corrected
+  @@ -1 +1,2 @@
+  -(executable (name e))
+  +(executable
+  + (name e))
   File "lang2/default/e.ml", line 1, characters 0-0:
-  Error: Files _build/default/lang2/default/e.ml and
-  _build/default/lang2/default/.formatted/e.ml differ.
+  --- lang2/default/e.ml
+  +++ lang2/default/e.ml.corrected
+  @@ -1,3 +1,2 @@
+  -let () =
+  -  print_endline
+  -    "e"
+  +Sys.argv: ../install/default/bin/ocamlformat --impl lang2/default/e.ml
+  +ocamlformat output
   File "lang2/partial/a.ml", line 1, characters 0-0:
-  Error: Files _build/default/lang2/partial/a.ml and
-  _build/default/lang2/partial/.formatted/a.ml differ.
+  --- lang2/partial/a.ml
+  +++ lang2/partial/a.ml.corrected
+  @@ -1 +1,2 @@
+  -let   x = 2
+  +Sys.argv: ../install/default/bin/ocamlformat --impl lang2/partial/a.ml
+  +ocamlformat output
   File "partial/a.ml", line 1, characters 0-0:
-  Error: Files _build/default/partial/a.ml and
-  _build/default/partial/.formatted/a.ml differ.
+  --- partial/a.ml
+  +++ partial/a.ml.corrected
+  @@ -1 +1,2 @@
+  -let   x = 2
+  +Sys.argv: ../install/default/bin/ocamlformat --impl partial/a.ml
+  +ocamlformat output
   [1]
 
 Configuration files are taken into account for this action:
@@ -70,47 +123,100 @@ Configuration files are taken into account for this action:
   $ touch enabled/.ocamlformat
   $ dune build @fmt
   File "enabled/dune", line 1, characters 0-0:
-  Error: Files _build/default/enabled/dune and
-  _build/default/enabled/.formatted/dune differ.
+  --- enabled/dune
+  +++ enabled/dune.corrected
+  @@ -1,7 +1,2 @@
+   (library
+  -
+  -(name
+  -lib_reason
+  -
+  -)
+  -)
+  + (name lib_reason))
   File "enabled/ocaml_file.ml", line 1, characters 0-0:
-  Error: Files _build/default/enabled/ocaml_file.ml and
-  _build/default/enabled/.formatted/ocaml_file.ml differ.
+  --- enabled/ocaml_file.ml
+  +++ enabled/ocaml_file.ml.corrected
+  @@ -1 +1,2 @@
+  -let  y=()
+  +Sys.argv: ../install/default/bin/ocamlformat --impl enabled/ocaml_file.ml
+  +ocamlformat output
   File "enabled/ocaml_file.mli", line 1, characters 0-0:
-  Error: Files _build/default/enabled/ocaml_file.mli and
-  _build/default/enabled/.formatted/ocaml_file.mli differ.
+  --- enabled/ocaml_file.mli
+  +++ enabled/ocaml_file.mli.corrected
+  @@ -1,2 +1,2 @@
+  -val y   :
+  -  unit
+  +Sys.argv: ../install/default/bin/ocamlformat --intf enabled/ocaml_file.mli
+  +ocamlformat output
   File "enabled/reason_file.re", line 1, characters 0-0:
-  Error: Files _build/default/enabled/reason_file.re and
-  _build/default/enabled/.formatted/reason_file.re differ.
+  --- enabled/reason_file.re
+  +++ enabled/reason_file.re.corrected
+  @@ -1 +1,2 @@
+  -let  y = ();
+  +Sys.argv: ../install/default/bin/refmt enabled/reason_file.re
+  +refmt output
   File "enabled/reason_file.rei", line 1, characters 0-0:
-  Error: Files _build/default/enabled/reason_file.rei and
-  _build/default/enabled/.formatted/reason_file.rei differ.
+  --- enabled/reason_file.rei
+  +++ enabled/reason_file.rei.corrected
+  @@ -1 +1,2 @@
+  -let y : unit;
+  +Sys.argv: ../install/default/bin/refmt enabled/reason_file.rei
+  +refmt output
   File "enabled/subdir/dune", line 1, characters 0-0:
-  Error: Files _build/default/enabled/subdir/dune and
-  _build/default/enabled/subdir/.formatted/dune differ.
+  --- enabled/subdir/dune
+  +++ enabled/subdir/dune.corrected
+  @@ -1,3 +1,2 @@
+   (library
+  - (name lib)
+  -)
+  + (name lib))
   File "enabled/subdir/lib.ml", line 1, characters 0-0:
-  Error: Files _build/default/enabled/subdir/lib.ml and
-  _build/default/enabled/subdir/.formatted/lib.ml differ.
+  --- enabled/subdir/lib.ml
+  +++ enabled/subdir/lib.ml.corrected
+  @@ -1 +1,2 @@
+  -let   x = 2
+  +Sys.argv: ../install/default/bin/ocamlformat --impl enabled/subdir/lib.ml
+  +ocamlformat output
   File "lang2/default/dune", line 1, characters 0-0:
-  Error: Files _build/default/lang2/default/dune and
-  _build/default/lang2/default/.formatted/dune differ.
+  --- lang2/default/dune
+  +++ lang2/default/dune.corrected
+  @@ -1 +1,2 @@
+  -(executable (name e))
+  +(executable
+  + (name e))
   File "lang2/default/e.ml", line 1, characters 0-0:
-  Error: Files _build/default/lang2/default/e.ml and
-  _build/default/lang2/default/.formatted/e.ml differ.
+  --- lang2/default/e.ml
+  +++ lang2/default/e.ml.corrected
+  @@ -1,3 +1,2 @@
+  -let () =
+  -  print_endline
+  -    "e"
+  +Sys.argv: ../install/default/bin/ocamlformat --impl lang2/default/e.ml
+  +ocamlformat output
   File "lang2/partial/a.ml", line 1, characters 0-0:
-  Error: Files _build/default/lang2/partial/a.ml and
-  _build/default/lang2/partial/.formatted/a.ml differ.
+  --- lang2/partial/a.ml
+  +++ lang2/partial/a.ml.corrected
+  @@ -1 +1,2 @@
+  -let   x = 2
+  +Sys.argv: ../install/default/bin/ocamlformat --impl lang2/partial/a.ml
+  +ocamlformat output
   File "partial/a.ml", line 1, characters 0-0:
-  Error: Files _build/default/partial/a.ml and
-  _build/default/partial/.formatted/a.ml differ.
+  --- partial/a.ml
+  +++ partial/a.ml.corrected
+  @@ -1 +1,2 @@
+  -let   x = 2
+  +Sys.argv: ../install/default/bin/ocamlformat --impl partial/a.ml
+  +ocamlformat output
   [1]
 
 And fixable files can be promoted:
 
   $ dune promote enabled/ocaml_file.ml enabled/reason_file.re enabled/dune
-  Promoting _build/default/enabled/.formatted/dune to enabled/dune.
-  Promoting _build/default/enabled/.formatted/ocaml_file.ml to
+  Promoting _build/default/enabled/dune.corrected to enabled/dune.
+  Promoting _build/default/enabled/ocaml_file.ml.corrected to
     enabled/ocaml_file.ml.
-  Promoting _build/default/enabled/.formatted/reason_file.re to
+  Promoting _build/default/enabled/reason_file.re.corrected to
     enabled/reason_file.re.
   $ cat enabled/ocaml_file.ml
   Sys.argv: ../install/default/bin/ocamlformat --impl enabled/ocaml_file.ml
@@ -121,6 +227,32 @@ And fixable files can be promoted:
   $ cat enabled/dune
   (library
    (name lib_reason))
+
+Formatting actions receive environment variables from the (env ...) stanza:
+
+  $ mkdir -p enabled/env-vars
+  $ cat >enabled/env-vars/dune <<EOF
+  > (env
+  >  (_
+  >   (env-vars
+  >    (REFMT_PRINT_WIDTH 120))))
+  > EOF
+  $ cat >enabled/env-vars/reason_file.re <<EOF
+  > let z = ();
+  > EOF
+  $ dune build @enabled/env-vars/fmt
+  File "enabled/env-vars/reason_file.re", line 1, characters 0-0:
+  --- enabled/env-vars/reason_file.re
+  +++ enabled/env-vars/reason_file.re.corrected
+  @@ -1 +1,3 @@
+  -let z = ();
+  +Sys.argv: ../install/default/bin/refmt enabled/env-vars/reason_file.re
+  +REFMT_PRINT_WIDTH=120
+  +refmt output
+  [1]
+  $ dune promote enabled/env-vars/reason_file.re
+  Promoting _build/default/enabled/env-vars/reason_file.re.corrected to
+    enabled/env-vars/reason_file.re.
 
 The fmt command automatically promotes the formatted files:
 
@@ -142,29 +274,65 @@ All .ocamlformat files are considered dependencies:
   $ echo 'margin = 70' > .ocamlformat
   $ dune build @fmt
   File "enabled/ocaml_file.mli", line 1, characters 0-0:
-  Error: Files _build/default/enabled/ocaml_file.mli and
-  _build/default/enabled/.formatted/ocaml_file.mli differ.
+  --- enabled/ocaml_file.mli
+  +++ enabled/ocaml_file.mli.corrected
+  @@ -1,2 +1,2 @@
+  -val y   :
+  -  unit
+  +Sys.argv: ../install/default/bin/ocamlformat --intf enabled/ocaml_file.mli
+  +ocamlformat output
   File "enabled/reason_file.rei", line 1, characters 0-0:
-  Error: Files _build/default/enabled/reason_file.rei and
-  _build/default/enabled/.formatted/reason_file.rei differ.
+  --- enabled/reason_file.rei
+  +++ enabled/reason_file.rei.corrected
+  @@ -1 +1,2 @@
+  -let y : unit;
+  +Sys.argv: ../install/default/bin/refmt enabled/reason_file.rei
+  +refmt output
   File "enabled/subdir/dune", line 1, characters 0-0:
-  Error: Files _build/default/enabled/subdir/dune and
-  _build/default/enabled/subdir/.formatted/dune differ.
+  --- enabled/subdir/dune
+  +++ enabled/subdir/dune.corrected
+  @@ -1,3 +1,2 @@
+   (library
+  - (name lib)
+  -)
+  + (name lib))
   File "enabled/subdir/lib.ml", line 1, characters 0-0:
-  Error: Files _build/default/enabled/subdir/lib.ml and
-  _build/default/enabled/subdir/.formatted/lib.ml differ.
+  --- enabled/subdir/lib.ml
+  +++ enabled/subdir/lib.ml.corrected
+  @@ -1 +1,2 @@
+  -let   x = 2
+  +Sys.argv: ../install/default/bin/ocamlformat --impl enabled/subdir/lib.ml
+  +ocamlformat output
   File "lang2/default/dune", line 1, characters 0-0:
-  Error: Files _build/default/lang2/default/dune and
-  _build/default/lang2/default/.formatted/dune differ.
+  --- lang2/default/dune
+  +++ lang2/default/dune.corrected
+  @@ -1 +1,2 @@
+  -(executable (name e))
+  +(executable
+  + (name e))
   File "lang2/default/e.ml", line 1, characters 0-0:
-  Error: Files _build/default/lang2/default/e.ml and
-  _build/default/lang2/default/.formatted/e.ml differ.
+  --- lang2/default/e.ml
+  +++ lang2/default/e.ml.corrected
+  @@ -1,3 +1,2 @@
+  -let () =
+  -  print_endline
+  -    "e"
+  +Sys.argv: ../install/default/bin/ocamlformat --impl lang2/default/e.ml
+  +ocamlformat output
   File "lang2/partial/a.ml", line 1, characters 0-0:
-  Error: Files _build/default/lang2/partial/a.ml and
-  _build/default/lang2/partial/.formatted/a.ml differ.
+  --- lang2/partial/a.ml
+  +++ lang2/partial/a.ml.corrected
+  @@ -1 +1,2 @@
+  -let   x = 2
+  +Sys.argv: ../install/default/bin/ocamlformat --impl lang2/partial/a.ml
+  +ocamlformat output
   File "partial/a.ml", line 1, characters 0-0:
-  Error: Files _build/default/partial/a.ml and
-  _build/default/partial/.formatted/a.ml differ.
+  --- partial/a.ml
+  +++ partial/a.ml.corrected
+  @@ -1 +1,2 @@
+  -let   x = 2
+  +Sys.argv: ../install/default/bin/ocamlformat --impl partial/a.ml
+  +ocamlformat output
   [1]
 
 Mixing (lang dune 2.0) and (using fmt 1.0) is an error.
@@ -227,8 +395,24 @@ Formatting can also be set in the (env ...) stanza
   $ (cd using-env && dune build @fmt)
   fake ocamlformat is running: "--impl" "subdir/foo.ml"
   File "subdir/foo.ml", line 1, characters 0-0:
-  Error: Files _build/default/subdir/foo.ml and
-  _build/default/subdir/.formatted/foo.ml differ.
+  --- subdir/foo.ml
+  +++ subdir/foo.ml.corrected
+  @@ -1 +1 @@
+  -let x =     12
+  +(* fake ocamlformat output *)
+  \ No newline at end of file
+  [1]
+
+The formatter action is not re-run if the following diff action fails.
+
+  $ (cd using-env && dune build @fmt)
+  File "subdir/foo.ml", line 1, characters 0-0:
+  --- subdir/foo.ml
+  +++ subdir/foo.ml.corrected
+  @@ -1 +1 @@
+  -let x =     12
+  +(* fake ocamlformat output *)
+  \ No newline at end of file
   [1]
 
 We check that the formatting stanza in (env ...) takes precedence over that in
@@ -239,8 +423,12 @@ dune-project:
   > EOF
   $ (cd using-env && dune build @fmt)
   File "subdir/foo.ml", line 1, characters 0-0:
-  Error: Files _build/default/subdir/foo.ml and
-  _build/default/subdir/.formatted/foo.ml differ.
+  --- subdir/foo.ml
+  +++ subdir/foo.ml.corrected
+  @@ -1 +1 @@
+  -let x =     12
+  +(* fake ocamlformat output *)
+  \ No newline at end of file
   [1]
 
 Next we check that the new logic does not interfere with default per-project

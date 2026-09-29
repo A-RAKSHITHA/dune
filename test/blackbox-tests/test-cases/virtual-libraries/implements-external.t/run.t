@@ -2,8 +2,6 @@ Test that we can implement external libraries.
 
 First we create an external library
   $ dune build --root vlib @install
-  Entering directory 'vlib'
-  Leaving directory 'vlib'
 
 Then we make sure that we can implement it
   $ env OCAMLPATH=vlib/_build/install/default/lib dune build @default @install --root impl
@@ -38,9 +36,7 @@ Currently, dune's behavior is broken in this situation. The virtual library's
 modules remain hidden.
   $ export OCAMLPATH=$PWD/vlib/_build/install/default/lib:$PWD/impl/_build/install/default/lib
   $ mkdir use-external-impl && cd use-external-impl
-  $ cat >dune-project <<EOF
-  > (lang dune 3.0)
-  > EOF
+  $ make_dune_project 3.0
   $ cat >dune <<EOF
   > (executable
   >  (name blah)

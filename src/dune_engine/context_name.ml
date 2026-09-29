@@ -7,7 +7,7 @@ let is_default = String.equal default
 
 include (
   Stringlike.Make (struct
-    type nonrec t = t
+    include String
 
     let description_of_valid_string = None
     let hint_valid = None
@@ -15,13 +15,22 @@ include (
     let module_ = "Context_name"
     let description = "context name"
 
+    let rec contains_dir_sep name i =
+      if i < 0
+      then false
+      else (
+        match String.unsafe_get name i with
+        | '/' | '\\' | ':' -> true
+        | _ -> contains_dir_sep name (i - 1))
+    ;;
+
     let of_string_opt name =
+      let len = String.length name in
       if
-        name = ""
-        || String.is_prefix name ~prefix:"."
-        || name = "log"
-        || String.contains name '/'
-        || String.contains name '\\'
+        len = 0
+        || Char.equal (String.unsafe_get name 0) '.'
+        || (len = 3 && String.equal name "log")
+        || contains_dir_sep name (len - 1)
       then None
       else Some name
     ;;

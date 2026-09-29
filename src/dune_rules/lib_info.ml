@@ -193,16 +193,17 @@ end
 
 module Status = struct
   type t =
-    | Installed_private
-    | Installed
+    | Installed_private of Package.Name.t option
+    | Installed of Package.Name.t option
     | Public of Dune_project.t * Package.t
     | Private of Dune_project.t * Package.t option
 
   let to_dyn x =
     let open Dyn in
     match x with
-    | Installed_private -> variant "Installed_private" []
-    | Installed -> variant "Installed" []
+    | Installed_private package ->
+      variant "Installed_private" [ option Package.Name.to_dyn package ]
+    | Installed package -> variant "Installed" [ option Package.Name.to_dyn package ]
     | Public (project, package) ->
       variant "Public" [ Dune_project.to_dyn project; Package.to_dyn package ]
     | Private (proj, package) ->
@@ -210,12 +211,12 @@ module Status = struct
   ;;
 
   let is_private = function
-    | Installed_private | Private _ -> true
-    | Installed | Public _ -> false
+    | Installed_private _ | Private _ -> true
+    | Installed _ | Public _ -> false
   ;;
 
   let project = function
-    | Installed_private | Installed -> None
+    | Installed_private _ | Installed _ -> None
     | Private (project, _) | Public (project, _) -> Some project
   ;;
 
@@ -317,26 +318,33 @@ type 'path t =
   ; foreign_dll_files : 'path list
   ; jsoo_runtime : 'path list
   ; wasmoo_runtime : 'path list
-  ; requires : Lib_dep.t list
-  ; ppx_runtime_deps : (Loc.t * Lib_name.t) list
-  ; preprocess : Preprocess.With_instrumentation.t Preprocess.Per_module.t
+  ; requires : Lib_dep.t list Compilation_mode.Per_mode.t
+  ; parameters : (Loc.t * Lib_name.t) list
+  ; ppx_runtime_deps : (Loc.t * Lib_name.t) list Compilation_mode.Per_mode.t
+  ; allow_unused_libraries : (Loc.t * Lib_name.t) list
+  ; preprocess :
+      Preprocess.With_instrumentation.t Preprocess.Per_module.t
+        Compilation_mode.Per_mode.t
   ; enabled : Enabled_status.t Memo.t
   ; virtual_deps : (Loc.t * Lib_name.t) list
   ; dune_version : Dune_lang.Syntax.Version.t option
   ; sub_systems : Sub_system_info.t Sub_system_name.Map.t
-  ; virtual_ : Modules.t Source.t option
-  ; entry_modules : (Module_name.t list, User_message.t) result Source.t
+  ; entry_modules :
+      (Module_name.t list option Compilation_mode.Per_mode.t, User_message.t) result
+        Source.t
   ; implements : (Loc.t * Lib_name.t) option
   ; default_implementation : (Loc.t * Lib_name.t) option
   ; wrapped : Wrapped.t Inherited.t option
   ; main_module_name : Main_module_name.t
+  ; local_main_module_name : Module_name.t option
   ; modes : Lib_mode.Map.Set.t
-  ; modules : Modules.With_vlib.t option Source.t
+  ; modules : Modules.With_vlib.t option Compilation_mode.Per_mode.t Source.t
   ; special_builtin_support : (Loc.t * Special_builtin_support.t) option
   ; exit_module : Module_name.t option
   ; instrumentation_backend : (Loc.t * Lib_name.t) option
   ; path_kind : 'path path
   ; melange_runtime_deps : 'path File_deps.t
+  ; root_module : Module_name.t option
   }
 
 let name t = t.name
@@ -344,12 +352,27 @@ let lib_id t = t.lib_id
 let version t = t.version
 let dune_version t = t.dune_version
 let loc t = t.loc
-let requires t = t.requires
-let preprocess t = t.preprocess
+let parameters t = t.parameters
+let requires t ~for_ = Compilation_mode.Per_mode.get t.requires ~for_
+let requires_by_mode t = t.requires
+let preprocess t ~for_ = Compilation_mode.Per_mode.get t.preprocess ~for_
 let ppx_runtime_deps t = t.ppx_runtime_deps
+let allow_unused_libraries t = t.allow_unused_libraries
 let sub_systems t = t.sub_systems
 let modes t = t.modes
-let modules t = t.modules
+
+let effective_modes t ~melange_available =
+  let modes = modes t in
+  match modes.melange, modes.ocaml.byte || modes.ocaml.native with
+  | true, true ->
+    let open Memo.O in
+    let+ melange_available = melange_available in
+    if melange_available then modes else { modes with melange = false }
+  | _has_melange, _has_ocaml -> Memo.return modes
+;;
+
+let modules t ~for_ = Source.map t.modules ~f:(Compilation_mode.Per_mode.get ~for_)
+let modules_by_mode t = t.modules
 let archives t = t.archives
 let foreign_archives t = t.foreign_archives
 let native_archives t = t.native_archives
@@ -359,6 +382,7 @@ let public_headers t = t.public_headers
 let exit_module t = t.exit_module
 let instrumentation_backend t = t.instrumentation_backend
 let melange_runtime_deps t = t.melange_runtime_deps
+let root_module t = t.root_module
 let plugins t = t.plugins
 let src_dir t = t.src_dir
 let enabled t = t.enabled
@@ -366,7 +390,7 @@ let status t = t.status
 let kind t = t.kind
 let default_implementation t = t.default_implementation
 let obj_dir t = t.obj_dir
-let virtual_ t = t.virtual_
+let virtual_ t = t.kind = Virtual
 let implements t = t.implements
 let synopsis t = t.synopsis
 let wrapped t = t.wrapped
@@ -374,10 +398,17 @@ let special_builtin_support t = t.special_builtin_support
 let jsoo_runtime t = t.jsoo_runtime
 let wasmoo_runtime t = t.wasmoo_runtime
 let main_module_name t = t.main_module_name
+let local_main_module_name t = t.local_main_module_name
 let orig_src_dir t = t.orig_src_dir
 let best_src_dir t = Option.value ~default:t.src_dir t.orig_src_dir
 let set_version t version = { t with version }
-let entry_modules t = t.entry_modules
+
+let entry_modules t ~for_ =
+  Source.map t.entry_modules ~f:(fun entry_modules ->
+    Result.map entry_modules ~f:(fun entry_modules ->
+      Compilation_mode.Per_mode.get entry_modules ~for_ |> Option.value_exn))
+;;
+
 let dynlink_supported t = Mode.Dict.get t.plugins Native <> []
 
 let eval_native_archives_exn (type path) (t : path t) ~modules =
@@ -386,11 +417,6 @@ let eval_native_archives_exn (type path) (t : path t) ~modules =
   | Needs_module_info _, None -> Code_error.raise "missing module information" []
   | Needs_module_info f, Some modules ->
     if Modules.With_vlib.has_impl modules then [ f ] else []
-;;
-
-let user_written_deps t =
-  List.fold_left (t.virtual_deps @ t.ppx_runtime_deps) ~init:t.requires ~f:(fun acc s ->
-    Lib_dep.Direct s :: acc)
 ;;
 
 let create
@@ -406,13 +432,16 @@ let create
       ~version
       ~synopsis
       ~main_module_name
+      ~local_main_module_name
       ~sub_systems
       ~requires
+      ~parameters
       ~foreign_objects
       ~public_headers
       ~plugins
       ~archives
       ~ppx_runtime_deps
+      ~allow_unused_libraries
       ~foreign_archives
       ~native_archives
       ~foreign_dll_files
@@ -422,7 +451,6 @@ let create
       ~enabled
       ~virtual_deps
       ~dune_version
-      ~virtual_
       ~entry_modules
       ~implements
       ~default_implementation
@@ -433,6 +461,7 @@ let create
       ~exit_module
       ~instrumentation_backend
       ~melange_runtime_deps
+      ~root_module
   =
   { loc
   ; name
@@ -445,12 +474,15 @@ let create
   ; version
   ; synopsis
   ; requires
+  ; parameters
   ; main_module_name
+  ; local_main_module_name
   ; foreign_objects
   ; public_headers
   ; plugins
   ; archives
   ; ppx_runtime_deps
+  ; allow_unused_libraries
   ; foreign_archives
   ; native_archives
   ; foreign_dll_files
@@ -461,7 +493,6 @@ let create
   ; virtual_deps
   ; dune_version
   ; sub_systems
-  ; virtual_
   ; entry_modules
   ; implements
   ; default_implementation
@@ -473,6 +504,7 @@ let create
   ; instrumentation_backend
   ; path_kind
   ; melange_runtime_deps
+  ; root_module
   }
 ;;
 
@@ -480,27 +512,28 @@ type external_ = Path.t t
 type local = Path.Build.t t
 
 let map t ~path_kind ~f_path ~f_obj_dir ~f_public_deps =
-  let f = f_path in
+  let f_dir = f_path ~kind:Install.Entry.Expanded.Directory in
+  let f = f_path ~kind:File in
   let list = List.map ~f in
   let mode_list = Mode.Dict.map ~f:list in
   let native_archives =
     match t.native_archives with
     | Needs_module_info t -> Needs_module_info (f t)
-    | Files t -> Files (List.map t ~f)
+    | Files t -> Files (list t)
   in
   { t with
-    src_dir = f t.src_dir
-  ; orig_src_dir = Option.map ~f t.orig_src_dir
+    src_dir = f_dir t.src_dir
+  ; orig_src_dir = Option.map ~f:f_dir t.orig_src_dir
   ; obj_dir = f_obj_dir t.obj_dir
   ; archives = mode_list t.archives
   ; plugins = mode_list t.plugins
-  ; foreign_objects = Source.map ~f:(List.map ~f) t.foreign_objects
+  ; foreign_objects = Source.map ~f:list t.foreign_objects
   ; public_headers = File_deps.map ~f:f_public_deps t.public_headers
   ; foreign_archives = Mode.Map.Multi.map t.foreign_archives ~f
-  ; foreign_dll_files = List.map ~f t.foreign_dll_files
+  ; foreign_dll_files = list t.foreign_dll_files
   ; native_archives
-  ; jsoo_runtime = List.map ~f t.jsoo_runtime
-  ; wasmoo_runtime = List.map ~f t.wasmoo_runtime
+  ; jsoo_runtime = list t.jsoo_runtime
+  ; wasmoo_runtime = list t.wasmoo_runtime
   ; melange_runtime_deps = File_deps.map ~f:f_public_deps t.melange_runtime_deps
   ; path_kind
   }
@@ -513,7 +546,7 @@ let map_path t ~f =
 let of_local =
   map
     ~path_kind:External
-    ~f_path:Path.build
+    ~f_path:(fun ~kind:_ -> Path.build)
     ~f_obj_dir:Obj_dir.of_local
     ~f_public_deps:Path.build
 ;;
@@ -521,7 +554,7 @@ let of_local =
 let as_local_exn =
   map
     ~path_kind:Local
-    ~f_path:Path.as_in_build_dir_exn
+    ~f_path:(fun ~kind:_ -> Path.as_in_build_dir_exn)
     ~f_obj_dir:Obj_dir.as_local_exn
     ~f_public_deps:Path.as_in_build_dir_exn
 ;;
@@ -540,12 +573,15 @@ let to_dyn
       ; version
       ; synopsis
       ; requires
+      ; parameters
       ; main_module_name
+      ; local_main_module_name
       ; foreign_objects
       ; public_headers
       ; plugins
       ; archives
       ; ppx_runtime_deps
+      ; allow_unused_libraries = _
       ; foreign_archives
       ; native_archives
       ; foreign_dll_files
@@ -556,7 +592,6 @@ let to_dyn
       ; virtual_deps
       ; dune_version
       ; sub_systems
-      ; virtual_
       ; implements
       ; default_implementation
       ; modes
@@ -567,6 +602,7 @@ let to_dyn
       ; instrumentation_backend
       ; melange_runtime_deps
       ; entry_modules
+      ; root_module
       }
   =
   let open Dyn in
@@ -591,33 +627,41 @@ let to_dyn
     ; "foreign_dll_files", list path foreign_dll_files
     ; "jsoo_runtime", list path jsoo_runtime
     ; "wasmoo_runtime", list path wasmoo_runtime
-    ; "requires", list Lib_dep.to_dyn requires
-    ; "ppx_runtime_deps", list (snd Lib_name.to_dyn) ppx_runtime_deps
+    ; "parameters", list (snd Lib_name.to_dyn) parameters
+    ; "requires", Compilation_mode.Per_mode.to_dyn (list Lib_dep.to_dyn) requires
+    ; ( "ppx_runtime_deps"
+      , Compilation_mode.Per_mode.to_dyn (list (snd Lib_name.to_dyn)) ppx_runtime_deps )
     ; "virtual_deps", list (snd Lib_name.to_dyn) virtual_deps
     ; "dune_version", option Dune_lang.Syntax.Version.to_dyn dune_version
     ; "sub_systems", Sub_system_name.Map.to_dyn Dyn.opaque sub_systems
-    ; "virtual_", option (Source.to_dyn Modules.to_dyn) virtual_
     ; ( "entry_modules"
       , Source.to_dyn
-          (Result.to_dyn (list Module_name.to_dyn) string)
+          (Result.to_dyn
+             (Compilation_mode.Per_mode.to_dyn (option (list Module_name.to_dyn)))
+             string)
           (Source.map entry_modules ~f:(Result.map_error ~f:User_message.to_string)) )
     ; "implements", option (snd Lib_name.to_dyn) implements
     ; "default_implementation", option (snd Lib_name.to_dyn) default_implementation
     ; "wrapped", option (Inherited.to_dyn Wrapped.to_dyn) wrapped
     ; "main_module_name", Main_module_name.to_dyn main_module_name
+    ; "local_main_module_name", Dyn.option Module_name.to_dyn local_main_module_name
     ; "modes", Lib_mode.Map.Set.to_dyn modes
-    ; "modules", Source.to_dyn (Dyn.option Modules.With_vlib.to_dyn) modules
+    ; ( "modules"
+      , Source.to_dyn
+          (Compilation_mode.Per_mode.to_dyn (option Modules.With_vlib.to_dyn))
+          modules )
     ; ( "special_builtin_support"
       , option (snd Special_builtin_support.to_dyn) special_builtin_support )
     ; "exit_module", option Module_name.to_dyn exit_module
     ; "instrumentation_backend", option (snd Lib_name.to_dyn) instrumentation_backend
     ; "melange_runtime_deps", File_deps.to_dyn path melange_runtime_deps
+    ; "root_module", option Module_name.to_dyn root_module
     ]
 ;;
 
 let package t =
   match t.status with
-  | Installed_private | Installed -> Some (Lib_name.package_name t.name)
+  | Installed_private package | Installed package -> package
   | Public (_, p) -> Some (Package.name p)
   | Private (_, p) -> Option.map p ~f:Package.name
 ;;
@@ -630,11 +674,13 @@ let for_dune_package
       ~foreign_objects
       ~obj_dir
       ~implements
+      ~parameters
       ~default_implementation
       ~sub_systems
       ~melange_runtime_deps
       ~public_headers
-      ~modules
+      ~modes
+      ~(modules : Modules.With_vlib.t option Compilation_mode.Per_mode.t)
   =
   let foreign_objects = Source.External foreign_objects in
   let orig_src_dir =
@@ -650,8 +696,8 @@ let for_dune_package
             | Some src_dir ->
               Path.source src_dir |> Path.to_absolute_filename |> Path.of_string))
   in
-  let native_archives = Files (eval_native_archives_exn t ~modules:(Some modules)) in
-  let modules = Source.External (Some modules) in
+  let native_archives = Files (eval_native_archives_exn t ~modules:modules.ocaml) in
+  let modules = Source.External modules in
   let melange_runtime_deps = File_deps.External melange_runtime_deps in
   let public_headers = File_deps.External public_headers in
   { t with
@@ -661,10 +707,12 @@ let for_dune_package
   ; foreign_objects
   ; obj_dir
   ; implements
+  ; parameters
   ; default_implementation
   ; sub_systems
   ; orig_src_dir
   ; native_archives
+  ; modes
   ; modules
   ; melange_runtime_deps
   ; public_headers
@@ -672,5 +720,52 @@ let for_dune_package
   |> map_path
        ~f:
          (let dir = Obj_dir.dir obj_dir in
-          fun p -> if Path.is_managed p then Path.relative dir (Path.basename p) else p)
+          fun ~kind p ->
+            if Path.is_managed p
+            then (
+              match kind with
+              | Install.Entry.Expanded.File -> Path.relative_fname dir (Path.basename p)
+              | Directory -> dir)
+            else p)
+;;
+
+let for_instance ~dir ~ext_lib t =
+  let obj_dir =
+    Obj_dir.make_lib
+      ~dir
+      ~has_private_modules:false
+      ~private_lib:false
+      (Lib_name.Local.of_string "instance")
+  in
+  let archives =
+    Mode.Dict.mapi t.archives ~f:(fun m _ ->
+      [ Path.Build.relative
+          dir
+          ("archive" ^ Filename.Extension.to_string (Mode.compiled_lib_ext m))
+      ])
+  in
+  let native_archives =
+    match ext_lib with
+    | None -> Files []
+    | Some ext_lib ->
+      let ext_lib = Filename.Extension.to_string ext_lib in
+      Files [ Path.Build.relative dir ("archive" ^ ext_lib) ]
+  in
+  { t with
+    obj_dir
+  ; archives
+  ; native_archives
+  ; modules = External (Compilation_mode.Per_mode.both None)
+  ; src_dir = dir
+  ; orig_src_dir = None
+  ; plugins = Mode.Dict.make ~byte:[] ~native:[]
+  ; foreign_objects = Local
+  ; public_headers = File_deps.External []
+  ; foreign_archives = Mode.Map.empty
+  ; foreign_dll_files = []
+  ; jsoo_runtime = []
+  ; wasmoo_runtime = []
+  ; path_kind = Local
+  ; melange_runtime_deps = File_deps.External []
+  }
 ;;

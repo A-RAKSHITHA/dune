@@ -1,4 +1,5 @@
 open Stdune
+module Fsevents = Dune_scheduler.For_tests.Fsevents
 module Event = Fsevents.Event
 
 module Logger : sig
@@ -39,12 +40,12 @@ let end_filename = ".dune_fsevents_end"
 
 let emit_start dir =
   ignore (Fpath.mkdir_p dir);
-  Io.String_path.write_file (Filename.concat dir start_filename) ""
+  Io.String_path.write_file_exn (Filename.concat dir start_filename) ""
 ;;
 
 let emit_stop dir =
   ignore (Fpath.mkdir_p dir);
-  Io.String_path.write_file (Filename.concat dir end_filename) ""
+  Io.String_path.write_file_exn (Filename.concat dir end_filename) ""
 ;;
 
 let test f =
@@ -52,19 +53,17 @@ let test f =
   let mutex = Mutex.create () in
   let finished = ref false in
   let finish () =
-    Mutex.lock mutex;
-    finished := true;
-    Condition.signal cv;
-    Mutex.unlock mutex
+    Mutex.protect mutex (fun () ->
+      finished := true;
+      Condition.signal cv)
   in
   timeout_thread ~wait:3.0 (fun () ->
-    Mutex.lock mutex;
-    if not !finished
-    then (
-      Format.eprintf "Test timed out@.";
-      finished := true;
-      Condition.signal cv);
-    Mutex.unlock mutex);
+    Mutex.protect mutex (fun () ->
+      if not !finished
+      then (
+        Format.eprintf "Test timed out@.";
+        finished := true;
+        Condition.signal cv)));
   let test () =
     let dir = Temp.create Dir ~prefix:"fsevents_dune" ~suffix:"" in
     let old = Sys.getcwd () in
@@ -76,19 +75,18 @@ let test f =
         Temp.destroy Dir dir)
   in
   let (_ : Thread.t) = Thread.create test () in
-  Mutex.lock mutex;
-  while not !finished do
-    Condition.wait cv mutex
-  done;
-  Mutex.unlock mutex
+  Mutex.protect mutex (fun () ->
+    while not !finished do
+      Condition.wait cv mutex
+    done)
 ;;
 
 let print_event ~logger ~cwd e =
   let dyn =
     let open Dyn in
     record
-      [ "action", Event.dyn_of_action (Event.action e)
-      ; "kind", Event.dyn_of_kind (Event.kind e)
+      [ "action", Event.Action.to_dyn (Event.action e)
+      ; "kind", Event.Kind.to_dyn (Event.kind e)
       ; ( "path"
         , string
             (let path = Event.path e in
@@ -171,7 +169,7 @@ let test_with_multiple_fsevents ~setup ~test:f =
         let res =
           Fsevents.create
             ~paths:[ config.dir ]
-            ~latency:0.0
+            ~latency:(Time.Span.of_secs 0.0)
             ~f:(make_callback sync ~f:config.on_event)
         in
         (match config.exclusion_paths with
@@ -229,7 +227,7 @@ let test_with_operations ?on_event ?exclusion_paths f =
 ;;
 
 let%expect_test "file create event" =
-  test_with_operations (fun () -> Io.String_path.write_file "./file" "foobar");
+  test_with_operations (fun () -> Io.String_path.write_file_exn "./file" "foobar");
   [%expect
     {|
     > { action = "Create"; kind = "File"; path = "$TESTCASE_ROOT/file" } |}]
@@ -244,7 +242,7 @@ let%expect_test "dir create event" =
 
 let%expect_test "move file" =
   test_with_operations (fun () ->
-    Io.String_path.write_file "old" "foobar";
+    Io.String_path.write_file_exn "old" "foobar";
     Unix.rename "old" "new");
   [%expect
     {|
@@ -258,8 +256,8 @@ let%expect_test "raise inside callback" =
       Logger.printfn logger "exiting.";
       raise Exit)
     (fun () ->
-       Io.String_path.write_file "old" "foobar";
-       Io.String_path.write_file "old" "foobar";
+       Io.String_path.write_file_exn "old" "foobar";
+       Io.String_path.write_file_exn "old" "foobar";
        (* Delay to allow the event handler callback to catch the exception
          before stopping the watcher. *)
        Unix.sleepf 1.0);
@@ -269,6 +267,24 @@ let%expect_test "raise inside callback" =
     exiting. |}]
 ;;
 
+let%expect_test "stop before wait_until_stopped" =
+  test (fun finish ->
+    let fsevents =
+      Fsevents.create
+        ~paths:[ Sys.getcwd () ]
+        ~latency:(Time.Span.of_secs 0.0)
+        ~f:(fun _ -> ())
+    in
+    let dispatch_queue = Fsevents.Dispatch_queue.create () in
+    Fsevents.start fsevents dispatch_queue;
+    Fsevents.stop fsevents;
+    (match Fsevents.Dispatch_queue.wait_until_stopped dispatch_queue with
+     | Error _ -> assert false
+     | Ok () -> print_endline "stopped");
+    finish ());
+  [%expect {| stopped |}]
+;;
+
 let%expect_test "set exclusion paths" =
   let run paths =
     let ignored = "ignored" in
@@ -276,7 +292,7 @@ let%expect_test "set exclusion paths" =
       ~exclusion_paths:(fun cwd -> [ paths cwd ignored ])
       (fun () ->
          let (_ : Fpath.mkdir_p_result) = Fpath.mkdir_p ignored in
-         Io.String_path.write_file (Filename.concat ignored "old") "foobar")
+         Io.String_path.write_file_exn (Filename.concat ignored "old") "foobar")
   in
   (* absolute paths work *)
   run Filename.concat;
@@ -301,9 +317,74 @@ let%expect_test "multiple fsevents" =
       in
       [ create "foo"; create "bar" ])
     ~test:(fun () ->
-      Io.String_path.write_file "foo/file" "";
-      Io.String_path.write_file "bar/file" "";
-      Io.String_path.write_file "xxx" "" (* this one is ignored *));
+      Io.String_path.write_file_exn "foo/file" "";
+      Io.String_path.write_file_exn "bar/file" "";
+      Io.String_path.write_file_exn "xxx" "" (* this one is ignored *));
+  [%expect
+    {|
+    > { action = "Create"; kind = "File"; path = "$TESTCASE_ROOT/foo/file" }
+    > { action = "Create"; kind = "File"; path = "$TESTCASE_ROOT/bar/file" } |}]
+;;
+
+let%expect_test "multiple paths in one fsevents" =
+  test (fun finish ->
+    let cwd = Sys.getcwd () in
+    let foo = Filename.concat cwd "foo" in
+    let bar = Filename.concat cwd "bar" in
+    ignore (Fpath.mkdir foo);
+    ignore (Fpath.mkdir bar);
+    let logger = Logger.create () in
+    let t = ref None in
+    let sync =
+      object
+        val mutable started = false
+        val mutable stopped = false
+        method logger = logger
+        method started = started
+        method stopped = stopped
+        method start = started <- true
+
+        method stop =
+          stopped <- true;
+          Fsevents.stop (Option.value_exn !t)
+
+        method emit_start = if not started then emit_start foo
+        method emit_stop = if not stopped then emit_stop foo
+      end
+    in
+    let fsevents =
+      Fsevents.create
+        ~paths:[ foo; bar ]
+        ~latency:(Time.Span.of_secs 0.0)
+        ~f:(make_callback sync ~f:(print_event ~cwd))
+    in
+    t := Some fsevents;
+    let dispatch_queue = Fsevents.Dispatch_queue.create () in
+    Fsevents.start fsevents dispatch_queue;
+    let (thread : Thread.t) =
+      Thread.create
+        (fun () ->
+           let rec await ~emit ~continue =
+             if continue ()
+             then (
+               emit ();
+               Unix.sleepf 0.2;
+               await ~emit ~continue)
+           in
+           await ~emit:(fun () -> sync#emit_start) ~continue:(fun () -> not sync#started);
+           Io.String_path.write_file_exn "foo/file" "";
+           Io.String_path.write_file_exn "bar/file" "";
+           Io.String_path.write_file_exn "xxx" "";
+           await ~emit:(fun () -> sync#emit_stop) ~continue:(fun () -> not sync#stopped))
+        ()
+    in
+    (match Fsevents.Dispatch_queue.wait_until_stopped dispatch_queue with
+     | Error Exit -> print_endline "[EXIT]"
+     | Error _ -> assert false
+     | Ok () -> ());
+    Thread.join thread;
+    Logger.flush logger;
+    finish ());
   [%expect
     {|
     > { action = "Create"; kind = "File"; path = "$TESTCASE_ROOT/foo/file" }

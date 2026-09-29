@@ -10,8 +10,8 @@ open Import
 
 module Status : sig
   type t =
-    | Installed_private
-    | Installed
+    | Installed_private of Package.Name.t option
+    | Installed of Package.Name.t option
     | Public of Dune_project.t * Package.t
     | Private of Dune_project.t * Package.t option
 
@@ -128,6 +128,7 @@ val public_headers : 'path t -> 'path File_deps.t
     the [Std_exit] module of the stdlib. *)
 val exit_module : _ t -> Module_name.t option
 
+val root_module : _ t -> Module_name.t option
 val instrumentation_backend : _ t -> (Loc.t * Lib_name.t) option
 val plugins : 'path t -> 'path list Mode.Dict.t
 val src_dir : 'path t -> 'path
@@ -139,17 +140,37 @@ val jsoo_runtime : 'path t -> 'path list
 val wasmoo_runtime : 'path t -> 'path list
 val melange_runtime_deps : 'path t -> 'path File_deps.t
 val obj_dir : 'path t -> 'path Obj_dir.t
-val virtual_ : _ t -> Modules.t Source.t option
-val entry_modules : _ t -> (Module_name.t list, User_message.t) result Source.t
+val virtual_ : _ t -> bool
+
+val entry_modules
+  :  _ t
+  -> for_:Compilation_mode.t
+  -> (Module_name.t list, User_message.t) result Source.t
+
 val main_module_name : _ t -> Main_module_name.t
+val local_main_module_name : _ t -> Module_name.t option
 val wrapped : _ t -> Wrapped.t Inherited.t option
 val special_builtin_support : _ t -> (Loc.t * Special_builtin_support.t) option
 val modes : _ t -> Lib_mode.Map.Set.t
-val modules : _ t -> Modules.With_vlib.t option Source.t
+val effective_modes : _ t -> melange_available:bool Memo.t -> Lib_mode.Map.Set.t Memo.t
+val modules : _ t -> for_:Compilation_mode.t -> Modules.With_vlib.t option Source.t
+
+val modules_by_mode
+  :  _ t
+  -> Modules.With_vlib.t option Compilation_mode.Per_mode.t Source.t
+
 val implements : _ t -> (Loc.t * Lib_name.t) option
-val requires : _ t -> Lib_dep.t list
-val ppx_runtime_deps : _ t -> (Loc.t * Lib_name.t) list
-val preprocess : _ t -> Preprocess.With_instrumentation.t Preprocess.Per_module.t
+val requires : _ t -> for_:Compilation_mode.t -> Lib_dep.t list
+val requires_by_mode : _ t -> Lib_dep.t list Compilation_mode.Per_mode.t
+val parameters : _ t -> (Loc.t * Lib_name.t) list
+val ppx_runtime_deps : _ t -> (Loc.t * Lib_name.t) list Compilation_mode.Per_mode.t
+val allow_unused_libraries : _ t -> (Loc.t * Lib_name.t) list
+
+val preprocess
+  :  _ t
+  -> for_:Compilation_mode.t
+  -> Preprocess.With_instrumentation.t Preprocess.Per_module.t
+
 val sub_systems : _ t -> Sub_system_info.t Sub_system_name.Map.t
 val enabled : _ t -> Enabled_status.t Memo.t
 val orig_src_dir : 'path t -> 'path option
@@ -164,7 +185,6 @@ val best_src_dir : 'path t -> 'path
 type external_ = Path.t t
 type local = Path.Build.t t
 
-val user_written_deps : _ t -> Lib_dep.t list
 val of_local : local -> external_
 val as_local_exn : external_ -> local
 val set_version : 'a t -> Package_version.t option -> 'a t
@@ -172,19 +192,19 @@ val set_version : 'a t -> Package_version.t option -> 'a t
 val for_dune_package
   :  Path.t t
   -> name:Lib_name.t
-  -> ppx_runtime_deps:(Loc.t * Lib_name.t) list
-  -> requires:Lib_dep.t list
+  -> ppx_runtime_deps:(Loc.t * Lib_name.t) list Compilation_mode.Per_mode.t
+  -> requires:Lib_dep.t list Compilation_mode.Per_mode.t
   -> foreign_objects:Path.t list
   -> obj_dir:Path.t Obj_dir.t
   -> implements:(Loc.t * Lib_name.t) option
+  -> parameters:(Loc.t * Lib_name.t) list
   -> default_implementation:(Loc.t * Lib_name.t) option
   -> sub_systems:Sub_system_info.t Sub_system_name.Map.t
   -> melange_runtime_deps:Path.t list
   -> public_headers:Path.t list
-  -> modules:Modules.With_vlib.t
+  -> modes:Lib_mode.Map.Set.t
+  -> modules:Modules.With_vlib.t option Compilation_mode.Per_mode.t
   -> Path.t t
-
-val map_path : Path.t t -> f:(Path.t -> Path.t) -> Path.t t
 
 type 'a path =
   | Local : Path.Build.t path
@@ -203,34 +223,50 @@ val create
   -> version:Package_version.t option
   -> synopsis:string option
   -> main_module_name:Main_module_name.t
+  -> local_main_module_name:Module_name.t option
   -> sub_systems:Sub_system_info.t Sub_system_name.Map.t
-  -> requires:Lib_dep.t list
+  -> requires:Lib_dep.t list Compilation_mode.Per_mode.t
+  -> parameters:(Loc.t * Lib_name.t) list
   -> foreign_objects:'a list Source.t
   -> public_headers:'a File_deps.t
   -> plugins:'a list Mode.Dict.t
   -> archives:'a list Mode.Dict.t
-  -> ppx_runtime_deps:(Loc.t * Lib_name.t) list
+  -> ppx_runtime_deps:(Loc.t * Lib_name.t) list Compilation_mode.Per_mode.t
+  -> allow_unused_libraries:(Loc.t * Lib_name.t) list
   -> foreign_archives:'a Mode.Map.Multi.t
   -> native_archives:'a native_archives
   -> foreign_dll_files:'a list
   -> jsoo_runtime:'a list
   -> wasmoo_runtime:'a list
-  -> preprocess:Preprocess.With_instrumentation.t Preprocess.Per_module.t
+  -> preprocess:
+       Preprocess.With_instrumentation.t Preprocess.Per_module.t
+         Compilation_mode.Per_mode.t
   -> enabled:Enabled_status.t Memo.t
   -> virtual_deps:(Loc.t * Lib_name.t) list
   -> dune_version:Dune_lang.Syntax.Version.t option
-  -> virtual_:Modules.t Source.t option
-  -> entry_modules:(Module_name.t list, User_message.t) result Source.t
+  -> entry_modules:
+       (Module_name.t list option Compilation_mode.Per_mode.t, User_message.t) result
+         Source.t
   -> implements:(Loc.t * Lib_name.t) option
   -> default_implementation:(Loc.t * Lib_name.t) option
   -> modes:Lib_mode.Map.Set.t
-  -> modules:Modules.With_vlib.t option Source.t
+  -> modules:Modules.With_vlib.t option Compilation_mode.Per_mode.t Source.t
   -> wrapped:Wrapped.t Inherited.t option
   -> special_builtin_support:(Loc.t * Special_builtin_support.t) option
   -> exit_module:Module_name.t option
   -> instrumentation_backend:(Loc.t * Lib_name.t) option
   -> melange_runtime_deps:'a File_deps.t
+  -> root_module:Module_name.t option
   -> 'a t
 
+(** The package to depend on, if known. For managed installed libraries,
+    this is the owning lock package, which can differ from the findlib root. *)
 val package : _ t -> Package.Name.t option
+
 val to_dyn : 'path Dyn.builder -> 'path t Dyn.builder
+
+val for_instance
+  :  dir:Path.Build.t
+  -> ext_lib:Filename.Extension.t option
+  -> Path.t t
+  -> Path.Build.t t

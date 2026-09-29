@@ -1,11 +1,20 @@
 open Import
 
+let () =
+  if
+    Option.is_none (Sys.getenv_opt "OCAMLRUNPARAM")
+    && Option.is_none (Sys.getenv_opt "CAMLRUNPARAM")
+  then (
+    let control = Gc.get () in
+    Gc.set { control with space_overhead = 500 })
+;;
+
 let all : _ Cmdliner.Cmd.t list =
   let terms =
     Runtest.commands
     @ [ Installed_libraries.command
       ; External_lib_deps.command
-      ; Build_cmd.build
+      ; Build.build
       ; Fmt.command
       ; Clean.command
       ; Install_uninstall.install
@@ -13,32 +22,34 @@ let all : _ Cmdliner.Cmd.t list =
       ; Exec.command
       ; Subst.command
       ; Print_rules.command
-      ; Utop.command
+      ; Ocaml.Utop.command
       ; Promotion.promote
-      ; command_alias Printenv.command Printenv.term "printenv"
+      ; Common.command_alias Printenv.command Printenv.term "printenv"
       ; Help.command
       ; Format_dune_file.command
       ; Upgrade.command
       ; Cache.command
-      ; Top.command
-      ; Ocaml_merlin.command
+      ; Ocaml.Top.command
+      ; Ocaml.Ocaml_merlin.command
       ; Shutdown.command
       ; Diagnostics.command
       ; Monitor.command
+      ; Completion.command
       ]
   in
   let groups =
-    [ Ocaml_cmd.group
-    ; Coq.group
+    [ Ocaml.Ocaml_cmd.group
+    ; Rocq.group
     ; Describe.group
     ; Describe.Show.group
-    ; Rpc.group
+    ; Rpc.Group.group
     ; Internal.group
     ; Init.group
     ; Promotion.group
-    ; Pkg.group
-    ; Pkg.Alias.group
-    ; Tools.group
+    ; Pkg.Group.group
+    ; Pkg.Group.Alias.group
+    ; Tools.Group.group
+    ; Trace.group
     ]
   in
   terms @ groups
@@ -108,8 +119,9 @@ let () =
     | Ok _ -> exit_and_flush Success
     | Error _ -> exit_and_flush Error
   with
-  | Scheduler.Run.Shutdown.E Requested -> exit_and_flush Success
-  | Scheduler.Run.Shutdown.E (Signal _) -> exit_and_flush Signal
+  | Dune_scheduler.Shutdown.E Failure -> exit_and_flush Error
+  | Dune_scheduler.Shutdown.E Requested -> exit_and_flush Success
+  | Dune_scheduler.Shutdown.E (Signal _) -> exit_and_flush Signal
   | exn ->
     let exn = Exn_with_backtrace.capture exn in
     Dune_util.Report_error.report exn;

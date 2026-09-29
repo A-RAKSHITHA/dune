@@ -1,3 +1,5 @@
+(include_subdirs qualified)
+
 (library
  (name stdune)
  (public_name stdune)
@@ -6,14 +8,48 @@
  (libraries
   unix
   csexp
+  threads
+  threads.posix
+  (re_export top-closure)
   (re_export ordering)
   (re_export dyn)
   (re_export pp)
-  (re_export dune_filesystem_stubs))
+  fs-io)
+ (root_module root)
  (library_flags
-  (:include flags/sexp))
+  (:include ../flags/sexp))
  (foreign_stubs
   (language c)
-  (names wait4_stubs platform_stubs copyfile_stubs signal_stubs))
- (instrumentation
-  (backend bisect_ppx)))
+  (names spawn_stubs)
+  (flags
+   (:standard
+    (:include spawn_flags.sexp))))
+ (foreign_stubs
+  (language c)
+  (names
+   dune_flock
+   readdir
+   wait4_stubs
+   platform_stubs
+   copyfile_stubs
+   signal_stubs
+   string_stubs
+   time_stubs)))
+
+(rule
+ (target spawn_flags.sexp)
+ (enabled_if
+  (= %{os_type} "Win32"))
+ (action
+  (with-stdout-to
+   %{target}
+   (echo "(-DUNICODE -D_UNICODE)"))))
+
+(rule
+ (target spawn_flags.sexp)
+ (enabled_if
+  (<> %{os_type} "Win32"))
+ (action
+  (with-stdout-to
+   %{target}
+   (echo "()"))))

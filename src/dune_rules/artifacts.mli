@@ -7,6 +7,7 @@ type origin =
   ; dir : Path.Build.t
   ; dst : Path.Local.t
   ; enabled_if : bool Memo.t
+  ; package : Package.Name.t option
   }
 
 type where =
@@ -24,17 +25,29 @@ val bin_dir_basename : Filename.t
     rules defined in [dir] *)
 val local_bin : Path.Build.t -> Path.Build.t
 
+(** Binaries that are symlinked in the associated .bin directory *)
+val local_binaries : t -> File_binding.Expanded.t list Memo.t
+
 (** A named artifact that is looked up in the PATH if not found in the tree If
     the name is an absolute path, it is used as it. *)
 val binary
   :  t
   -> ?hint:string
   -> ?where:where
+  -> dir:Path.Build.t
   -> loc:Loc.t option
-  -> Filename.t
+  -> string
   -> Action.Prog.t Memo.t
 
-val binary_available : t -> string -> bool Memo.t
+(** Return the installed filename when the selected binary is from a local
+    package. *)
+val local_binary_install_name
+  :  t
+  -> dir:Path.Build.t
+  -> string
+  -> Filename.t option Memo.t
+
+val binary_available : t -> dir:Path.Build.t -> string -> bool Memo.t
 val add_binaries : t -> dir:Path.Build.t -> File_binding.Expanded.t list -> t
 
 val create

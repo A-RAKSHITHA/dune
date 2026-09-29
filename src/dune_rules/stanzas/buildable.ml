@@ -1,5 +1,6 @@
 open Import
 open Dune_lang.Decoder
+module Ocaml_flags = Dune_lang.Ocaml_flags
 
 type for_ =
   | Executable
@@ -7,20 +8,77 @@ type for_ =
 
 type t =
   { loc : Loc.t
-  ; modules : Stanza_common.Modules_settings.t
+  ; modules : Modules_settings.t
+  ; melange_modules : Ordered_set_lang.Unexpanded.t option
   ; empty_module_interface_if_absent : bool
   ; libraries : Lib_dep.t list
+  ; melange_libraries : Lib_dep.t list option
   ; foreign_archives : (Loc.t * Foreign.Archive.t) list
   ; extra_objects : Foreign.Objects.t
   ; foreign_stubs : Foreign.Stubs.t list
-  ; preprocess : Preprocess.With_instrumentation.t Preprocess.Per_module.t
-  ; preprocessor_deps : Dep_conf.t list
+  ; preprocess : Preprocess.preprocess
+  ; melange_preprocess : Preprocess.preprocess
   ; lint : Preprocess.Without_instrumentation.t Preprocess.Per_module.t
   ; flags : Ocaml_flags.Spec.t
   ; js_of_ocaml : Js_of_ocaml.In_buildable.t Js_of_ocaml.Mode.Pair.t
   ; allow_overlapping_dependencies : bool
+  ; allow_unused_libraries : (Loc.t * Lib_name.t) list
   ; ctypes : Ctypes_field.t option
   }
+
+let decode_libraries ~allow_re_export =
+  field "libraries" (Lib_dep.L.decode ~allow_re_export) ~default:[]
+;;
+
+let decode_ocaml_flags = Ocaml_flags.Spec.decode
+let decode_modules = Modules_settings.decode
+let decode_lint = field "lint" Lint.decode ~default:Lint.default
+let decode_allow_overlapping = field_b "allow_overlapping_dependencies"
+
+let decode_allow_unused_libraries =
+  field
+    "allow_unused_libraries"
+    (let* () = Dune_lang.Unreleased.since () in
+     repeat (located Lib_name.decode))
+    ~default:[]
+;;
+
+let decode_melange_preprocess =
+  let+ preprocess =
+    field_o
+      "melange.preprocess"
+      (Dune_lang.Syntax.since Stanza.syntax (3, 24) >>> Preprocess.Per_module.decode)
+  and+ preprocessor_deps =
+    field_o
+      "melange.preprocessor_deps"
+      (Dune_lang.Syntax.since Stanza.syntax (3, 24)
+       >>> let+ loc = loc
+           and+ l = repeat Dep_conf.decode in
+           loc, l)
+  and+ syntax = Dune_lang.Syntax.get_exn Stanza.syntax in
+  let preprocessor_deps =
+    match preprocessor_deps, preprocess with
+    | Some _, None | None, _ -> []
+    | Some (loc, deps), Some preprocess ->
+      let deps_might_be_used =
+        Module_reference.Per_item.exists preprocess ~f:(fun p ->
+          match p with
+          | Preprocess.Action _ | Preprocess.Pps _ -> true
+          | Preprocess.No_preprocessing | Preprocess.Future_syntax _ -> false)
+      in
+      if not deps_might_be_used
+      then
+        User_warning.emit
+          ~loc
+          ~is_error:(syntax >= (2, 0))
+          [ Pp.text
+              "This melange.preprocessor_deps field will be ignored because no \
+               preprocessor that might use them is configured."
+          ];
+      deps
+  in
+  preprocess, preprocessor_deps
+;;
 
 let decode (for_ : for_) =
   let use_foreign =
@@ -41,12 +99,13 @@ let decode (for_ : for_) =
     | Some names ->
       let names = Ordered_set_lang.replace_standard_with_empty names in
       let flags = Option.value ~default:Ordered_set_lang.Unexpanded.standard flags in
-      Foreign.Stubs.make ~loc ~language ~names ~mode:Mode.Select.All ~flags
-      :: foreign_stubs
+      Foreign.Stubs.make ~loc ~language ~names ~flags :: foreign_stubs
   in
   let+ loc = loc
+  and+ instrumentation = Preprocess.Instrumentation.instrumentation
   and+ preprocess, preprocessor_deps = Preprocess.preprocess_fields
-  and+ lint = field "lint" Lint.decode ~default:Lint.default
+  and+ melange_preprocess, melange_preprocessor_deps = decode_melange_preprocess
+  and+ lint = decode_lint
   and+ foreign_stubs =
     multi_field
       "foreign_stubs"
@@ -57,9 +116,10 @@ let decode (for_ : for_) =
       (Dune_lang.Syntax.since Stanza.syntax (2, 0)
        >>> repeat (located Foreign.Archive.decode))
   and+ extra_objects =
-    field_o
+    field
       "extra_objects"
       (Dune_lang.Syntax.since Stanza.syntax (3, 5) >>> Foreign.Objects.decode)
+      ~default:Foreign.Objects.empty
   and+ c_flags =
     only_in_library
       (field_o "c_flags" (use_foreign >>> Ordered_set_lang.Unexpanded.decode))
@@ -72,7 +132,12 @@ let decode (for_ : for_) =
   and+ cxx_names_loc, cxx_names =
     located
       (only_in_library (field_o "cxx_names" (use_foreign >>> Ordered_set_lang.decode)))
-  and+ modules = Stanza_common.Modules_settings.decode
+  and+ modules = decode_modules
+  and+ melange_modules =
+    Ordered_set_lang.Unexpanded.field_o
+      ~check:(Dune_lang.Syntax.since Stanza.syntax (3, 24))
+      ~since_expanded:Modules_settings.since_expanded
+      "melange.modules"
   and+ self_build_stubs_archive_loc, self_build_stubs_archive =
     located
       (only_in_library
@@ -86,7 +151,12 @@ let decode (for_ : for_) =
              >>> enter (maybe string))))
   and+ libraries =
     field "libraries" (Lib_dep.L.decode ~allow_re_export:in_library) ~default:[]
-  and+ flags = Ocaml_flags.Spec.decode
+  and+ melange_libraries =
+    field_o
+      "melange.libraries"
+      (Dune_lang.Syntax.since Stanza.syntax (3, 24)
+       >>> Lib_dep.L.decode ~allow_re_export:in_library)
+  and+ flags = decode_ocaml_flags
   and+ js_of_ocaml =
     field
       "js_of_ocaml"
@@ -98,24 +168,29 @@ let decode (for_ : for_) =
       (Dune_lang.Syntax.since Stanza.syntax (3, 17)
        >>> Js_of_ocaml.In_buildable.decode ~in_library ~mode:Wasm)
       ~default:Js_of_ocaml.In_buildable.default
-  and+ allow_overlapping_dependencies = field_b "allow_overlapping_dependencies"
+  and+ allow_overlapping_dependencies = decode_allow_overlapping
+  and+ allow_unused_libraries = decode_allow_unused_libraries
   and+ version = Dune_lang.Syntax.get_exn Stanza.syntax
   and+ ctypes =
     field_o
       "ctypes"
       (Dune_lang.Syntax.since Ctypes_field.syntax (0, 1) >>> Ctypes_field.decode)
-  and+ instrumentation = Preprocess.Instrumentation.instrumentation
   and+ empty_module_interface_if_absent =
     field_b
       "empty_module_interface_if_absent"
       ~check:(Dune_lang.Syntax.since Stanza.syntax (3, 0))
   in
   let preprocess =
-    let init =
-      let f libname = Preprocess.With_instrumentation.Ordinary libname in
-      Module_name.Per_item.map preprocess ~f:(Preprocess.map ~f)
-    in
-    List.fold_left instrumentation ~init ~f:Preprocess.Per_module.add_instrumentation
+    Preprocess.preprocess_config ~preprocess ~instrumentation ~preprocessor_deps
+  in
+  let melange_preprocess =
+    match melange_preprocess with
+    | None -> preprocess
+    | Some preprocess ->
+      Preprocess.preprocess_config
+        ~preprocess
+        ~instrumentation
+        ~preprocessor_deps:melange_preprocessor_deps
   in
   let foreign_stubs =
     foreign_stubs
@@ -157,20 +232,22 @@ let decode (for_ : for_) =
          the "lib" prefix, however, since standard linkers require it). *)
       | Some name -> (loc, Foreign.Archive.stubs name) :: foreign_archives)
   in
-  let extra_objects = Option.value ~default:Foreign.Objects.empty extra_objects in
   { loc
   ; preprocess
-  ; preprocessor_deps
+  ; melange_preprocess
   ; lint
   ; modules
+  ; melange_modules
   ; empty_module_interface_if_absent
   ; foreign_stubs
   ; foreign_archives
   ; extra_objects
   ; libraries
+  ; melange_libraries
   ; flags
   ; js_of_ocaml = { js = js_of_ocaml; wasm = wasm_of_ocaml }
   ; allow_overlapping_dependencies
+  ; allow_unused_libraries
   ; ctypes
   }
 ;;

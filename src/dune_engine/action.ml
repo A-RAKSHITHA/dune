@@ -1,5 +1,5 @@
 open Import
-include Dune_util.Action
+open Stdune.Action_types
 module Ext = Action_intf.Ext
 
 module type T = sig
@@ -24,7 +24,10 @@ module Make
 struct
   include Ast
 
-  let run prog args = Run (prog, Array.Immutable.of_list args)
+  let run prog args =
+    Run { prog; args = Appendable_list.of_list args; can_run_in_action_runner = true }
+  ;;
+
   let chdir path t = Chdir (path, t)
   let setenv var value t = Setenv (var, value, t)
 
@@ -50,33 +53,45 @@ struct
   let cat ps = Cat ps
   let copy a b = Copy (a, b)
   let symlink a b = Symlink (a, b)
-  let bash s = Bash s
+  let system s = System s
+  let bash script = Bash { script; can_run_in_action_runner = true }
   let write_file ?(perm = File_perm.Normal) p s = Write_file (p, perm, s)
   let rename a b = Rename (a, b)
   let remove_tree path = Remove_tree path
   let mkdir path = Mkdir path
+
+  let diff
+        ?(optional = false)
+        ?(mode = Diff.Mode.Text)
+        ?(directory_diffs = true)
+        file1
+        file2
+    =
+    Diff { optional; mode; directory_diffs; file1; file2 }
+  ;;
 end
 
 module Prog = struct
   module Not_found = struct
     type t =
       { context : Context_name.t
-      ; program : string
+      ; program : Filename.t
       ; hint : string option
       ; loc : Loc.t option
       }
 
     let create ?hint ~context ~program ~loc () = { hint; context; program; loc }
+    let program t = t.program
 
     let raise { context; program; hint; loc } =
-      raise (User_error.E (Utils.program_not_found_message ?hint ~loc ~context program))
+      Utils.program_not_found ?hint ~loc ~context (Filename.to_string program)
     ;;
 
     let to_dyn { context; program; hint; loc = _ } =
       let open Dyn in
       record
         [ "context", Context_name.to_dyn context
-        ; "program", string program
+        ; "program", Filename.to_dyn program
         ; "hint", option string hint
         ]
     ;;
@@ -170,7 +185,132 @@ let for_shell t =
     ~f_program:(fun ~dir x ->
       match x with
       | Ok p -> Path.reach p ~from:dir
-      | Error e -> e.program)
+      | Error e -> Filename.to_string e.program)
+;;
+
+let digest =
+  let open Dune_digest.Manual in
+  let digest_outputs d outputs = repr d Outputs.repr outputs in
+  let digest_inputs d inputs = repr d Inputs.repr inputs in
+  let digest_file_perm d perm = repr d File_perm.repr perm in
+  let digest_mode d mode = repr d Diff.Mode.repr mode in
+  let digest_program d ~dir (program : Prog.t) =
+    match program with
+    | Ok p -> string d (Path.reach p ~from:dir)
+    | Error e -> string d (Filename.to_string e.program)
+  in
+  let digest_path d ~dir path = string d (Path.reach path ~from:dir) in
+  let digest_target d ~dir target = string d (Path.reach (Path.build target) ~from:dir) in
+  let digest_ext d ~dir ((module A) : Encode_ext.t) =
+    repr
+      d
+      Sexp.repr
+      (A.Spec.encode
+         A.v
+         (fun p -> Sexp.Atom (Path.reach p ~from:dir))
+         (fun p -> Sexp.Atom (Path.reach (Path.build p) ~from:dir)))
+  in
+  let rec loop d t ~dir =
+    match t with
+    | Run { prog; args; can_run_in_action_runner = _ } ->
+      int d 0;
+      digest_program d ~dir prog;
+      int d (Appendable_list.length args);
+      Appendable_list.iter args ~f:(string d)
+    | With_accepted_exit_codes (pred, t) ->
+      int d 1;
+      repr d (Predicate_lang.repr Repr.int) pred;
+      loop d t ~dir
+    | Chdir (path, t) ->
+      int d 2;
+      digest_path d ~dir path;
+      loop d t ~dir:path
+    | Setenv (var, value, t) ->
+      int d 3;
+      string d var;
+      string d value;
+      loop d t ~dir
+    | Redirect_out (outputs, target, perm, t) ->
+      int d 4;
+      digest_outputs d outputs;
+      digest_target d ~dir target;
+      digest_file_perm d perm;
+      loop d t ~dir
+    | Redirect_in (inputs, path, t) ->
+      int d 5;
+      digest_inputs d inputs;
+      digest_path d ~dir path;
+      loop d t ~dir
+    | Ignore (outputs, t) ->
+      int d 6;
+      digest_outputs d outputs;
+      loop d t ~dir
+    | Progn ts ->
+      int d 7;
+      list d ts ~f:(fun d t -> loop d t ~dir)
+    | Concurrent ts ->
+      int d 8;
+      list d ts ~f:(fun d t -> loop d t ~dir)
+    | Echo xs ->
+      int d 9;
+      list d xs ~f:string
+    | Cat paths ->
+      int d 10;
+      list d paths ~f:(fun d path -> digest_path d ~dir path)
+    | Copy (src, dst) ->
+      int d 11;
+      digest_path d ~dir src;
+      digest_target d ~dir dst
+    | Symlink (src, dst) ->
+      int d 12;
+      let src =
+        match Path.Build.parent dst with
+        | None -> Path.to_string src
+        | Some from -> Path.reach ~from:(Path.build from) src
+      in
+      string d src;
+      digest_target d ~dir dst
+    | Hardlink (src, dst) ->
+      int d 13;
+      digest_path d ~dir src;
+      digest_target d ~dir dst
+    | Bash { script; can_run_in_action_runner = _ } ->
+      int d 14;
+      string d script
+    | Write_file (target, perm, contents) ->
+      int d 15;
+      digest_target d ~dir target;
+      digest_file_perm d perm;
+      string d contents
+    | Rename (src, dst) ->
+      int d 16;
+      digest_target d ~dir src;
+      digest_target d ~dir dst
+    | Remove_tree target ->
+      int d 17;
+      digest_target d ~dir target
+    | Mkdir target ->
+      int d 18;
+      digest_target d ~dir target
+    | Pipe (outputs, ts) ->
+      int d 19;
+      digest_outputs d outputs;
+      list d ts ~f:(fun d t -> loop d t ~dir)
+    | Diff { optional; mode; directory_diffs; file1; file2 } ->
+      int d 20;
+      bool d optional;
+      digest_mode d mode;
+      bool d directory_diffs;
+      digest_path d ~dir file1;
+      digest_target d ~dir file2
+    | Extension ext ->
+      int d 21;
+      digest_ext d ~dir ext
+    | System command ->
+      int d 22;
+      string d command
+  in
+  fun d t -> loop d t ~dir:Path.root
 ;;
 
 let fold_one_step t ~init:acc ~f =
@@ -183,17 +323,18 @@ let fold_one_step t ~init:acc ~f =
   | With_accepted_exit_codes (_, t) -> f acc t
   | Progn l | Pipe (_, l) | Concurrent l -> List.fold_left l ~init:acc ~f
   | Run _
-  | Dynamic_run _
   | Echo _
   | Cat _
   | Copy _
   | Symlink _
   | Hardlink _
+  | System _
   | Bash _
   | Write_file _
   | Rename _
   | Remove_tree _
   | Mkdir _
+  | Diff _
   | Extension _ -> acc
 ;;
 
@@ -219,27 +360,32 @@ let chdirs =
 
 let empty = Progn []
 
-let rec is_dynamic = function
-  | Dynamic_run _ -> true
-  | Chdir (_, t)
-  | Setenv (_, _, t)
-  | Redirect_out (_, _, _, t)
-  | Redirect_in (_, _, t)
-  | Ignore (_, t)
-  | With_accepted_exit_codes (_, t) -> is_dynamic t
-  | Progn l | Pipe (_, l) | Concurrent l -> List.exists l ~f:is_dynamic
-  | Run _
-  | Bash _
-  | Echo _
-  | Cat _
-  | Copy _
-  | Symlink _
-  | Hardlink _
-  | Write_file _
-  | Rename _
-  | Remove_tree _
-  | Mkdir _
-  | Extension _ -> false
+let exists t ~leaf ~extension =
+  let rec loop = function
+    | Chdir (_, t)
+    | Setenv (_, _, t)
+    | Redirect_out (_, _, _, t)
+    | Redirect_in (_, _, t)
+    | Ignore (_, t)
+    | With_accepted_exit_codes (_, t) -> loop t
+    | Progn l | Pipe (_, l) | Concurrent l -> List.exists l ~f:loop
+    | Extension extension_ -> extension extension_
+    | t -> leaf t
+  in
+  loop t
+;;
+
+let is_dynamic t =
+  exists t ~leaf:(fun _ -> false) ~extension:(fun (module A) -> A.Spec.is_dynamic)
+;;
+
+let runs_process t =
+  exists
+    t
+    ~leaf:(function
+      | Run _ | System _ | Bash _ | Diff _ -> true
+      | _ -> false)
+    ~extension:(fun (module A) -> A.Spec.runs_process)
 ;;
 
 let maybe_sandbox_path sandbox p =
@@ -287,9 +433,10 @@ let is_useful_to memoize =
     | Write_file _ -> true
     | Rename _ -> memoize
     | Remove_tree _ -> false
+    | Diff _ -> false
     | Mkdir _ -> false
     | Run _ -> true
-    | Dynamic_run _ -> true
+    | System _ -> true
     | Bash _ -> true
     | Extension (module A) -> A.Spec.is_useful_to ~memoize
   in
@@ -299,35 +446,103 @@ let is_useful_to memoize =
     | false -> Clearly_not
 ;;
 
-let is_useful_to_distribute = is_useful_to false
 let is_useful_to_memoize = is_useful_to true
 
 module Full = struct
-  module T = struct
-    type nonrec t =
-      { action : t
-      ; env : Env.t
-      ; locks : Path.t list
+  module Props = struct
+    type t =
+      { env : Env.t
+      ; locks : Path.Set.t
       ; can_go_in_shared_cache : bool
+      ; can_use_sandbox_policy : bool
       ; sandbox : Sandbox_config.t
+      ; corrections : Corrections.t option
       }
 
     let empty =
-      { action = Progn []
-      ; env = Env.empty
-      ; locks = []
+      { env = Env.empty
+      ; locks = Path.Set.empty
       ; can_go_in_shared_cache = true
+      ; can_use_sandbox_policy = true
       ; sandbox = Sandbox_config.default
+      ; corrections = None
       }
     ;;
 
-    let combine { action; env; locks; can_go_in_shared_cache; sandbox } x =
-      { action = combine action x.action
-      ; env = Env.extend_env env x.env
-      ; locks = locks @ x.locks
-      ; can_go_in_shared_cache = can_go_in_shared_cache && x.can_go_in_shared_cache
-      ; sandbox = Sandbox_config.inter sandbox x.sandbox
+    let combine_corrections (x : Corrections.t option) (y : Corrections.t option) =
+      match x, y with
+      | None, x -> x
+      | x, None -> x
+      | Some Produce, Some Produce -> Some Produce
+      | Some Ignore, Some Ignore -> Some Ignore
+      | Some x, Some y ->
+        Code_error.raise
+          "incompatible corrections settings for action"
+          [ "x", Corrections.to_dyn x; "y", Corrections.to_dyn y ]
+    ;;
+
+    let combine
+          { env
+          ; locks
+          ; can_go_in_shared_cache
+          ; can_use_sandbox_policy
+          ; sandbox
+          ; corrections
+          }
+          t
+      =
+      { env = Env.extend_env env t.env
+      ; locks = Path.Set.union locks t.locks
+      ; can_go_in_shared_cache = can_go_in_shared_cache && t.can_go_in_shared_cache
+      ; can_use_sandbox_policy = can_use_sandbox_policy && t.can_use_sandbox_policy
+      ; sandbox = Sandbox_config.inter sandbox t.sandbox
+      ; corrections = combine_corrections corrections t.corrections
       }
+    ;;
+
+    let make ~env ~locks ~can_go_in_shared_cache ~sandbox ~corrections =
+      { env
+      ; locks = Path.Set.of_list locks
+      ; can_go_in_shared_cache
+      ; can_use_sandbox_policy = true
+      ; sandbox
+      ; corrections
+      }
+    ;;
+
+    let add_env t env = { t with env = Env.extend_env t.env env }
+
+    let add_locks t locks =
+      { t with locks = Path.Set.union t.locks (Path.Set.of_list locks) }
+    ;;
+
+    let add_can_go_in_shared_cache t can_go_in_shared_cache =
+      { t with
+        can_go_in_shared_cache = t.can_go_in_shared_cache && can_go_in_shared_cache
+      }
+    ;;
+
+    let disable_sandbox_policy t = { t with can_use_sandbox_policy = false }
+
+    let add_sandbox t sandbox =
+      { t with sandbox = Sandbox_config.inter t.sandbox sandbox }
+    ;;
+
+    let add_corrections t corrections =
+      { t with corrections = combine_corrections (Some corrections) t.corrections }
+    ;;
+  end
+
+  module T = struct
+    type nonrec t =
+      { action : t
+      ; props : Props.t
+      }
+
+    let empty = { action = Progn []; props = Props.empty }
+
+    let combine { action; props } t =
+      { action = combine action t.action; props = Props.combine props t.props }
     ;;
   end
 
@@ -339,18 +554,29 @@ module Full = struct
         ?(locks = [])
         ?(can_go_in_shared_cache = !Clflags.can_go_in_shared_cache_default)
         ?(sandbox = Sandbox_config.default)
+        ?corrections
         action
     =
-    { action; env; locks; can_go_in_shared_cache; sandbox }
+    let props = Props.make ~env ~locks ~can_go_in_shared_cache ~sandbox ~corrections in
+    { action; props }
   ;;
 
   let map t ~f = { t with action = f t.action }
-  let add_env e t = { t with env = Env.extend_env t.env e }
-  let add_locks l t = { t with locks = t.locks @ l }
 
-  let add_can_go_in_shared_cache b t =
-    { t with can_go_in_shared_cache = t.can_go_in_shared_cache && b }
+  let add_env env t =
+    if Env.is_empty env then t else { t with props = Props.add_env t.props env }
   ;;
 
-  let add_sandbox s t = { t with sandbox = Sandbox_config.inter t.sandbox s }
+  let add_locks locks t = { t with props = Props.add_locks t.props locks }
+
+  let add_can_go_in_shared_cache can_go_in_shared_cache t =
+    { t with props = Props.add_can_go_in_shared_cache t.props can_go_in_shared_cache }
+  ;;
+
+  let disable_sandbox_policy t = { t with props = Props.disable_sandbox_policy t.props }
+  let add_sandbox sandbox t = { t with props = Props.add_sandbox t.props sandbox }
+
+  let add_corrections corrections t =
+    { t with props = Props.add_corrections t.props corrections }
+  ;;
 end

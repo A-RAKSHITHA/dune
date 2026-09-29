@@ -1,10 +1,10 @@
 Exercise dune resolving the post dependencies found in compiler packages.
 
-  $ . ./helpers.sh
   $ mkrepo
 
   $ cat >dune-workspace << EOF
-  > (lang dune 3.16)
+  > (lang dune 3.20)
+  > (pkg enabled)
   > (lock_dir
   >  (path dune.lock)
   >  (repositories mock)

@@ -1,23 +1,6 @@
 include OpamUrl
 open Stdune
-
-module T = struct
-  type nonrec t = t
-
-  let to_dyn t = Dyn.string (OpamUrl.to_string t)
-  let compare x y = Ordering.of_int (OpamUrl.compare x y)
-end
-
-include T
-
-let decode_loc =
-  let open Dune_sexp.Decoder in
-  map_validate (located string) ~f:(fun (loc, s) ->
-    match OpamUrl.of_string s with
-    | url -> Ok (loc, url)
-    | exception OpamUrl.Parse_error m ->
-      Error (User_message.make [ Pp.text "invalid url "; Pp.text m ]))
-;;
+include Dune_lang.Url
 
 let rev t = t.hash
 let hash = Poly.hash
@@ -33,7 +16,7 @@ let is_supported_archive t = Option.is_some (Archive_driver.choose_for_filename 
 
 let classify url loc =
   match (url : t).backend with
-  | `rsync when is_local url -> `Path (Path.of_string url.path)
+  | `rsync when is_local url -> `Path (Path.of_string_allow_outside_workspace url.path)
   | `git -> `Git
   | `http when is_supported_archive url -> `Archive
   | `rsync | `http | `darcs | `hg ->
@@ -44,20 +27,22 @@ let classify url loc =
       ]
 ;;
 
-include Comparable.Make (T)
+include Comparable.Make (Dune_lang.Url)
 
-let remote t ~loc rev_store = Rev_store.remote rev_store ~url:(loc, OpamUrl.base_url t)
+let remote t ~loc rev_store = Rev_store.remote rev_store ~loc ~url:(OpamUrl.base_url t)
 
 type resolve =
   | Resolved of Rev_store.Object.resolved
   | Unresolved of Rev_store.Object.t
 
-let not_found t =
+let not_found ~loc ~git_output t =
   let url = base_url t in
   let rev = rev t in
+  let git_output = List.map ~f:Pp.verbatim git_output in
   Error
-    (User_message.make
-       [ (match rev with
+    (User_message.make ~loc
+     @@ git_output
+     @ [ (match rev with
           | None -> Pp.textf "default branch not found in %s" url
           | Some rev -> Pp.textf "revision %S not found in %s" rev url)
        ])
@@ -89,7 +74,7 @@ let resolve t ~loc rev_store =
   | `Ref revision ->
     Rev_store.resolve_revision rev_store remote ~revision
     >>| (function
-     | None -> not_found t
+     | None -> not_found ~loc ~git_output:[] t
      | Some o -> Ok (Resolved o))
 ;;
 
@@ -101,8 +86,16 @@ let fetch_revision t ~loc resolve rev_store =
   | Unresolved o ->
     Rev_store.fetch_object rev_store remote o
     >>| (function
-     | None -> not_found t
-     | Some rev -> Ok rev)
+     | Error git_output -> not_found ~loc ~git_output t
+     | Ok rev -> Ok rev)
 ;;
 
-let set_rev (t : t) rev = { t with hash = Some (Rev_store.Object.to_string rev) }
+let resolve_and_fetch_revision t ~loc rev_store =
+  let open Fiber.O in
+  resolve t ~loc rev_store
+  >>= function
+  | Error _ as error -> Fiber.return error
+  | Ok resolved -> fetch_revision t ~loc resolved rev_store
+;;
+
+let set_rev (t : t) rev = { t with hash = Some (Rev_store.Object.to_hex rev) }

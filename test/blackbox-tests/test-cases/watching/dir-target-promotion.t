@@ -1,13 +1,8 @@
 Test directory target promotion in file-watching mode.
 
-  $ . ./helpers.sh
-
   $ echo '(lang dune 3.0)' > dune-project
   $ mkdir test; cd test
-  $ cat > dune-project <<EOF
-  > (lang dune 3.0)
-  > (using directory-targets 0.1)
-  > EOF
+  $ make_directory_targets_project 3.0
   $ cat > dune <<EOF
   > (rule
   >  (mode promote)
@@ -94,59 +89,117 @@ Add some unexpected files and directories and check that Dune deletes them.
 
 We're done.
 
-  $ stop_dune
-  Success, waiting for filesystem changes...
-  Success, waiting for filesystem changes...
-  Success, waiting for filesystem changes...
-  Success, waiting for filesystem changes...
-  Success, waiting for filesystem changes...
-  Success, waiting for filesystem changes...
-  Success, waiting for filesystem changes...
-  Success, waiting for filesystem changes...
+  $ stop_dune_quiet
 
 Now test file-system events generated during directory target promotion.
 
   $ rm -rf d1
-  $ start_dune --debug-cache=fs
+  $ export DUNE_TRACE=cache
+  $ start_dune
   $ build d1
   Success
 
-  $ stop_dune > .#debug-output
+  $ stop_dune > /dev/null
 
 Show that Dune ignores the initial "dune-workspace" events (injected by Dune).
 
-  $ cat .#debug-output | grep dune-workspace
-  Updating dir_contents cache for "dune-workspace": Skipped
-  Updating file_digest cache for "dune-workspace": Skipped
-  Updating path_stat cache for "dune-workspace": Updated { changed = false }
+  $ dune trace cat | jq_dune 'cacheEvent("dune-workspace")'
+  {
+    "cache_type": "dir_contents",
+    "path": "dune-workspace",
+    "result": "skipped"
+  }
+  {
+    "cache_type": "file_digest",
+    "path": "dune-workspace",
+    "result": "skipped"
+  }
+  {
+    "cache_type": "path_stat",
+    "path": "dune-workspace",
+    "result": "unchanged"
+  }
 
 Dune correctly notices that the contents of . changed because [d1] was created.
 
-  $ cat .#debug-output | grep '"."'
-  Updating dir_contents cache for ".": Updated { changed = true }
-  Updating file_digest cache for ".": Skipped
-  Updating path_stat cache for ".": Updated { changed = false }
+  $ dune trace cat | jq_dune 'cacheEvent(".")'
+  {
+    "cache_type": "dir_contents",
+    "path": ".",
+    "result": "changed"
+  }
+  {
+    "cache_type": "file_digest",
+    "path": ".",
+    "result": "skipped"
+  }
+  {
+    "cache_type": "path_stat",
+    "path": ".",
+    "result": "unchanged"
+  }
 
 
 Here [path_stat] of [d1] changed, because it didn't exist before the build. Dune
 later recomputed [path_stat] once again, when [d1/b] was modified, and the
-result remained unchanged (because fields like [mtime] are ignored). The result
-of [dir_contents] also remained unchanged because Dune fixed the listing of [d1]
-by re-promoting the directory target.
+result remained unchanged (because fields like [mtime] are ignored). The
+[dir_contents] cache may be unchanged, or skipped while a force-update has
+evicted its entry. In either case, it must not report a change.
 
-  $ cat .#debug-output | grep \"d1\"
-  Updating dir_contents cache for "d1": Updated { changed = false }
-  Updating file_digest cache for "d1": Skipped
-  Updating path_stat cache for "d1": Updated { changed = true }
-  Updating dir_contents cache for "d1": Updated { changed = false }
-  Updating file_digest cache for "d1": Skipped
-  Updating path_stat cache for "d1": Updated { changed = false }
+  $ dune trace cat | jq_dune '
+  > cacheEvent("d1")
+  > | if .cache_type == "dir_contents"
+  >   then { cache_type, path, changed: (.result == "changed") }
+  >   else .
+  >   end'
+  {
+    "cache_type": "dir_contents",
+    "path": "d1",
+    "changed": false
+  }
+  {
+    "cache_type": "file_digest",
+    "path": "d1",
+    "result": "skipped"
+  }
+  {
+    "cache_type": "path_stat",
+    "path": "d1",
+    "result": "changed"
+  }
+  {
+    "cache_type": "dir_contents",
+    "path": "d1",
+    "changed": false
+  }
+  {
+    "cache_type": "file_digest",
+    "path": "d1",
+    "result": "skipped"
+  }
+  {
+    "cache_type": "path_stat",
+    "path": "d1",
+    "result": "unchanged"
+  }
 
 Events below occurred because we replaced file [d1/b] with a directory. Dune
 undid this change to bring the promoted directory target up to date, which
 explains why [file_digest] remained unchanged.
 
-  $ cat .#debug-output | grep d1/b
-  Updating dir_contents cache for "d1/b": Skipped
-  Updating file_digest cache for "d1/b": Updated { changed = false }
-  Updating path_stat cache for "d1/b": Skipped
+  $ dune trace cat | jq_dune 'cacheEvent("d1/b")'
+  {
+    "cache_type": "dir_contents",
+    "path": "d1/b",
+    "result": "skipped"
+  }
+  {
+    "cache_type": "file_digest",
+    "path": "d1/b",
+    "result": "unchanged"
+  }
+  {
+    "cache_type": "path_stat",
+    "path": "d1/b",
+    "result": "skipped"
+  }

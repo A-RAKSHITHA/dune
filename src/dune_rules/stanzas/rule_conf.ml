@@ -6,11 +6,14 @@ module Mode = struct
   include Rule_mode_decoder
 end
 
+let corrections = enum [ "ignore", Corrections.Ignore; "produce", Produce ]
+
 type t =
   { targets : String_with_vars.t Targets_spec.t
   ; deps : Dep_conf.t Bindings.t
   ; action : Loc.t * Dune_lang.Action.t
-  ; mode : Rule.Mode.t
+  ; corrections : Corrections.t option
+  ; mode : Rule_mode.t
   ; locks : Locks.t
   ; loc : Loc.t
   ; enabled_if : Blang.t
@@ -56,6 +59,7 @@ let atom_table =
     ; "target", Field
     ; "deps", Field
     ; "action", Field
+    ; "corrections", Field
     ; "locks", Field
     ; "fallback", Field
     ; "mode", Field
@@ -67,11 +71,12 @@ let atom_table =
     ]
 ;;
 
-let short_form =
-  let+ loc, action = located Dune_lang.Action.decode_dune_file in
+let short_form ~loc =
+  let+ action = located Dune_lang.Action.decode_dune_file in
   { targets = Infer
   ; deps = Bindings.empty
-  ; action = loc, action
+  ; action
+  ; corrections = None
   ; mode = Standard
   ; locks = []
   ; loc
@@ -84,26 +89,30 @@ let short_form =
 let directory_targets_extension =
   let syntax =
     Dune_lang.Syntax.create
-      ~name:"directory-targets"
+      ~name:(Syntax.Name.parse "directory-targets")
       ~desc:"experimental support for directory targets"
       ~experimental:true
-      [ (0, 1), `Since (3, 0) ]
+      [ (0, 1), `Since (3, 0); (0, 1), `Deleted_in (3, 24) ]
   in
   Dune_project.Extension.register syntax (Dune_lang.Decoder.return ((), [])) Dyn.unit
 ;;
 
-let long_form =
-  let* deps = field "deps" (Bindings.decode Dep_conf.decode) ~default:Bindings.empty in
+let long_form ~loc =
+  fields
+  @@
+  let* deps = field "deps" Dep_conf.decode_bindings ~default:Bindings.empty in
   let* project = Dune_project.get_exn () in
   let allow_directory_targets =
-    Dune_project.is_extension_set project directory_targets_extension
+    Dune_project.dune_version project >= (3, 24)
+    || Dune_project.is_extension_set project directory_targets_extension
   in
   String_with_vars.add_user_vars_to_decoding_env
     (Bindings.var_names deps)
-    (let+ loc = loc
-     and+ action_o = field_o "action" (located Dune_lang.Action.decode_dune_file)
+    (let+ action_o = field_o "action" (located Dune_lang.Action.decode_dune_file)
      and+ targets = Targets_spec.field ~allow_directory_targets
      and+ locks = Locks.field ()
+     and+ corrections =
+       field_o "corrections" (Dune_lang.Syntax.since Stanza.syntax (3, 23) >>> corrections)
      and+ () =
        let+ fallback =
          field_b
@@ -119,9 +128,8 @@ let long_form =
      and+ mode = Mode.field
      and+ enabled_if = Enabled_if.decode ~allowed_vars:Any ~since:(Some (1, 4)) ()
      and+ package =
-       field_o
-         "package"
-         (Dune_lang.Syntax.since Stanza.syntax (2, 0) >>> Stanza_common.Pkg.decode)
+       Stanza_pkg.field_opt ~check:(Dune_lang.Syntax.since Stanza.syntax (2, 0)) ()
+       >>| Option.map ~f:snd
      and+ aliases =
        let open Dune_sexp.Decoder in
        fields_mutually_exclusive
@@ -147,17 +155,28 @@ let long_form =
          in
          field_missing ~hints loc "action"
      in
-     { targets; deps; action; mode; locks; loc; enabled_if; aliases; package })
+     { targets
+     ; deps
+     ; action
+     ; corrections
+     ; mode
+     ; locks
+     ; loc
+     ; enabled_if
+     ; aliases
+     ; package
+     })
 ;;
 
 let decode =
-  let rec interpret atom = function
-    | Field -> fields long_form
-    | Action -> short_form
+  let rec interpret ~loc atom = function
+    | Field -> long_form ~loc
+    | Action -> short_form ~loc
     | Since (version, inner) ->
       let what = Printf.sprintf "'%s' in short-form 'rule'" atom in
-      Dune_lang.Syntax.since ~what Stanza.syntax version >>> interpret atom inner
+      Dune_lang.Syntax.since ~what Stanza.syntax version >>> interpret ~loc atom inner
   in
+  let* stanza_loc = loc in
   peek_exn
   >>= function
   | List (_, Atom (loc, A s) :: _) ->
@@ -167,87 +186,9 @@ let decode =
          ~loc
          [ Pp.text "Unknown action or rule field." ]
          ~hints:(User_message.did_you_mean s ~candidates:(String.Map.keys atom_table))
-     | Some w -> interpret s w)
+     | Some w -> interpret ~loc:stanza_loc s w)
   | sexp ->
     User_error.raise
       ~loc:(Dune_lang.Ast.loc sexp)
       [ Pp.textf "S-expression of the form (<atom> ...) expected" ]
-;;
-
-type lex_or_yacc =
-  { modules : string list
-  ; mode : Rule.Mode.t
-  ; enabled_if : Blang.t
-  }
-
-let ocamllex =
-  (let+ modules = repeat string in
-   { modules; mode = Standard; enabled_if = Blang.true_ })
-  <|> fields
-        (let+ modules = field "modules" (repeat string)
-         and+ mode = Mode.field
-         and+ enabled_if = Enabled_if.decode ~allowed_vars:Any ~since:(Some (1, 4)) () in
-         { modules; mode; enabled_if })
-;;
-
-let ocamlyacc = ocamllex
-
-let ocamllex_to_rule loc { modules; mode; enabled_if } =
-  let module S = String_with_vars in
-  List.map modules ~f:(fun name ->
-    let src = name ^ ".mll" in
-    let dst = name ^ ".ml" in
-    { targets =
-        (* CR-someday aalekseyev: want to use [multiplicity = One] here, but
-           can't because this is might get parsed with old dune syntax where
-           [multiplicity = One] is not supported. *)
-        Static { targets = [ S.make_text loc dst, File ]; multiplicity = Multiple }
-    ; deps = Bindings.singleton (Dep_conf.File (S.virt_text __POS__ src))
-    ; action =
-        ( loc
-        , Chdir
-            ( S.virt_pform __POS__ (Var Workspace_root)
-            , Dune_lang.Action.run
-                (S.virt_text __POS__ "ocamllex")
-                [ S.virt_text __POS__ "-q"
-                ; S.virt_text __POS__ "-o"
-                ; S.virt_pform __POS__ (Var Targets)
-                ; S.virt_pform __POS__ (Var Deps)
-                ] ) )
-    ; mode
-    ; locks = []
-    ; loc
-    ; enabled_if
-    ; aliases = []
-    ; package = None
-    })
-;;
-
-let ocamlyacc_to_rule loc { modules; mode; enabled_if } =
-  let module S = String_with_vars in
-  List.map modules ~f:(fun name ->
-    let src = name ^ ".mly" in
-    { targets =
-        Static
-          { targets =
-              List.map
-                [ name ^ ".ml"; name ^ ".mli" ]
-                ~f:(fun target -> S.make_text loc target, Targets_spec.Kind.File)
-          ; multiplicity = Multiple
-          }
-    ; deps = Bindings.singleton (Dep_conf.File (S.virt_text __POS__ src))
-    ; action =
-        ( loc
-        , Chdir
-            ( S.virt_pform __POS__ (Var Workspace_root)
-            , Dune_lang.Action.run
-                (S.virt_text __POS__ "ocamlyacc")
-                [ S.virt_pform __POS__ (Var Deps) ] ) )
-    ; mode
-    ; locks = []
-    ; loc
-    ; enabled_if
-    ; aliases = []
-    ; package = None
-    })
 ;;

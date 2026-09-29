@@ -1,5 +1,4 @@
 open Import
-open Memo.O
 open Meta
 
 module Pub_name = struct
@@ -52,7 +51,11 @@ let archives ?(preds = []) lib =
   let info = Lib.info lib in
   let archives = Lib_info.archives info in
   let plugins = Lib_info.plugins info in
-  let make ps = String.concat ~sep:" " (List.map ps ~f:Path.basename) in
+  let make ps =
+    String.concat
+      ~sep:" "
+      (List.map ps ~f:(fun p -> Path.basename p |> Filename.to_string))
+  in
   [ archive (preds @ [ Pos "byte" ]) (make archives.byte)
   ; archive (preds @ [ Pos "native" ]) (make archives.native)
   ; plugin (preds @ [ Pos "byte" ]) (make plugins.byte)
@@ -60,7 +63,10 @@ let archives ?(preds = []) lib =
   ]
 ;;
 
+let for_ = Compilation_mode.Ocaml
+
 let gen_lib pub_name lib ~version =
+  let open Action_builder.O in
   let info = Lib.info lib in
   let synopsis = Lib_info.synopsis info in
   let kind = Lib_info.kind info in
@@ -76,8 +82,8 @@ let gen_lib pub_name lib ~version =
   in
   let preds =
     match kind with
-    | Normal -> []
-    | Ppx_rewriter _ | Ppx_deriver _ -> [ Pos "ppx_driver" ]
+    | Virtual | Parameter | Dune_file Normal -> []
+    | Dune_file (Ppx_rewriter _ | Ppx_deriver _) -> [ Pos "ppx_driver" ]
   in
   let name lib =
     let name = Lib.name lib in
@@ -87,10 +93,10 @@ let gen_lib pub_name lib ~version =
     | _ -> name
   in
   let to_names = Lib_name.Set.of_list_map ~f:name in
-  let* lib_deps = Resolve.Memo.read_memo (Lib.requires lib) >>| to_names in
-  let* lib_re_exports = Resolve.Memo.read_memo (Lib.re_exports lib) >>| to_names in
+  let* lib_deps = Resolve.Memo.read (Lib.requires lib ~for_) >>| to_names in
+  let* lib_re_exports = Resolve.Memo.read (Lib.re_exports lib ~for_) >>| to_names in
   let* ppx_rt_deps =
-    Lib.ppx_runtime_deps lib |> Memo.bind ~f:Resolve.read_memo |> Memo.map ~f:to_names
+    Lib.ppx_runtime_deps lib ~for_ |> Resolve.Memo.read |> Action_builder.map ~f:to_names
   in
   let+ ppx_runtime_deps_for_deprecated_method =
     (* For the deprecated method, we need to put all the runtime dependencies of
@@ -103,10 +109,10 @@ let gen_lib pub_name lib ~version =
 
        Sigh... *)
     let open Resolve.Memo.O in
-    Lib.closure [ lib ] ~linking:false
-    >>= Resolve.Memo.List.concat_map ~f:Lib.ppx_runtime_deps
+    Lib.closure [ lib ] ~linking:false ~for_
+    >>= Resolve.Memo.List.concat_map ~f:(Lib.ppx_runtime_deps ~for_)
     >>| to_names
-    |> Resolve.Memo.read_memo
+    |> Resolve.Memo.read
   in
   List.concat
     [ version
@@ -127,8 +133,8 @@ let gen_lib pub_name lib ~version =
          ; ppx_runtime_deps ppx_rt_deps
          ])
     ; (match kind with
-       | Normal -> []
-       | Ppx_rewriter _ | Ppx_deriver _ ->
+       | Virtual | Parameter | Dune_file Normal -> []
+       | Dune_file (Ppx_rewriter _ | Ppx_deriver _) ->
          (* Deprecated ppx method support *)
          let no_ppx_driver = Neg "ppx_driver"
          and no_custom_ppx = Neg "custom_ppx" in
@@ -139,12 +145,12 @@ let gen_lib pub_name lib ~version =
              ; requires ~preds:[ no_ppx_driver ] ppx_runtime_deps_for_deprecated_method
              ]
            ; (match kind with
-              | Normal -> assert false
-              | Ppx_rewriter _ ->
+              | Virtual | Parameter | Dune_file Normal -> assert false
+              | Dune_file (Ppx_rewriter _) ->
                 [ rule "ppx" [ no_ppx_driver; no_custom_ppx ] Set "./ppx.exe --as-ppx"
                 ; rule "library_kind" [] Set "ppx_rewriter"
                 ]
-              | Ppx_deriver _ ->
+              | Dune_file (Ppx_deriver _) ->
                 [ rule "requires" [ no_ppx_driver; no_custom_ppx ] Add "ppx_deriving"
                 ; rule
                     "ppxopt"
@@ -157,25 +163,25 @@ let gen_lib pub_name lib ~version =
     ; (match Lib_info.jsoo_runtime info with
        | [] -> []
        | l ->
-         let l = List.map l ~f:Path.basename in
+         let l = List.map l ~f:(fun p -> Path.basename p |> Filename.to_string) in
          [ rule "jsoo_runtime" [] Set (String.concat l ~sep:" ") ])
     ; (match Lib_info.wasmoo_runtime info with
        | [] -> []
        | l ->
-         let l = List.map l ~f:Path.basename in
+         let l = List.map l ~f:(fun p -> Path.basename p |> Filename.to_string) in
          [ rule "wasmoo_runtime" [] Set (String.concat l ~sep:" ") ])
     ]
 ;;
 
 let gen ~(package : Package.t) ~add_directory_entry entries =
-  let open Memo.O in
+  let open Action_builder.O in
   let version =
     match Package.version package with
     | None -> []
     | Some s -> [ rule "version" [] Set (Package_version.to_string s) ]
   in
   let+ pkgs =
-    Memo.parallel_map entries ~f:(fun (e : Scope.DB.Lib_entry.t) ->
+    Action_builder.List.map entries ~f:(fun (e : Scope.DB.Lib_entry.t) ->
       match e with
       | Library lib ->
         let info = Lib.Local.info lib in
@@ -210,7 +216,7 @@ let gen ~(package : Package.t) ~add_directory_entry entries =
       | Deprecated_library_name
           { old_name = old_public_name, _; new_public_name = _, new_public_name; _ } ->
         let deps = Lib_name.Set.singleton new_public_name in
-        Memo.return
+        Action_builder.return
           ( Pub_name.of_lib_name (Public_lib.name old_public_name)
           , version @ [ requires deps; exports deps ] ))
   in

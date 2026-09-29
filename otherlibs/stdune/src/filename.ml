@@ -2,23 +2,239 @@ include Stdlib.Filename
 
 type t = string
 
-module Extension = struct
-  type nonrec t = t
+let is_dir_sep =
+  if Sys.win32 || Sys.cygwin
+  then
+    function
+    | '/' | '\\' | ':' -> true
+    | _ -> false
+  else Char.equal '/'
+;;
 
-  module Set = String.Set
-  module Map = String.Map
+let concat dirname filename =
+  let length = String.length dirname in
+  if length = 0 || is_dir_sep (String.unsafe_get dirname (length - 1))
+  then dirname ^ filename
+  else String.append_with_char dirname ~sep:(String.unsafe_get dir_sep 0) filename
+;;
+
+let rec contains_windows_dir_sep s i =
+  if i < 0
+  then false
+  else (
+    match String.unsafe_get s i with
+    | '/' | '\\' | ':' -> true
+    | _ -> contains_windows_dir_sep s (i - 1))
+;;
+
+let contains_dir_sep s =
+  if Sys.win32 || Sys.cygwin
+  then contains_windows_dir_sep s (String.length s - 1)
+  else String.contains s '/'
+;;
+
+let is_valid s =
+  let len = String.length s in
+  len > 0
+  && (len <> 1 || not (Char.equal (String.unsafe_get s 0) '.'))
+  && (len <> 2
+      || not
+           (Char.equal (String.unsafe_get s 0) '.'
+            && Char.equal (String.unsafe_get s 1) '.'))
+  && not (contains_dir_sep s)
+;;
+
+let of_string s = Option.some_if (is_valid s) s
+let of_string_unchecked s = s
+
+let of_string_exn s =
+  if is_valid s
+  then s
+  else
+    Code_error.raise
+      "Filename.of_string_exn: invalid filename"
+      [ "filename", Dyn.string s ]
+;;
+
+let to_string t = t
+let append dir t = concat dir (to_string t)
+let to_dyn t = Dyn.string (to_string t)
+let pp t = Pp.text (to_string t)
+let remove_extension t = Stdlib.Filename.remove_extension t
+let repr = Repr.view Repr.string ~to_:to_string
+
+module L = struct
+  let to_string t = t
 end
+
+module Extension = struct
+  type t = string
+
+  let filename_of_string_exn = of_string_exn
+  let corrected = ".corrected"
+  let ml = ".ml"
+  let mli = ".mli"
+  let vo = ".vo"
+  let vos = ".vos"
+  let mllib = ".mllib"
+  let mll = ".mll"
+  let mly = ".mly"
+  let theory_d = ".theory.d"
+  let map = ".map"
+  let odocl = ".odocl"
+  let deps = ".deps"
+  let cma = ".cma"
+  let cmx = ".cmx"
+  let cmxa = ".cmxa"
+  let cmxs = ".cmxs"
+  let cmi = ".cmi"
+  let cmo = ".cmo"
+  let cmj = ".cmj"
+  let cmi_dump = ".cmi.dump"
+  let cmo_dump = ".cmo.dump"
+  let exe = ".exe"
+  let expected = ".expected"
+  let bc = ".bc"
+  let bc_exe = ".bc.exe"
+  let ml_gen = ".ml-gen"
+  let cmt = ".cmt"
+  let cmti = ".cmti"
+  let cms = ".cms"
+  let cmsi = ".cmsi"
+  let odoc = ".odoc"
+  let opam = ".opam"
+  let d = ".d"
+  let js = ".js"
+  let h = ".h"
+  let mlg = ".mlg"
+  let json = ".json"
+  let v = ".v"
+
+  let is_valid s =
+    let len = String.length s in
+    len > 0 && Char.equal (String.unsafe_get s 0) '.' && not (contains_dir_sep s)
+  ;;
+
+  let of_string s = Option.some_if (is_valid s) s
+
+  let of_string_exn s =
+    if is_valid s
+    then s
+    else
+      Code_error.raise
+        "Filename.Extension.of_string_exn: invalid extension"
+        [ "extension", Dyn.string s ]
+  ;;
+
+  let to_string t = t
+  let to_filename t = filename_of_string_exn t
+  let compare = String.compare
+  let equal = String.equal
+  let hash = String.hash
+  let to_dyn t = Dyn.string t
+  let drop_dot t = String.drop t 1
+
+  module T = struct
+    type nonrec t = t
+
+    let compare = compare
+    let to_dyn = to_dyn
+  end
+
+  module O = Comparable.Make (T)
+  module Set = O.Set
+  module Map = O.Map
+
+  module Or_empty = struct
+    type t = string
+
+    let check = String.equal
+
+    let of_string_exn =
+      let of_non_empty_string_exn = of_string_exn in
+      function
+      | "" -> ""
+      | s -> of_non_empty_string_exn s
+    ;;
+
+    let empty = ""
+    let to_string s = s
+    let is_empty s = s = empty
+    let is_extension s = not (is_empty s)
+
+    let drop_suffix string t =
+      if is_empty t
+      then string
+      else String.sub string ~pos:0 ~len:(String.length string - String.length t)
+    ;;
+
+    let extension = function
+      | "" -> None
+      | s -> Some s
+    ;;
+
+    let extension_exn = function
+      | "" -> Code_error.raise "no extension" []
+      | s -> s
+    ;;
+  end
+end
+
+let actions_dir_basename = ".actions"
+let bin_dir_basename = ".bin"
+let cinaps_corrected = ".cinaps-corrected"
+let checksum = "checksum"
+let coqc = "coqc"
+let corrected = Extension.to_filename Extension.corrected
+let dev_tool_dir_basename = ".dev-tool"
+let dev_tool_locks_dir_basename = ".dev-tool-locks"
+let doc_dir_basename = "_doc"
+let doc_new_dir_basename = "_doc_new"
+let dune = "dune"
+let dune_dir_basename = ".dune"
+let dune_file = "dune-file"
+let dune_project = "dune-project"
+let dune_workspace = "dune-workspace"
+let expected = Extension.to_filename Extension.expected
+let generated = ".generated"
+let git_dir_basename = ".git"
+let gmake = "gmake"
+let hg_dir_basename = ".hg"
+let jbuild = "jbuild"
+let json = Extension.to_filename Extension.json
+let js_dir_basename = Extension.to_filename Extension.js
+let lock_dune = "lock.dune"
+let lock_dir_basename = ".lock"
+let make = "make"
+let merlin_conf_dir_basename = ".merlin-conf"
+let meta = "META"
+let ocamlfind = "ocamlfind"
+let opam = "opam"
+let ppx_dir_basename = ".ppx"
+let pkg_dir_basename = ".pkg"
+let rocq = "rocq"
+let run_t = "run.t"
+let template = ".template"
+let topmod_dir_basename = ".topmod"
+let url = "url"
+let utop_dir_basename = ".utop"
+let findlib_conf = "findlib.conf"
+let extension fn = Stdlib.Filename.extension fn |> Extension.Or_empty.of_string_exn
 
 let split_extension fn =
   let ext = extension fn in
-  String.sub fn ~pos:0 ~len:(String.length fn - String.length ext), ext
+  Extension.Or_empty.drop_suffix fn ext, ext
 ;;
 
 let split_extension_after_dot fn =
-  match extension fn with
+  match Extension.Or_empty.to_string (extension fn) with
   | "" -> fn, ""
   | s -> String.split_n fn (String.length fn - String.length s + 1)
 ;;
+
+let add_extension fn ext = fn ^ Extension.to_string ext
+let set_extension fn ext = add_extension (remove_extension fn) ext
+let extend fn ~suffix = fn ^ suffix
 
 type program_name_kind =
   | In_path
@@ -35,7 +251,16 @@ let analyze_program_name fn =
 
 let compare = String.compare
 let equal = String.equal
+let hash = String.hash
 let chop_extension = `Use_remove_extension
 
 module Set = String.Set
 module Map = String.Map
+module Array0 = Array
+
+module Array = Array0.Sorted.Make (struct
+    type nonrec t = t
+
+    let compare = compare
+    let to_dyn t = Dyn.string (to_string t)
+  end)

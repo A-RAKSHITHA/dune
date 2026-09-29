@@ -26,18 +26,22 @@ val create
   -> modules:Modules.With_vlib.t
   -> flags:Ocaml_flags.t
   -> requires_compile:Lib.t list Resolve.Memo.t
+  -> user_written_requires:Lib.t list Resolve.Memo.t Lazy.t option
   -> requires_link:Lib.t list Resolve.t Memo.Lazy.t
   -> ?preprocessing:Pp_spec.t
   -> opaque:opaque
-  -> ?stdlib:Ocaml_stdlib.t
   -> js_of_ocaml:Js_of_ocaml.In_context.t option Js_of_ocaml.Mode.Pair.t
   -> package:Package.t option
   -> melange_package_name:Lib_name.t option
-  -> ?vimpl:Vimpl.t
-  -> ?modes:Mode_conf.Set.Details.t Lib_mode.Map.t
+  -> ?implements:Virtual_rules.t
+  -> ?parameters:Lib.t list Resolve.Memo.t
+  -> ?modes:Mode.Dict.Set.t
   -> ?bin_annot:bool
+  -> ?bin_annot_cms:bool
+  -> ?cms_cmt_dependency:Workspace.Context.Cms_cmt_dependency.t
   -> ?loc:Loc.t
-  -> unit
+  -> ?instances:Parameterised_instances.t Resolve.Memo.t
+  -> Compilation_mode.t
   -> t Memo.t
 
 (** Return a compilation context suitable for compiling the alias module. *)
@@ -57,20 +61,22 @@ val flags : t -> Ocaml_flags.t
 val requires_link : t -> Lib.t list Resolve.Memo.t
 val requires_hidden : t -> Lib.t list Resolve.Memo.t
 val requires_compile : t -> Lib.t list Resolve.Memo.t
+val user_written_requires : t -> Lib.t list Resolve.Memo.t option
+val parameters : t -> Module_name.t list Resolve.Memo.t
 val includes : t -> Command.Args.without_targets Command.Args.t Lib_mode.Cm_kind.Map.t
 val preprocessing : t -> Pp_spec.t
 val opaque : t -> bool
-val stdlib : t -> Ocaml_stdlib.t option
 val js_of_ocaml : t -> Js_of_ocaml.In_context.t option Js_of_ocaml.Mode.Pair.t
 val sandbox : t -> Sandbox_config.t
 val set_sandbox : t -> Sandbox_config.t -> t
 val package : t -> Package.t option
-val vimpl : t -> Vimpl.t option
+val implements : t -> Virtual_rules.t
 val melange_package_name : t -> Lib_name.t option
-val modes : t -> Lib_mode.Map.Set.t
+val modes : t -> Mode.Dict.Set.t option
 val for_wrapped_compat : t -> t
 val for_root_module : t -> Module.t -> t
 val ocaml : t -> Ocaml_toolchain.t
+val for_ : t -> Compilation_mode.t
 
 val for_module_generated_at_link_time
   :  t
@@ -80,13 +86,14 @@ val for_module_generated_at_link_time
 
 val for_plugin_executable : t -> embed_in_plugin_libraries:(Loc.t * Lib_name.t) list -> t
 val bin_annot : t -> bool
+val bin_annot_cms : t -> bool
+val cms_cmt_dependency : t -> Workspace.Context.Cms_cmt_dependency.t
 val without_bin_annot : t -> t
-val root_module_entries : t -> Module_name.t list Action_builder.t
 
 (** The dependency graph for the modules of the library. *)
 val dep_graphs : t -> Dep_graph.t Ml_kind.Dict.t
 
-val ocamldep_modules_data : t -> Ocamldep.Modules_data.t
 val loc : t -> Loc.t option
 val set_obj_dir : t -> Path.Build.t Obj_dir.t -> t
-val set_modes : t -> modes:Lib_mode.Map.Set.t -> t
+val set_modes : t -> modes:Mode.Dict.Set.t -> t
+val instances : t -> Parameterised_instances.t Action_builder.t

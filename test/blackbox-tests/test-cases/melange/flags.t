@@ -1,9 +1,6 @@
 Test flags and compile_flags fields on melange.emit stanza
 
-  $ cat > dune-project <<EOF
-  > (lang dune 3.8)
-  > (using melange 0.1)
-  > EOF
+  $ make_melange_project 3.8 0.1
 
 Using flags field in melange.emit stanzas is not supported
 
@@ -44,9 +41,9 @@ Trying to build triggers both warnings
   1 | let t = "\e\n" in
                ^^
   Error (warning 14 [illegal-backslash]): illegal backslash escape in string.
-  Hint: Single backslashes \ are reserved for escape sequences
-  (\n, \r, ...). Did you check the list of OCaml escape sequences?
-  To get a backslash character, escape it with a second backslash: \\.
+    Hint: Single backslashes \ are reserved for escape sequences (\n, \r, ...).
+    Did you check the list of OCaml escape sequences?
+    To get a backslash character, escape it with a second backslash: \\.
   File "main.ml", line 1, characters 4-5:
   1 | let t = "\e\n" in
           ^
@@ -83,9 +80,9 @@ Can also pass flags from the env stanza. Let's go back to failing state:
   1 | let t = "\e\n" in
                ^^
   Error (warning 14 [illegal-backslash]): illegal backslash escape in string.
-  Hint: Single backslashes \ are reserved for escape sequences
-  (\n, \r, ...). Did you check the list of OCaml escape sequences?
-  To get a backslash character, escape it with a second backslash: \\.
+    Hint: Single backslashes \ are reserved for escape sequences (\n, \r, ...).
+    Did you check the list of OCaml escape sequences?
+    To get a backslash character, escape it with a second backslash: \\.
   File "main.ml", line 1, characters 4-5:
   1 | let t = "\e\n" in
           ^
@@ -119,6 +116,7 @@ Warning 102 (Melange only) is available if explicitly set
   > (melange.emit
   >  (target output)
   >  (modules main)
+  >  (emit_stdlib false)
   >  (compile_flags -w +a-70))
   > EOF
 

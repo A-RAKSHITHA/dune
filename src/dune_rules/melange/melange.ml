@@ -5,7 +5,7 @@ module Module_system = struct
     | ESM
     | CommonJS
 
-  let default = CommonJS, ".js"
+  let default = CommonJS, Filename.Extension.js
 
   let to_string = function
     | ESM -> "es6"
@@ -13,55 +13,74 @@ module Module_system = struct
   ;;
 end
 
-module Cm_kind = struct
+module Cli = struct
   type t =
-    | Cmi
-    | Cmj
+    { package_name : string
+    ; package_output : string
+    ; module_name : string
+    ; module_type : string
+    ; stop_after_cmj : string
+    }
 
-  let source = function
-    | Cmi -> Ocaml.Ml_kind.Intf
-    | Cmj -> Impl
-  ;;
-
-  let ext = function
-    | Cmi -> ".cmi"
-    | Cmj -> ".cmj"
-  ;;
-
-  let to_dyn =
-    let open Dyn in
-    function
-    | Cmi -> variant "cmi" []
-    | Cmj -> variant "cmj" []
-  ;;
-
-  module Map = struct
-    type 'a t =
-      { cmi : 'a
-      ; cmj : 'a
+  let of_project project =
+    let version =
+      Dune_project.find_extension_version project Dune_lang.Melange.syntax
+      |> Option.value_exn
+    in
+    if version >= (1, 0)
+    then
+      { package_name = "--mel-package-name"
+      ; package_output = "--mel-package-output"
+      ; module_name = "--mel-module-name"
+      ; module_type = "--mel-module-type"
+      ; stop_after_cmj = "--mel-stop-after-cmj"
       }
+    else
+      { package_name = "--bs-package-name"
+      ; package_output = "--bs-package-output"
+      ; module_name = "--bs-module-name"
+      ; module_type = "--bs-module-type"
+      ; stop_after_cmj = "--bs-stop-after-cmj"
+      }
+  ;;
 
-    let make_all x = { cmi = x; cmj = x }
-  end
+  let promotes_in_source project =
+    match Dune_project.find_extension_version project Dune_lang.Melange.syntax with
+    | Some version -> version >= (1, 0)
+    | None -> false
+  ;;
+end
+
+module Cm_kind = Dune_lang.Melange.Cm_kind
+
+let output_path ~target_dir source =
+  Path.Build.append_source target_dir (Path.Build.drop_build_context_exn source)
+;;
+
+module Emit = struct
+  type t =
+    { output_dir : Path.Build.t
+    ; stanza_dir : Path.Build.t
+    ; alias : Alias.Name.t
+    }
+end
+
+module Source = struct
+  let dir = ".melange_src"
 end
 
 module Install = struct
   let dir = "melange"
-end
 
-let js_basename m =
-  match Module.file ~ml_kind:Impl m with
-  | Some s ->
-    (* we aren't using Filename.extension because we want to handle
-       filenames such as foo.pp.ml *)
-    (match String.lsplit2 (Path.basename s) ~on:'.' with
-     | None ->
-       Code_error.raise
-         "could not extract module name from file path"
-         [ "module", Module.to_dyn m ]
-     | Some (module_name, _) -> module_name)
-  | None ->
-    Code_error.raise
-      "could not find melange source from module"
-      [ "module", Module.to_dyn m ]
-;;
+  let maybe_prepend_melange_install_dir =
+    let melange_install_dir = dir in
+    fun ~for_ dir ->
+      match for_ with
+      | Compilation_mode.Ocaml -> dir
+      | Melange ->
+        let base = Path.Local.of_string melange_install_dir in
+        (match dir with
+         | None -> Some base
+         | Some dir -> Some (Path.Local.append base dir))
+  ;;
+end

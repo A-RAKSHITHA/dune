@@ -28,7 +28,10 @@ let error_equal { message; stack_frames } b =
 let equal f = Result.equal f error_equal
 
 let error_hash { message; stack_frames } =
-  Poly.hash (Poly.hash message, Stdune.List.map stack_frames ~f:Lazy.force)
+  let acc = Hash.create () in
+  let acc = Hash.feed acc (Poly.hash message) in
+  let acc = Hash.feed acc (List.hash (fun f -> Poly.hash (Lazy.force f)) stack_frames) in
+  Hash.hash acc
 ;;
 
 let to_dyn f t =
@@ -123,13 +126,7 @@ module Memo = struct
     type nonrec 'a t = 'a t Memo.t
 
     let return x = Memo.return (Ok x)
-
-    let bind t ~f =
-      let* t = t in
-      match t with
-      | Ok s -> f s
-      | Error e -> Memo.return (Error e)
-    ;;
+    let bind (t : 'a t) ~(f : 'a -> 'b t) : 'b t = Memo.bind_result t ~f
   end
 
   module M = struct

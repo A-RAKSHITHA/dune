@@ -4,8 +4,6 @@ type 'a eval_mode =
   | Lazy : Dep.Set.t eval_mode
   | Eager : Dep.Facts.t eval_mode
 
-type 'a thunk = { f : 'm. 'm eval_mode -> ('a * 'm) Memo.t } [@@unboxed]
-
 module Deps_or_facts = struct
   let empty : type m. m eval_mode -> m = function
     | Lazy -> Dep.Set.empty
@@ -29,116 +27,91 @@ module Deps_or_facts = struct
   ;;
 end
 
+type 'a memoized =
+  { lazy_ : ('a * Dep.Set.t) Memo.Lazy.t Lazy.t
+  ; eager : ('a * Dep.Facts.t) Memo.Lazy.t
+  }
+
+type ('input, 'output) memo =
+  { lazy_ : ('input, 'output * Dep.Set.t) Memo.Table.t Lazy.t
+  ; eager : ('input, 'output * Dep.Facts.t) Memo.Table.t Lazy.t
+  }
+
 module T = struct
-  open Memo.O
+  type _ t =
+    | Return : 'a -> 'a t
+    | Map : 'a t * ('a -> 'b) -> 'b t
+    | Map2 : 'a t * ('a -> 'b) * ('b -> 'c) -> 'c t
+    | Map3 : 'a t * ('a -> 'b) * ('b -> 'c) * ('c -> 'd) -> 'd t
+    | Bind : 'a t * ('a -> 'b t) -> 'b t
+    | Bind2 : 'a t * ('a -> 'b t) * ('b -> 'c t) -> 'c t
+    | Bind3 : 'a t * ('a -> 'b t) * ('b -> 'c t) * ('c -> 'd t) -> 'd t
+    | Map_bind : 'a t * ('a -> 'b) * ('b -> 'c t) -> 'c t
+    | Bind_map : 'a t * ('a -> 'b t) * ('b -> 'c) -> 'c t
+    | Both : 'a t * 'b t -> ('a * 'b) t
+    | Seq : unit t * 'a t -> 'a t
+    | All : 'a t list -> 'a list t
+    | All_unit : unit t list -> unit t
+    | Of_memo : 'a Memo.t -> 'a t
+    | Map_memo : 'a Memo.t * ('a -> 'b) -> 'b t
+    | Map_memo2 : 'a Memo.t * ('a -> 'b) * ('b -> 'c) -> 'c t
+    | Map_memo3 : 'a Memo.t * ('a -> 'b) * ('b -> 'c) * ('c -> 'd) -> 'd t
+    | Bind_memo : 'a Memo.t * ('a -> 'b t) -> 'b t
+    | Bind_memo2 : 'a Memo.t * ('a -> 'b t) * ('b -> 'c t) -> 'c t
+    | Bind_memo3 : 'a Memo.t * ('a -> 'b t) * ('b -> 'c t) * ('c -> 'd t) -> 'd t
+    | Bind_memo_map : 'a Memo.t * ('a -> 'b t) * ('b -> 'c) -> 'c t
+    | Record :
+        { res : 'a
+        ; deps : Dep.Set.t
+        ; f : Dep.t -> Dep.Fact.t Memo.t
+        }
+        -> 'a t
+    | Record_success : unit Memo.t -> unit t
+    | Memoize : 'a memoized -> 'a t
+    | Goal : 'a t -> 'a t
+    | Exec_memo : ('i, 'o) memo * 'i -> 'o t
+    | Push_stack_frame : (unit -> User_message.Style.t Pp.t) * (unit -> 'a t) -> 'a t
+    | List_map : 'a list * ('a -> 'b t) -> 'b list t
+    | List_concat_map : 'a list * ('a -> 'b list t) -> 'b list t
 
-  module M = struct
-    type 'a t = 'a thunk
+  let return x = Return x
 
-    let return x = { f = (fun mode -> Memo.return (Deps_or_facts.return x mode)) }
-
-    let map t ~f =
-      { f =
-          (fun mode ->
-            let+ x, deps = t.f mode in
-            f x, deps)
-      }
-    ;;
-
-    let bind t ~f =
-      { f =
-          (fun mode ->
-            let* x, deps1 = t.f mode in
-            let+ y, deps2 = (f x).f mode in
-            y, Deps_or_facts.union mode deps1 deps2)
-      }
-    ;;
-  end
-
-  include M
-
-  let both x y =
-    { f =
-        (fun mode ->
-          let+ x, deps1 = x.f mode
-          and+ y, deps2 = y.f mode in
-          (x, y), Deps_or_facts.union mode deps1 deps2)
-    }
+  let map : type a b. a t -> f:(a -> b) -> b t =
+    fun t ~f ->
+    match t with
+    | Of_memo memo -> Map_memo (memo, f)
+    | Map_memo (memo, f1) -> Map_memo2 (memo, f1, f)
+    | Map_memo2 (memo, f1, f2) -> Map_memo3 (memo, f1, f2, f)
+    | Bind_memo (memo, f1) -> Bind_memo_map (memo, f1, f)
+    | Map (t, f1) -> Map2 (t, f1, f)
+    | Map2 (t, f1, f2) -> Map3 (t, f1, f2, f)
+    | Bind (t, f1) -> Bind_map (t, f1, f)
+    | t -> Map (t, f)
   ;;
 
-  let all xs =
-    { f =
-        (fun mode ->
-          let+ res = Memo.parallel_map xs ~f:(fun x -> x.f mode) in
-          let res, facts = List.split res in
-          res, Deps_or_facts.union_all mode facts)
-    }
+  let bind : type a b. a t -> f:(a -> b t) -> b t =
+    fun t ~f ->
+    match t with
+    | Of_memo memo -> Bind_memo (memo, f)
+    | Bind_memo (memo, f1) -> Bind_memo2 (memo, f1, f)
+    | Bind_memo2 (memo, f1, f2) -> Bind_memo3 (memo, f1, f2, f)
+    | Bind (t, f1) -> Bind2 (t, f1, f)
+    | Bind2 (t, f1, f2) -> Bind3 (t, f1, f2, f)
+    | Map (t, f1) -> Map_bind (t, f1, f)
+    | t -> Bind (t, f)
   ;;
 
-  let of_memo memo =
-    { f =
-        (fun mode ->
-          let+ x = memo in
-          x, Deps_or_facts.empty mode)
-    }
-  ;;
-
-  let record res (deps : Dep.Set.t) ~f =
-    let f : type m. m eval_mode -> (_ * m) Memo.t =
-      fun mode ->
-      let open Memo.O in
-      match mode with
-      | Lazy -> Memo.return (res, deps)
-      | Eager ->
-        let+ facts = Dep.Facts.record_facts deps ~f in
-        res, facts
-    in
-    { f }
-  ;;
-
-  let record_success memo =
-    let f : type m. m eval_mode -> (unit * m) Memo.t =
-      fun mode ->
-      let open Memo.O in
-      match mode with
-      | Lazy -> Memo.return ((), Dep.Set.empty)
-      | Eager ->
-        let+ () = memo in
-        (), Dep.Facts.empty
-    in
-    { f }
-  ;;
-
-  module Expert = struct
-    let record_dep_on_source_file_exn res ?loc (src_path : Path.Source.t) =
-      let f : type m. m eval_mode -> (_ * m) Memo.t =
-        fun mode ->
-        let (path : Path.t) = Path.source src_path in
-        let dep = Dep.file path in
-        match mode with
-        | Lazy -> Memo.return (res, Dep.Set.singleton dep)
-        | Eager ->
-          let open Memo.O in
-          let+ digest =
-            Fs_memo.file_digest_exn ?loc (Path.Outside_build_dir.In_source_dir src_path)
-          in
-          res, Dep.Facts.singleton dep (Dep.Fact.file path digest)
-      in
-      { f }
-    ;;
-  end
+  let both x y = Both (x, y)
+  let all xs = All xs
+  let all_unit xs = All_unit xs
+  let of_memo memo = Of_memo memo
+  let record res deps ~f = Record { res; deps; f }
+  let record_success memo = Record_success memo
+  let exec_memo m i = Exec_memo (m, i)
+  let goal t = Goal t
 
   module O = struct
-    let ( >>> ) a b =
-      { f =
-          (fun mode ->
-            let+ ((), deps_a), (b, deps_b) =
-              Memo.fork_and_join (fun () -> a.f mode) (fun () -> b.f mode)
-            in
-            b, Deps_or_facts.union mode deps_a deps_b)
-      }
-    ;;
-
+    let ( >>> ) a b = Seq (a, b)
     let ( >>= ) t f = bind t ~f
     let ( >>| ) t f = map t ~f
     let ( and+ ) = both
@@ -146,97 +119,215 @@ module T = struct
     let ( let+ ) t f = map t ~f
     let ( let* ) t f = bind t ~f
   end
-
-  module List = struct
-    include Monad.List (struct
-        include M
-        include Monad.Make (M)
-      end)
-
-    let map l ~f =
-      { f =
-          (fun mode ->
-            let+ res = Memo.parallel_map l ~f:(fun x -> (f x).f mode) in
-            let res, deps = List.split res in
-            res, Deps_or_facts.union_all mode deps)
-      }
-    ;;
-
-    let concat_map l ~f =
-      { f =
-          (fun mode ->
-            let+ res = Memo.parallel_map l ~f:(fun x -> (f x).f mode) in
-            let res, deps = List.split res in
-            List.concat res, Deps_or_facts.union_all mode deps)
-      }
-    ;;
-  end
 end
 
 include T
-open O
 
-open struct
-  module List = Stdune.List
-end
-
-let evaluate_and_collect_deps t = t.f Lazy
-let evaluate_and_collect_facts t = t.f Eager
-
-let force_lazy_or_eager
-  : type a m.
-    m eval_mode
-    -> (a * Dep.Set.t) Memo.Lazy.t Lazy.t
-    -> (a * Dep.Facts.t) Memo.Lazy.t
-    -> (a * m) Memo.t
-  =
-  fun mode lazy_ eager ->
+let force_memoized : type a m. m eval_mode -> a memoized -> (a * m) Memo.t =
+  fun mode { lazy_; eager } ->
   match mode with
   | Lazy -> Memo.Lazy.force (Lazy.force lazy_)
   | Eager -> Memo.Lazy.force eager
 ;;
 
+let rec eval : type a m. a t -> m eval_mode -> (a * m) Memo.t =
+  fun t mode ->
+  match t with
+  | Return x -> Memo.return (Deps_or_facts.return x mode)
+  | Map (t, f) ->
+    let open Memo.O in
+    let+ x, deps = eval t mode in
+    f x, deps
+  | Map2 (t, f1, f2) ->
+    let open Memo.O in
+    let+ x, deps = eval t mode in
+    f2 (f1 x), deps
+  | Map3 (t, f1, f2, f3) ->
+    let open Memo.O in
+    let+ x, deps = eval t mode in
+    f3 (f2 (f1 x)), deps
+  | Bind (t, f) ->
+    let open Memo.O in
+    let* x, deps1 = eval t mode in
+    let+ y, deps2 = eval (f x) mode in
+    y, Deps_or_facts.union mode deps1 deps2
+  | Bind2 (t, f1, f2) ->
+    let open Memo.O in
+    let* x, deps1 = eval t mode in
+    let* y, deps2 = eval (f1 x) mode in
+    let+ z, deps3 = eval (f2 y) mode in
+    let deps = Deps_or_facts.union mode deps1 deps2 in
+    z, Deps_or_facts.union mode deps deps3
+  | Bind3 (t, f1, f2, f3) ->
+    let open Memo.O in
+    let* x, deps1 = eval t mode in
+    let* y, deps2 = eval (f1 x) mode in
+    let* z, deps3 = eval (f2 y) mode in
+    let+ res, deps4 = eval (f3 z) mode in
+    let deps = Deps_or_facts.union mode deps1 deps2 in
+    let deps = Deps_or_facts.union mode deps deps3 in
+    res, Deps_or_facts.union mode deps deps4
+  | Map_bind (t, f1, f2) ->
+    let open Memo.O in
+    let* x, deps1 = eval t mode in
+    let+ y, deps2 = eval (f2 (f1 x)) mode in
+    y, Deps_or_facts.union mode deps1 deps2
+  | Bind_map (t, f1, f2) ->
+    let open Memo.O in
+    let* x, deps1 = eval t mode in
+    let+ y, deps2 = eval (f1 x) mode in
+    f2 y, Deps_or_facts.union mode deps1 deps2
+  | Both (a, b) ->
+    let open Memo.O in
+    let+ (a, deps_a), (b, deps_b) =
+      Memo.fork_and_join (fun () -> eval a mode) (fun () -> eval b mode)
+    in
+    (a, b), Deps_or_facts.union mode deps_a deps_b
+  | Seq (a, b) ->
+    let open Memo.O in
+    let+ ((), deps_a), (b, deps_b) =
+      Memo.fork_and_join (fun () -> eval a mode) (fun () -> eval b mode)
+    in
+    b, Deps_or_facts.union mode deps_a deps_b
+  | All ts ->
+    let open Memo.O in
+    let+ res = Memo.parallel_map ts ~f:(fun t -> eval t mode) in
+    let res, deps = List.split res in
+    res, Deps_or_facts.union_all mode deps
+  | All_unit ts ->
+    let open Memo.O in
+    let+ deps =
+      Memo.map_reduce
+        ts
+        ~f:(fun t ->
+          let+ (), deps = eval t mode in
+          deps)
+        ~empty:(Deps_or_facts.empty mode)
+        ~combine:(Deps_or_facts.union mode)
+    in
+    (), deps
+  | Of_memo memo ->
+    let open Memo.O in
+    let+ x = memo in
+    x, Deps_or_facts.empty mode
+  | Map_memo (memo, f) ->
+    let open Memo.O in
+    let+ x = memo in
+    Deps_or_facts.return (f x) mode
+  | Map_memo2 (memo, f1, f2) ->
+    let open Memo.O in
+    let+ x = memo in
+    Deps_or_facts.return (f2 (f1 x)) mode
+  | Map_memo3 (memo, f1, f2, f3) ->
+    let open Memo.O in
+    let+ x = memo in
+    Deps_or_facts.return (f3 (f2 (f1 x))) mode
+  | Bind_memo (memo, f) ->
+    let open Memo.O in
+    let* x = memo in
+    eval (f x) mode
+  | Bind_memo2 (memo, f1, f2) ->
+    let open Memo.O in
+    let* x = memo in
+    let* y, deps1 = eval (f1 x) mode in
+    let+ z, deps2 = eval (f2 y) mode in
+    z, Deps_or_facts.union mode deps1 deps2
+  | Bind_memo3 (memo, f1, f2, f3) ->
+    let open Memo.O in
+    let* x = memo in
+    let* y, deps1 = eval (f1 x) mode in
+    let* z, deps2 = eval (f2 y) mode in
+    let+ result, deps3 = eval (f3 z) mode in
+    let deps = Deps_or_facts.union mode deps1 deps2 in
+    result, Deps_or_facts.union mode deps deps3
+  | Bind_memo_map (memo, f1, f2) ->
+    let open Memo.O in
+    let* x = memo in
+    let+ y, deps = eval (f1 x) mode in
+    f2 y, deps
+  | Record { res; deps; f } ->
+    (match mode with
+     | Lazy -> Memo.return (res, deps)
+     | Eager ->
+       let open Memo.O in
+       let+ facts = Dep.Facts.record_facts deps ~f in
+       res, facts)
+  | Record_success memo ->
+    (match mode with
+     | Lazy -> Memo.return ((), Dep.Set.empty)
+     | Eager ->
+       let open Memo.O in
+       let+ () = memo in
+       (), Dep.Facts.empty)
+  | Memoize memoized -> force_memoized mode memoized
+  | Goal t ->
+    let open Memo.O in
+    let+ a, _ = eval t mode in
+    a, Deps_or_facts.empty mode
+  | Exec_memo (m, i) -> exec_memo_eval m i mode
+  | Push_stack_frame (human_readable_description, f) ->
+    Memo.push_stack_frame ~human_readable_description (fun () -> eval (f ()) mode)
+  | List_map ([ x ], f) ->
+    let open Memo.O in
+    let+ y, deps = eval (f x) mode in
+    [ y ], deps
+  | List_map (l, f) ->
+    let open Memo.O in
+    let+ res = Memo.parallel_map l ~f:(fun x -> eval (f x) mode) in
+    let res, deps = List.split res in
+    res, Deps_or_facts.union_all mode deps
+  | List_concat_map (l, f) ->
+    let open Memo.O in
+    let+ res = Memo.parallel_map l ~f:(fun x -> eval (f x) mode) in
+    let res, deps = List.split res in
+    List.concat res, Deps_or_facts.union_all mode deps
+
+and exec_memo_eval : type i o m. (i, o) memo -> i -> m eval_mode -> (o * m) Memo.t =
+  fun memo i mode ->
+  match mode with
+  | Lazy -> Memo.exec (Lazy.force memo.lazy_) i
+  | Eager -> Memo.exec (Lazy.force memo.eager) i
+;;
+
 let memoize ?cutoff name t =
-  let lazy_ : ('a * Dep.Set.t) Memo.Lazy.t Lazy.t =
+  let lazy_ =
     lazy
       (let cutoff =
          Option.map cutoff ~f:(fun equal x y -> Tuple.T2.equal equal Dep.Set.equal x y)
        in
-       Memo.lazy_ ?cutoff ~name:(name ^ "(lazy)") (fun () -> t.f Lazy))
+       Memo.lazy_ ?cutoff ~name:(name ^ "(lazy)") (fun () -> eval t Lazy))
   in
-  (* Unlike [lazy_], [eager] doesn't have the outer [Lazy.t] wrapper because most [Eager]
-     nodes end up getting forced during every build. *)
-  let eager : ('a * Dep.Facts.t) Memo.Lazy.t =
+  let eager =
     let cutoff =
       Option.map cutoff ~f:(fun equal x y -> Tuple.T2.equal equal Dep.Facts.equal x y)
     in
-    Memo.lazy_ ?cutoff ~name (fun () -> t.f Eager)
+    Memo.lazy_ ?cutoff ~name:(name ^ "(eager)") (fun () -> eval t Eager)
   in
-  { f = (fun mode -> force_lazy_or_eager mode lazy_ eager) }
+  Memoize { lazy_; eager }
 ;;
 
-let map2 x y ~f =
-  let+ x = x
-  and+ y = y in
-  f x y
-;;
+module Monad_instance = struct
+  module List = struct
+    include Monad.List (T)
 
-let all_unit (xs : unit t list) =
-  { f =
-      (fun mode ->
-        let open Memo.O in
-        let+ res = Memo.parallel_map xs ~f:(fun x -> x.f mode) in
-        let deps = List.map res ~f:snd in
-        (), Deps_or_facts.union_all mode deps)
-  }
-;;
+    let map l ~f = List_map (l, f)
+    let concat_map l ~f = List_concat_map (l, f)
+  end
+end
 
-type ('input, 'output) memo =
-  { lazy_ : ('input, 'output * Dep.Set.t) Memo.Table.t Lazy.t
-  ; eager : ('input, 'output * Dep.Facts.t) Memo.Table.t Lazy.t
-  }
+module List = Monad_instance.List
+
+open struct
+  module List = Stdune.List
+end
+
+let evaluate_and_collect_deps t = eval t Lazy
+let evaluate_and_collect_facts t = eval t Eager
 
 let create_memo name ~input ?cutoff ?human_readable_description f =
+  let human_readable_description =
+    Option.map human_readable_description ~f:(fun f x -> Some (f x))
+  in
   let lazy_ =
     lazy
       (let cutoff =
@@ -244,7 +335,8 @@ let create_memo name ~input ?cutoff ?human_readable_description f =
            f a b && Dep.Set.equal deps1 deps2)
        in
        let name = name ^ "(lazy)" in
-       Memo.create name ~input ?cutoff ?human_readable_description (fun x -> (f x).f Lazy))
+       Memo.create name ~input ?cutoff ?human_readable_description (fun x ->
+         eval (f x) Lazy))
   and eager =
     lazy
       (let cutoff =
@@ -252,32 +344,26 @@ let create_memo name ~input ?cutoff ?human_readable_description f =
            f a b && Dep.Facts.equal facts1 facts2)
        in
        Memo.create name ~input ?cutoff ?human_readable_description (fun x ->
-         (f x).f Eager))
+         eval (f x) Eager))
   in
   { lazy_; eager }
 ;;
 
-let exec_memo : type i o m. (i, o) memo -> i -> m eval_mode -> (o * m) Memo.t =
-  fun memo i mode ->
-  match mode with
-  | Lazy -> Memo.exec (Lazy.force memo.lazy_) i
-  | Eager -> Memo.exec (Lazy.force memo.eager) i
-;;
-
-let exec_memo m i = { f = (fun mode -> exec_memo m i mode) }
-
-let goal t =
-  { f =
-      (fun mode ->
-        let open Memo.O in
-        let+ a, _facts_are_irrelevant_for_goals = t.f mode in
-        a, Deps_or_facts.empty mode)
-  }
-;;
-
 let push_stack_frame ~human_readable_description f =
-  { f =
-      (fun mode ->
-        Memo.push_stack_frame ~human_readable_description (fun () -> (f ()).f mode))
-  }
+  Push_stack_frame (human_readable_description, f)
 ;;
+
+module Expert = struct
+  let record_dep_on_source_file_exn res ~loc (src_path : Path.Source.t) =
+    let path : Path.t = Path.source src_path in
+    let dep = Dep.file path in
+    let f _ =
+      let open Memo.O in
+      let+ digest =
+        Fs_memo.file_digest_exn ~loc (Path.Outside_build_dir.In_source_dir src_path)
+      in
+      Dep.Fact.file path digest
+    in
+    record res (Dep.Set.singleton dep) ~f
+  ;;
+end

@@ -19,12 +19,12 @@ let%expect_test "cache-check-probability 0.1" =
   [%expect
     {|
     { display = Simple { verbosity = Quiet; status_line = false }
-    ; concurrency = Fixed 1
+    ; concurrency = Auto
     ; terminal_persistence = Clear_on_rebuild
     ; sandboxing_preference = []
     ; cache_enabled = Enabled_except_user_rules
     ; cache_reproducibility_check = Check_with_probability 0.1
-    ; cache_storage_mode = Some Hardlink
+    ; cache_storage_mode = Some hardlink
     ; action_stdout_on_success = Print
     ; action_stderr_on_success = Print
     ; project_defaults =
@@ -33,6 +33,7 @@ let%expect_test "cache-check-probability 0.1" =
         ; maintenance_intent = None
         ; license = Some [ "LICENSE" ]
         }
+    ; pkg_enabled = Unset
     ; experimental = []
     }
     |}]
@@ -43,12 +44,12 @@ let%expect_test "cache-storage-mode copy" =
   [%expect
     {|
     { display = Simple { verbosity = Quiet; status_line = false }
-    ; concurrency = Fixed 1
+    ; concurrency = Auto
     ; terminal_persistence = Clear_on_rebuild
     ; sandboxing_preference = []
     ; cache_enabled = Enabled_except_user_rules
     ; cache_reproducibility_check = Skip
-    ; cache_storage_mode = Some Copy
+    ; cache_storage_mode = Some copy
     ; action_stdout_on_success = Print
     ; action_stderr_on_success = Print
     ; project_defaults =
@@ -57,6 +58,7 @@ let%expect_test "cache-storage-mode copy" =
         ; maintenance_intent = None
         ; license = Some [ "LICENSE" ]
         }
+    ; pkg_enabled = Unset
     ; experimental = []
     }
     |}]
@@ -67,12 +69,12 @@ let%expect_test "cache-storage-mode hardlink" =
   [%expect
     {|
     { display = Simple { verbosity = Quiet; status_line = false }
-    ; concurrency = Fixed 1
+    ; concurrency = Auto
     ; terminal_persistence = Clear_on_rebuild
     ; sandboxing_preference = []
     ; cache_enabled = Enabled_except_user_rules
     ; cache_reproducibility_check = Skip
-    ; cache_storage_mode = Some Hardlink
+    ; cache_storage_mode = Some hardlink
     ; action_stdout_on_success = Print
     ; action_stderr_on_success = Print
     ; project_defaults =
@@ -81,6 +83,7 @@ let%expect_test "cache-storage-mode hardlink" =
         ; maintenance_intent = None
         ; license = Some [ "LICENSE" ]
         }
+    ; pkg_enabled = Unset
     ; experimental = []
     }
     |}]

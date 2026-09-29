@@ -15,6 +15,11 @@ module Processed : sig
   (** Type of "processed" merlin information *)
   type t
 
+  type output_format =
+    [ `Text
+    | `Json
+    ]
+
   val to_dyn : t -> Dyn.t
 
   module Pp_kind : sig
@@ -33,6 +38,8 @@ module Processed : sig
       s-expression *)
   val print_file : Path.t -> unit
 
+  val print_files : output_format -> Path.t list -> unit
+
   (** [print_generic_dot_merlin paths] will merge the given configurations and
       print the resulting configuration in dot-merlin syntax. *)
   val print_generic_dot_merlin : Path.t list -> unit
@@ -45,15 +52,23 @@ val make
   -> requires_hidden:Lib.t list Resolve.t
   -> stdlib_dir:Path.t
   -> flags:Ocaml_flags.t
-  -> preprocess:Preprocess.Without_instrumentation.t Preprocess.t Module_name.Per_item.t
+  -> preprocess:
+       Preprocess.Without_instrumentation.t Preprocess.t Module_reference.Per_item.t
   -> libname:Lib_name.Local.t option
   -> modules:Modules.With_vlib.t
   -> obj_dir:Path.Build.t Obj_dir.t
   -> dialects:Dialect.DB.t
   -> ident:Merlin_ident.t
-  -> modes:[ `Lib of Lib_mode.Map.Set.t | `Exe | `Melange_emit ]
+  -> for_:Compilation_mode.t
+  -> parameters:Module_name.t list Resolve.t
+       (** The `parameters` argument takes the list of parameters from the
+       compilation context and stores it in the form of `["-parameter"; "P1";
+       "-parameter"; "P2"]` where P1 and P2 are the parameters. *)
   -> t
 
+type group
+
+val group : default:t -> alternatives:t list -> group
 val more_src_dirs : Dir_contents.t -> source_dirs:Path.Source.t list -> Path.Source.t list
 
 (** Add rules for generating the merlin configuration of a specific stanza
@@ -63,11 +78,11 @@ val add_rules
   -> dir:Path.Build.t
   -> more_src_dirs:Path.Source.t list
   -> expander:Expander.t
-  -> t
+  -> group
   -> unit Memo.t
 
 val pp_config
   :  t
   -> Context.t
   -> expander:Expander.t
-  -> Processed.pp_flag option Module_name.Per_item.t Action_builder.t
+  -> Processed.pp_flag option Module_reference.Per_item.t Action_builder.t

@@ -1,4 +1,4 @@
-open! Stdune
+open Stdune
 open Dune_lang.Decoder
 open Dune_tests_common
 
@@ -293,8 +293,6 @@ let dyn_of_sexp (S (syntax, dlang)) =
         (syntax, dlang)
     ]
 ;;
-
-let print_sexp ppf (S (_, sexp)) = Dune_lang.Deprecated.pp ppf sexp
 
 type round_trip_result =
   | Round_trip_success

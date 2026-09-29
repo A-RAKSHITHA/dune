@@ -1,4 +1,4 @@
-open! Import
+open Import
 
 (* [To_delete] is used mostly to implement [dune clean]. It is an imperfect
    heuristic, in particular it can go wrong if:
@@ -12,9 +12,9 @@ module To_delete = struct
       type t = Path.Source.Set.t
 
       let name = "PROMOTED-TO-DELETE"
-      let version = 2
-      let to_dyn = Path.Source.Set.to_dyn
-      let test_example () = Path.Source.Set.empty
+      let sharing = true
+      let version = 4
+      let repr = Repr.abstract Path.Source.Set.to_dyn
     end)
 
   let fn = Path.relative Path.build_dir ".to-delete-in-source-tree"
@@ -44,10 +44,9 @@ module To_delete = struct
       needs_dumping := false;
       get_db () |> P.dump fn)
   ;;
-
-  let () = Hooks.End_of_build.always dump
 end
 
+let save = To_delete.dump
 let files_in_source_tree_to_delete () = To_delete.get_db ()
 
 let promote_target_if_not_up_to_date
@@ -58,12 +57,12 @@ let promote_target_if_not_up_to_date
       ~promote_until_clean
   =
   let open Fiber.O in
-  (* It is OK to use [Fs_cache.Untracked.file_digest] here because below we use
+  (* It is OK to use [Fs_memo.Untracked.file_digest] here because below we use
      the tracked [Fs_memo.file_digest] to subscribe to the promotion result. *)
   let* promoted =
     match
-      Fs_cache.read Fs_cache.Untracked.file_digest (In_source_dir dst)
-      |> Cached_digest.Digest_result.to_option
+      Fs_memo.Untracked.file_digest (In_source_dir dst)
+      |> Dune_digest.Digest_result.to_option
     with
     | Some dst_digest when Digest.equal src_digest dst_digest ->
       (* CR-someday amokhov: We skip promotion if [src_digest = dst_digest] but
@@ -74,24 +73,19 @@ let promote_target_if_not_up_to_date
          this, perhaps, by making artifact substitution a field of [promote]. *)
       Fiber.return false
     | _ ->
-      Log.info
-        [ Pp.textf
-            "Promoting %S to %S"
-            (Path.Build.to_string src)
-            (Path.Source.to_string dst)
-        ];
+      Dune_trace.emit Promote (fun () -> Dune_trace.Event.Promote.promote src dst);
       if promote_until_clean then To_delete.add dst;
       (* The file in the build directory might be read-only if it comes from the
          shared cache. However, we want the file in the source tree to be
          writable by the user, so we explicitly set the user writable bit. *)
-      let chmod = Path.Permissions.add Path.Permissions.write in
+      let chmod = Permissions.add Permissions.write in
       let+ () = promote_source ~chmod ~delete_dst_if_it_is_a_directory:true ~src ~dst in
       true
   in
   let+ dst_digest_result =
     Memo.run (Fs_memo.file_digest ~force_update:promoted (In_source_dir dst))
   in
-  match Cached_digest.Digest_result.to_option dst_digest_result with
+  match Dune_digest.Digest_result.to_option dst_digest_result with
   | Some dst_digest ->
     (* It's tempting to assert [src_digest = dst_digest] here but it turns out
        this is not necessarily true: artifact substitution can change the
@@ -100,7 +94,7 @@ let promote_target_if_not_up_to_date
   | None ->
     Code_error.raise
       (sprintf "Could not compute digest of promoted file %S" (Path.Source.to_string dst))
-      [ "dst_digest_result", Cached_digest.Digest_result.to_dyn dst_digest_result ]
+      [ "dst_digest_result", Dune_digest.Digest_result.to_dyn dst_digest_result ]
 ;;
 
 (* CR-someday amokhov: If a build causes N file promotions, Dune can potentially
@@ -114,7 +108,7 @@ let promote ~(targets : _ Targets.Produced.t) ~(promote : Rule.Promote.t) ~promo
   let selected_for_promotion : Path.Local.t -> bool =
     match promote.only with
     | None -> fun (_ : Path.Local.t) -> true
-    | Some pred -> fun target -> Predicate.test pred (Path.Local.to_string target)
+    | Some pred -> fun target -> Predicate.test pred (Path.Local.basename target)
   in
   let open Fiber.O in
   (* Map target paths taking into account the (promote (into <dir>)) field. *)
@@ -132,20 +126,18 @@ let promote ~(targets : _ Targets.Produced.t) ~(promote : Rule.Promote.t) ~promo
         let extra_messages =
           match unix_error with
           | None -> []
-          | Some error -> [ Unix_error.Detailed.pp ~prefix:"Reason: " error ]
+          | Some error -> [ Unix_error.Detailed.pp_reason error ]
         in
         User_error.raise
+          ~needs_stack_trace:true
           ~loc
           (msg (Path.Source.to_string into_dir) :: extra_messages)
-          ~annots:(User_message.Annots.singleton User_message.Annots.needs_stack_trace ())
       in
       Memo.run (Fs_memo.path_kind (In_source_dir into_dir))
       >>| (function
-       | Ok S_DIR -> fun src -> Path.Source.relative into_dir (Path.Build.basename src)
+       | Ok S_DIR | Error (ENOENT, _, _) ->
+         fun src -> Path.Source.relative_fname into_dir (Path.Build.basename src)
        | Ok _other_kind -> promote_into_error (Pp.textf "%S is not a directory.")
-       | Error (ENOENT, _, _) ->
-         promote_into_error
-           (Pp.textf "Directory %S does not exist. Please create it manually.")
        | Error unix_error ->
          promote_into_error ~unix_error (Pp.textf "Cannot promote to directory %S."))
   in
@@ -153,11 +145,11 @@ let promote ~(targets : _ Targets.Produced.t) ~(promote : Rule.Promote.t) ~promo
     let msgs =
       match unix_error with
       | None -> msgs
-      | Some error -> Unix_error.Detailed.pp ~prefix:"Reason: " error :: msgs
+      | Some error -> Unix_error.Detailed.pp_reason error :: msgs
     in
     User_error.raise
       (Pp.textf "Cannot promote files to %S." (Path.to_string dst_dir) :: msgs)
-      ~annots:(User_message.Annots.singleton User_message.Annots.needs_stack_trace ())
+      ~needs_stack_trace:true
   in
   let create_directory_if_needed ~dir =
     let dst_dir = relocate dir in
@@ -165,7 +157,7 @@ let promote ~(targets : _ Targets.Produced.t) ~(promote : Rule.Promote.t) ~promo
        will use [Fs_memo.dir_contents] to subscribe to [dst_dir]'s contents, so
        Dune will notice its deletion. Furthermore, if we used a tracked version,
        [Path.mkdir_p] below would generate an unnecessary file-system event. *)
-    match Fs_cache.(read Untracked.path_stat) (In_source_dir dst_dir) with
+    match Fs_memo.Untracked.path_stat (In_source_dir dst_dir) with
     | Ok { st_kind = S_DIR; _ } -> ()
     | Error (ENOENT, _, _) -> Path.mkdir_p (Path.source dst_dir)
     | Ok _ | Error _ ->
@@ -175,7 +167,7 @@ let promote ~(targets : _ Targets.Produced.t) ~(promote : Rule.Promote.t) ~promo
       (match
          Unix_error.Detailed.catch
            (fun () ->
-              Path.unlink_no_err dst_dir;
+              Fpath.unlink_no_err (Path.to_string dst_dir);
               Path.mkdir_p dst_dir)
            ()
        with
@@ -223,15 +215,22 @@ let promote ~(targets : _ Targets.Produced.t) ~(promote : Rule.Promote.t) ~promo
     function
     | Error unix_error -> directory_target_error ~unix_error ~dst_dir []
     | Ok dir_contents ->
-      Fs_cache.Dir_contents.iter dir_contents ~f:(function
-        | file_name, S_REG ->
-          if not (Targets.Produced.mem targets (Path.Build.relative build_dir file_name))
-          then Path.unlink_no_err (Path.relative dst_dir file_name)
-        | dir_name, S_DIR ->
-          let src_dir = Path.Build.relative build_dir dir_name in
+      Fs_memo.Dir_contents.iter dir_contents ~f:(fun file_name kind ->
+        match kind with
+        | S_REG ->
+          if
+            not
+              (Targets.Produced.mem
+                 targets
+                 (Path.Build.relative_fname build_dir file_name))
+          then
+            Fpath.unlink_no_err (Path.to_string (Path.relative_fname dst_dir file_name))
+        | S_DIR ->
+          let src_dir = Path.Build.relative_fname build_dir file_name in
           if not (Targets.Produced.mem_dir targets src_dir)
-          then Path.rm_rf (Path.relative dst_dir dir_name)
-        | name, _kind -> Path.unlink_no_err (Path.relative dst_dir name))
+          then Path.rm_rf (Path.relative_fname dst_dir file_name)
+        | _kind ->
+          Fpath.unlink_no_err (Path.to_string (Path.relative_fname dst_dir file_name)))
   in
   Fiber.sequential_iter_seq (Targets.Produced.all_dirs_seq targets) ~f:(fun dir ->
     remove_stale_files_and_subdirectories ~dir)

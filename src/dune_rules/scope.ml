@@ -4,20 +4,20 @@ open Memo.O
 type t =
   { project : Dune_project.t
   ; db : Lib.DB.t
-  ; coq_db : Coq_lib.DB.t Memo.t
+  ; rocq_db : Rocq_lib.DB.t Memo.t
   ; root : Path.Build.t
   }
 
 let root t = t.root
 let project t = t.project
 let libs t = t.db
-let coq_libs t = t.coq_db
+let rocq_libs t = t.rocq_db
 
 module DB = struct
   type scope = t
   type t = { by_dir : scope Path.Source.Map.t }
 
-  let find_by_dir t dir = Find_closest_source_dir.find_by_dir t.by_dir ~dir
+  let find_by_dir t dir = Find_closest_source_dir.find_by_dir_exn t.by_dir ~dir
 
   let find_by_project t project =
     Path.Source.Map.find_exn t.by_dir (Dune_project.root project)
@@ -108,7 +108,7 @@ module DB = struct
                 let lib_name, redirect =
                   let old_public_name = Lib_name.of_local s.old_name.lib_name in
                   let enabled =
-                    Memo.lazy_ (fun () ->
+                    Memo.lazy_ ~name:"library-redirect-enabled" (fun () ->
                       let* expander = Expander0.get ~dir in
                       Expander0.eval_blang expander s.old_name.enabled >>| Toggle.of_bool)
                     |> Memo.Lazy.force
@@ -158,18 +158,14 @@ module DB = struct
                      let main_message =
                        Pp.textf "Library %s is defined twice:" (Lib_name.to_string name)
                      in
-                     let annots =
-                       let main = User_message.make ~loc:loc2 [ main_message ] in
-                       let related =
-                         [ User_message.make ~loc:loc1 [ Pp.text "Already defined here" ]
-                         ]
-                       in
-                       User_message.Annots.singleton
-                         Compound_user_error.annot
-                         [ Compound_user_error.make ~main ~related ]
+                     let compound =
+                       Compound_user_error.duplicate
+                         ~main_loc:loc2
+                         ~previous_loc:loc1
+                         main_message
                      in
                      User_error.raise
-                       ~annots
+                       ~compound
                        [ main_message
                        ; Pp.textf "- %s" (Loc.to_file_colon_line loc1)
                        ; Pp.textf "- %s" (Loc.to_file_colon_line loc2)
@@ -251,7 +247,7 @@ module DB = struct
                   Library.to_lib_id ~src_dir conf
                 in
                 let enabled =
-                  Memo.lazy_ (fun () ->
+                  Memo.lazy_ ~name:"library-enabled" (fun () ->
                     let* expander = Expander0.get ~dir in
                     Expander0.eval_blang expander conf.enabled_if >>| Toggle.of_bool)
                   |> Memo.Lazy.force
@@ -294,7 +290,7 @@ module DB = struct
         ()
   ;;
 
-  module Path_source_map_traversals = Memo.Make_parallel_map (Path.Source.Map)
+  module Path_source_map_traversals = Memo.Map (Path.Source.Map)
 
   let scopes_by_dir
         ~build_dir
@@ -304,7 +300,7 @@ module DB = struct
         ~instrument_with
         context
         stanzas
-        coq_stanzas
+        rocq_stanzas
     =
     let stanzas_by_project_dir =
       List.map stanzas ~f:(fun (dir, stanza) ->
@@ -331,16 +327,21 @@ module DB = struct
         in
         project, db)
     in
-    let coq_scopes =
-      Coq_scope.make context ~public_libs coq_stanzas ~db_by_project_dir ~projects_by_root
+    let rocq_scopes =
+      Rocq_scope.make
+        context
+        ~public_libs
+        rocq_stanzas
+        ~db_by_project_dir
+        ~projects_by_root
     in
     Path.Source.Map.mapi db_by_project_dir ~f:(fun dir (project, db) ->
       let root = Path.Build.append_source build_dir (Dune_project.root project) in
-      let coq_db = Coq_scope.find coq_scopes ~dir in
-      { project; db; coq_db; root })
+      let rocq_db = Rocq_scope.find rocq_scopes ~dir in
+      { project; db; rocq_db; root })
   ;;
 
-  let create ~context ~projects_by_root stanzas coq_stanzas =
+  let create ~context ~projects_by_root stanzas rocq_stanzas =
     let t = Fdecl.create Dyn.opaque in
     let* context = Context.DB.get context in
     let build_dir = Context.build_dir context in
@@ -362,7 +363,7 @@ module DB = struct
         ~instrument_with
         context
         stanzas
-        coq_stanzas
+        rocq_stanzas
     in
     let value = { by_dir } in
     Fdecl.set t value;
@@ -370,33 +371,33 @@ module DB = struct
   ;;
 
   let create_from_stanzas ~projects_by_root ~(context : Context_name.t) stanzas =
-    let stanzas, coq_stanzas =
+    let stanzas, rocq_stanzas =
       let build_dir = Context_name.build_dir context in
       Dune_file.fold_static_stanzas
         stanzas
         ~init:([], [])
-        ~f:(fun dune_file stanza (acc, coq_acc) ->
+        ~f:(fun dune_file stanza (acc, rocq_acc) ->
           match Stanza.repr stanza with
           | Library.T lib ->
             let ctx_dir = Path.Build.append_source build_dir (Dune_file.dir dune_file) in
-            (ctx_dir, Library_related_stanza.Library lib) :: acc, coq_acc
+            (ctx_dir, Library_related_stanza.Library lib) :: acc, rocq_acc
           | Deprecated_library_name.T d ->
             let ctx_dir = Path.Build.append_source build_dir (Dune_file.dir dune_file) in
-            (ctx_dir, Deprecated_library_name d) :: acc, coq_acc
+            (ctx_dir, Deprecated_library_name d) :: acc, rocq_acc
           | Library_redirect.Local.T d ->
             let ctx_dir = Path.Build.append_source build_dir (Dune_file.dir dune_file) in
-            (ctx_dir, Library_redirect d) :: acc, coq_acc
-          | Coq_stanza.Theory.T coq_lib ->
+            (ctx_dir, Library_redirect d) :: acc, rocq_acc
+          | Rocq_stanza.Theory.T rocq_lib ->
             let ctx_dir = Path.Build.append_source build_dir (Dune_file.dir dune_file) in
-            acc, (ctx_dir, coq_lib) :: coq_acc
-          | _ -> acc, coq_acc)
+            acc, (ctx_dir, rocq_lib) :: rocq_acc
+          | _ -> acc, rocq_acc)
     in
-    create ~projects_by_root ~context stanzas coq_stanzas
+    create ~projects_by_root ~context stanzas rocq_stanzas
   ;;
 
   let all =
     Per_context.create_by_name ~name:"scope" (fun context ->
-      Memo.Lazy.create (fun () ->
+      Memo.Lazy.create ~name:"scope" (fun () ->
         let* projects_by_root = Dune_load.projects_by_root ()
         and* stanzas = Dune_load.dune_files context in
         create_from_stanzas ~projects_by_root ~context stanzas)
@@ -421,6 +422,17 @@ module DB = struct
     let* context = Context.DB.by_dir dir in
     let+ scopes, _ = create_from_stanzas (Context.name context) in
     find_by_dir scopes dir
+  ;;
+
+  let find_by_project_root context project_root =
+    let dir =
+      match project_root with
+      | None -> Context.build_dir context
+      | Some project_root ->
+        let build_context = Context.build_context context in
+        Path.Build.append_source build_context.build_dir project_root
+    in
+    find_by_dir dir
   ;;
 
   let find_by_project context project =
@@ -500,34 +512,33 @@ module DB = struct
         Dune_file.Memo_fold.fold_static_stanzas stanzas ~init:[] ~f:(fun d stanza acc ->
           match Stanza.repr stanza with
           | Library.T ({ enabled_if; _ } as lib) ->
-            let* enabled =
-              let* expander = Expander0.get ~dir:build_dir in
-              Expander0.eval_blang expander enabled_if
-            in
-            if not enabled
-            then Memo.return acc
-            else (
+            let src_dir = Dune_file.dir d in
+            let lib_dir = Path.Build.append_source build_dir src_dir in
+            let* package_and_db =
               match lib.visibility with
-              | Private None -> Memo.return acc
-              | Private (Some pkg) ->
-                let src_dir = Dune_file.dir d in
-                let* scope = find_by_dir (Path.Build.append_source build_dir src_dir) in
-                Lib.DB.find_lib_id (libs scope) (Local (Library.to_lib_id ~src_dir lib))
-                >>| (function
-                 | None -> acc
-                 | Some lib ->
-                   let name = Package.name pkg in
-                   (name, Lib_entry.Library (Lib.Local.of_lib_exn lib)) :: acc)
-              | Public pub ->
-                let src_dir = Dune_file.dir d in
-                Lib.DB.find_lib_id public_libs (Local (Library.to_lib_id ~src_dir lib))
-                >>| (function
-                 | None -> acc
-                 | Some lib ->
-                   let package = Public_lib.package pub in
-                   let name = Package.name package in
-                   let local_lib = Lib.Local.of_lib_exn lib in
-                   (name, Lib_entry.Library local_lib) :: acc))
+              | Private None -> Memo.return None
+              | Private (Some package) ->
+                let+ scope = find_by_dir lib_dir in
+                Some (package, libs scope)
+              | Public public ->
+                Memo.return (Some (Public_lib.package public, public_libs))
+            in
+            (match package_and_db with
+             | None -> Memo.return acc
+             | Some (package, db) ->
+               let* enabled =
+                 let* expander = Expander0.get ~dir:lib_dir in
+                 Expander0.eval_blang expander enabled_if
+               in
+               if not enabled
+               then Memo.return acc
+               else
+                 Lib.DB.find_lib_id db (Local (Library.to_lib_id ~src_dir lib))
+                 >>| (function
+                  | None -> acc
+                  | Some lib ->
+                    (Package.name package, Lib_entry.Library (Lib.Local.of_lib_exn lib))
+                    :: acc))
           | Deprecated_library_name.T ({ old_name = old_public_name, _; _ } as d) ->
             let package = Public_lib.package old_public_name in
             let name = Package.name package in
@@ -538,7 +549,7 @@ module DB = struct
     in
     let per_context =
       Per_context.create_by_name ~name:"scope-db" (fun ctx ->
-        Memo.lazy_ (fun () ->
+        Memo.lazy_ ~name:"scope-db" (fun () ->
           let* public_libs =
             let* ctx = Context.DB.get ctx in
             public_libs (Context.name ctx)
@@ -565,17 +576,14 @@ module DB = struct
                     "Public library %s is defined twice:"
                     (Lib_name.to_string public_name)
                 in
-                let annots =
-                  let main = User_message.make ~loc:loc2 [ main_message ] in
-                  let related =
-                    [ User_message.make ~loc:loc1 [ Pp.text "Already defined here" ] ]
-                  in
-                  User_message.Annots.singleton
-                    Compound_user_error.annot
-                    [ Compound_user_error.make ~main ~related ]
+                let compound =
+                  Compound_user_error.duplicate
+                    ~main_loc:loc2
+                    ~previous_loc:loc1
+                    main_message
                 in
                 User_error.raise
-                  ~annots
+                  ~compound
                   ~loc:loc2
                   [ main_message
                   ; Pp.textf "- %s" (Loc.to_file_colon_line loc1)

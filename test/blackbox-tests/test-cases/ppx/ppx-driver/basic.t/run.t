@@ -41,8 +41,8 @@ Same, but with error pointing to .ppx
 
 Test the argument syntax
 
-  $ dune build test_ppx_args.cma
-  .ppx/454728df5270ab91f8a5af6b5e860eb0/ppx.exe
+  $ dune build test_ppx_args.cma 2>&1 | censor
+  .ppx/$DIGEST/ppx.exe
   -arg1
   -arg2
   -arg3=Oreo

@@ -15,28 +15,27 @@ nested more than the dune-project file
   >  (public_name foo)
   >  (name foo)
   >  (modes melange)
-  >  (libraries melange.node)
   >  (preprocess (pps melange.ppx))
   >  (melange.runtime_deps ./runtime.js))
   > EOF
   $ cat > lib/packages/foo/src/foo.ml <<EOF
+  > external readFileSync : string -> encoding:string -> string = "readFileSync"
+  > [@@mel.module "fs"]
   > let dirname = [%mel.raw "__dirname"]
   > let () = Js.log2 "dirname:" dirname
-  > let read_asset () = Node.Fs.readFileSync (dirname ^ "/runtime.js") \`utf8
+  > let read_asset () = readFileSync (dirname ^ "/runtime.js") ~encoding:"utf8"
   > EOF
 
   $ dune build --root lib
-  Entering directory 'lib'
-  Leaving directory 'lib'
 
   $ cat lib/_build/default/foo.install
   lib: [
     "_build/install/default/lib/foo/META"
     "_build/install/default/lib/foo/dune-package"
-    "_build/install/default/lib/foo/foo.ml"
     "_build/install/default/lib/foo/melange/foo.cmi" {"melange/foo.cmi"}
     "_build/install/default/lib/foo/melange/foo.cmj" {"melange/foo.cmj"}
     "_build/install/default/lib/foo/melange/foo.cmt" {"melange/foo.cmt"}
+    "_build/install/default/lib/foo/melange/foo.ml" {"melange/foo.ml"}
     "_build/install/default/lib/foo/runtime.js"
   ]
 
@@ -63,8 +62,6 @@ nested more than the dune-project file
   > EOF
 
   $ OCAMLPATH=$PWD/prefix/lib/:$OCAMLPATH dune build --root app @melange
-  Entering directory 'app'
-  Leaving directory 'app'
 
 File exists in output dir
 

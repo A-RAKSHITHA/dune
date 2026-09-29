@@ -1,10 +1,8 @@
 Test for packages with an extra-source file with the same name as a
 file in the package's source.
 
-  $ . ./helpers.sh
   $ make_lockdir
-
-  $ cat > dune.lock/foo.pkg <<EOF
+  $ make_lockpkg foo <<EOF
   > (version 1)
   > (source
   >  (copy $PWD/foo-source))
@@ -31,5 +29,5 @@ file in the package's source.
 
 Make sure that the package's source directory ends up with the version
 of foo.txt from extra_sources:
-  $ cat _build/_private/default/.pkg/foo/source/foo.txt
+  $ cat _build/_private/default/.pkg/$($dune pkg print-digest foo)/source/foo.txt
   from extra source

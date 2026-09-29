@@ -97,7 +97,7 @@ module Find_in_path = struct
         let fn = dir ^/ prog ^ exe in
         Option.some_if (Sys.file_exists fn) fn)
     else (
-      let fn = if Filename.check_suffix prog exe then prog else prog ^ exe in
+      let fn = if String.ends_with ~suffix:exe prog then prog else prog ^ exe in
       Option.some_if (Sys.file_exists fn) fn)
   ;;
 end
@@ -130,17 +130,28 @@ module Process = struct
     String.concat ~sep:" " (List.map (prog :: args) ~f:quote_if_needed)
   ;;
 
+  let read_and_log_output t ~exit_code ~stdout_fn ~stderr_fn =
+    let stdout = Io.read_file stdout_fn in
+    let stderr = Io.read_file stderr_fn in
+    logf t "-> process exited with code %d" exit_code;
+    logf t "-> stdout:";
+    List.iter (String.split_lines stdout) ~f:(logf t " | %s");
+    logf t "-> stderr:";
+    List.iter (String.split_lines stderr) ~f:(logf t " | %s");
+    { exit_code; stdout; stderr }
+  ;;
+
   let run_process t ?dir ?env prog args =
     let prog_command_line = command_line prog args in
     logf t "run: %s" prog_command_line;
     let n = gen_id t in
-    let create_process =
+    let create_process stdin stdout stderr =
       let args = Array.of_list (prog :: args) in
       match env with
-      | None -> Unix.create_process prog args
+      | None -> Unix.create_process prog args stdin stdout stderr
       | Some env ->
         let env = Array.of_list env in
-        Unix.create_process_env prog args env
+        Unix.create_process_env prog args env stdin stdout stderr
     in
     let stdout_fn = t.dest_dir ^/ sprintf "stdout-%d" n in
     let stderr_fn = t.dest_dir ^/ sprintf "stderr-%d" n in
@@ -173,15 +184,7 @@ module Process = struct
     match status with
     | Unix.WSIGNALED signal -> die "signal %d killed process: %s" signal prog_command_line
     | WSTOPPED signal -> die "signal %d stopped process: %s" signal prog_command_line
-    | WEXITED exit_code ->
-      logf t "-> process exited with code %d" exit_code;
-      let stdout = Io.read_file stdout_fn in
-      let stderr = Io.read_file stderr_fn in
-      logf t "-> stdout:";
-      List.iter (String.split_lines stdout) ~f:(logf t " | %s");
-      logf t "-> stderr:";
-      List.iter (String.split_lines stderr) ~f:(logf t " | %s");
-      { exit_code; stdout; stderr }
+    | WEXITED exit_code -> read_and_log_output t ~exit_code ~stdout_fn ~stderr_fn
   ;;
 
   (* [cmd] which cannot be quoted (such as [t.c_compiler] which contains some
@@ -215,14 +218,7 @@ module Process = struct
         (Filename.quote stdout_fn)
         (Filename.quote stderr_fn)
     in
-    let stdout = Io.read_file stdout_fn in
-    let stderr = Io.read_file stderr_fn in
-    logf t "-> process exited with code %d" exit_code;
-    logf t "-> stdout:";
-    List.iter (String.split_lines stdout) ~f:(logf t " | %s");
-    logf t "-> stderr:";
-    List.iter (String.split_lines stderr) ~f:(logf t " | %s");
-    { exit_code; stdout; stderr }
+    read_and_log_output t ~exit_code ~stdout_fn ~stderr_fn
   ;;
 
   let run_command_capture_exn t ?dir ?env cmd =
@@ -399,15 +395,20 @@ let is_msvc t =
   | _ -> false
 ;;
 
-let compile_and_link_c_prog t ?(c_flags = []) ?(link_flags = []) code =
+let c_probe t code =
   let dir = t.dest_dir ^/ sprintf "c-test-%d" (gen_id t) in
   Unix.mkdir dir 0o777;
   let base = dir ^/ "test" in
   let c_fname = base ^ ".c" in
-  let exe_fname = base ^ ".exe" in
   Io.write_file c_fname code;
   logf t "compiling c program:";
   List.iter (String.split_lines code) ~f:(logf t " | %s");
+  dir, base, c_fname
+;;
+
+let compile_and_link_c_prog t ?(c_flags = []) ?(link_flags = []) code =
+  let dir, base, c_fname = c_probe t code in
+  let exe_fname = base ^ ".exe" in
   let run_ok args =
     Process.run_command_ok t ~dir (Process.command_args t.c_compiler args)
   in
@@ -427,14 +428,8 @@ let compile_and_link_c_prog t ?(c_flags = []) ?(link_flags = []) code =
 ;;
 
 let compile_c_prog t ?(c_flags = []) code =
-  let dir = t.dest_dir ^/ sprintf "c-test-%d" (gen_id t) in
-  Unix.mkdir dir 0o777;
-  let base = dir ^/ "test" in
-  let c_fname = base ^ ".c" in
+  let dir, base, c_fname = c_probe t code in
   let obj_fname = base ^ t.ext_obj in
-  Io.write_file c_fname code;
-  logf t "compiling c program:";
-  List.iter (String.split_lines code) ~f:(logf t " | %s");
   let ok =
     let output_flag = if is_msvc t then [ "-Fo" ^ obj_fname ] else [ "-o"; obj_fname ] in
     Process.run_command_ok
@@ -657,29 +652,56 @@ module Pkg_config = struct
     ; configurator : t
     }
 
-  let get c =
+  (* The [--personality] flag was added in pkgconf 1.5.0. However, up to
+     and including 1.6.x, pkgconf crashes when no personality file exists
+     for the given triplet; from 1.7.0 it falls back to the default
+     personality instead. We therefore only pass [--personality] to
+     pkgconf 1.7.0 and newer. *)
+  let supports_personality c pkg_config =
+    let { Process.exit_code; stdout; _ } =
+      Process.run_process c ~dir:c.dest_dir pkg_config [ "--version" ]
+    in
+    exit_code = 0
+    &&
+    match String.split (String.trim stdout) ~on:'.' with
+    | major :: minor :: _ ->
+      (match Int.of_string major, Int.of_string minor with
+       | Some major, Some minor -> major > 1 || (major = 1 && minor >= 7)
+       | _ -> false)
+    | _ -> false
+  ;;
+
+  let get ?static c =
     let get_pkg_config_args default =
-      match Sys.getenv "PKG_CONFIG_ARGN" with
-      | s -> String.split ~on:' ' s
-      | exception Not_found -> default
+      let args =
+        match Sys.getenv "PKG_CONFIG_ARGN" with
+        | s -> String.split ~on:' ' s
+        | exception Not_found -> default ()
+      in
+      match static with
+      | None -> args
+      | Some true ->
+        "--static" :: List.filter ~f:(fun flag -> not (String.equal "--static" flag)) args
+      | Some false -> List.filter ~f:(fun flag -> not (String.equal "--static" flag)) args
     in
     match Sys.getenv "PKG_CONFIG" with
     | s ->
       Option.map (which c s) ~f:(fun pkg_config ->
-        let pkg_config_args = get_pkg_config_args [] in
+        let pkg_config_args = get_pkg_config_args (fun () -> []) in
         { pkg_config; pkg_config_args; configurator = c })
     | exception Not_found ->
       (match which c "pkgconf" with
        | None ->
          Option.map (which c "pkg-config") ~f:(fun pkg_config ->
-           let pkg_config_args = get_pkg_config_args [] in
+           let pkg_config_args = get_pkg_config_args (fun () -> []) in
            { pkg_config; pkg_config_args; configurator = c })
        | Some pkg_config ->
          let pkg_config_args =
-           get_pkg_config_args
-             (match ocaml_config_var c "target" with
-              | None -> []
-              | Some target -> [ "--personality"; target ])
+           get_pkg_config_args (fun () ->
+             match ocaml_config_var c "target" with
+             | Some target when supports_personality c pkg_config ->
+               [ "--personality"; target ]
+             | None | Some _ -> [])
          in
          Some { pkg_config; pkg_config_args; configurator = c })
   ;;
@@ -689,65 +711,76 @@ module Pkg_config = struct
     ; cflags : string list
     }
 
+  let pkg_config_env t ~package =
+    match ocaml_config_var t.configurator "system" with
+    | Some "macosx" ->
+      let open Option.O in
+      which t.configurator "brew"
+      >>= fun brew ->
+      let new_pkg_config_path =
+        let prefix =
+          Process.run_capture_exn
+            t.configurator
+            ~dir:t.configurator.dest_dir
+            brew
+            [ "--prefix" ]
+          |> String.trim
+        in
+        let p = sprintf "%s/opt/%s/lib/pkgconfig" (quote_if_needed prefix) package in
+        Option.some_if
+          (match Sys.is_directory p with
+           | s -> s
+           | exception Sys_error _ -> false)
+          p
+      in
+      new_pkg_config_path
+      >>| fun new_pkg_config_path ->
+      let _PKG_CONFIG_PATH = "PKG_CONFIG_PATH" in
+      let pkg_config_path =
+        match Sys.getenv _PKG_CONFIG_PATH with
+        | s -> s ^ ":"
+        | exception Not_found -> ""
+      in
+      [ sprintf "%s=%s%s" _PKG_CONFIG_PATH pkg_config_path new_pkg_config_path ]
+    | _ -> None
+  ;;
+
   let gen_query t ~package ~expr =
-    let c = t.configurator in
-    let dir = c.dest_dir in
-    let expr =
-      match expr with
-      | Some e -> e
-      | None ->
-        if
-          String.exists package ~f:(function
-            | '=' | '>' | '<' -> true
-            | _ -> false)
-        then
-          warn
-            "Package name %S contains invalid characters. Use Pkg_config.query_expr to \
-             construct proper queries"
-            package;
-        package
-    in
-    let env =
-      match ocaml_config_var c "system" with
-      | Some "macosx" ->
-        let open Option.O in
-        which c "brew"
-        >>= fun brew ->
-        let new_pkg_config_path =
-          let prefix = String.trim (Process.run_capture_exn c ~dir brew [ "--prefix" ]) in
-          let p = sprintf "%s/opt/%s/lib/pkgconfig" (quote_if_needed prefix) package in
-          Option.some_if
-            (match Sys.is_directory p with
-             | s -> s
-             | exception Sys_error _ -> false)
-            p
-        in
-        new_pkg_config_path
-        >>| fun new_pkg_config_path ->
-        let _PKG_CONFIG_PATH = "PKG_CONFIG_PATH" in
-        let pkg_config_path =
-          match Sys.getenv _PKG_CONFIG_PATH with
-          | s -> s ^ ":"
-          | exception Not_found -> ""
-        in
-        [ sprintf "%s=%s%s" _PKG_CONFIG_PATH pkg_config_path new_pkg_config_path ]
-      | _ -> None
-    in
-    let pc_flags = "--print-errors" in
+    let env = pkg_config_env t ~package in
     let { Process.exit_code; stderr; _ } =
-      Process.run_process c ~dir ?env t.pkg_config [ pc_flags; expr ]
+      let expr =
+        match expr with
+        | Some e -> e
+        | None ->
+          if
+            String.exists package ~f:(function
+              | '=' | '>' | '<' -> true
+              | _ -> false)
+          then
+            warn
+              "Package name %S contains invalid characters. Use Pkg_config.query_expr to \
+               construct proper queries"
+              package;
+          package
+      in
+      Process.run_process
+        t.configurator
+        ~dir:t.configurator.dest_dir
+        ?env
+        t.pkg_config
+        (t.pkg_config_args @ [ "--print-errors"; expr ])
     in
     if exit_code = 0
     then (
       let run what =
         match
-          String.trim
-            (Process.run_capture_exn
-               c
-               ~dir
-               ?env
-               t.pkg_config
-               (t.pkg_config_args @ [ what; package ]))
+          Process.run_capture_exn
+            t.configurator
+            ~dir:t.configurator.dest_dir
+            ?env
+            t.pkg_config
+            (t.pkg_config_args @ [ what; package ])
+          |> String.trim
         with
         | "" -> []
         | s -> String.extract_blank_separated_words s
@@ -763,6 +796,19 @@ module Pkg_config = struct
   ;;
 
   let query_expr_err t ~package ~expr = gen_query t ~package ~expr:(Some expr)
+
+  let query_variable t ~package ~variable =
+    let env = pkg_config_env t ~package in
+    let { Process.exit_code; stdout; _ } =
+      Process.run_process
+        t.configurator
+        ~dir:t.configurator.dest_dir
+        ?env
+        t.pkg_config
+        (t.pkg_config_args @ [ "--variable=" ^ variable; package ])
+    in
+    if exit_code = 0 then Some (String.trim stdout) else None
+  ;;
 end
 
 let main ?(args = []) ~name f =
@@ -795,7 +841,7 @@ let main ?(args = []) ~name f =
     let t =
       create_from_inside_dune
         ~dest_dir:!dest_dir
-        ~log:(if !verbose then prerr_endline else log)
+        ~log:(if !verbose then fun s -> prerr_endline s else fun s -> log s)
         ~build_dir
         ~name
     in

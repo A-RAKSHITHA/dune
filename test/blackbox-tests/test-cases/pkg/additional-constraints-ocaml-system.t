@@ -1,8 +1,6 @@
 Test that we support the use case of using additional constraints to force the
 system compiler to be used instead of installing the compiler.
 
-  $ . ./helpers.sh
-
 Create packages resembling the ocaml compiler packages
   $ mkrepo
 
@@ -34,7 +32,7 @@ A package that depends on ocaml:
 
 Try solving without additional constraints:
   $ add_mock_repo_if_needed
-  $ dune pkg lock
+  $ dune_pkg_lock_normalized
   Solution for dune.lock:
   - ocaml.0.0.1
   - ocaml-base-compiler.0.0.1
@@ -51,7 +49,7 @@ Now make a workspace file adding the constarint on ocaml-system:
   > EOF
 
 Solve again. This time ocaml-system is chosen.
-  $ dune pkg lock
+  $ dune_pkg_lock_normalized
   Solution for dune.lock:
   - ocaml.0.0.1
   - ocaml-system.0.0.1

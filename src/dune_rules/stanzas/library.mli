@@ -11,6 +11,7 @@ type t =
   ; install_c_headers : (Loc.t * string) list
   ; public_headers : Loc.t * Dep_conf.t list
   ; ppx_runtime_libraries : (Loc.t * Lib_name.t) list
+  ; melange_ppx_runtime_libraries : (Loc.t * Lib_name.t) list option
   ; modes : Mode_conf.Lib.Set.t
   ; kind : Lib_kind.t
     (* TODO: It may be worth remaming [c_library_flags] to
@@ -30,6 +31,7 @@ type t =
   ; dune_version : Dune_lang.Syntax.Version.t
   ; virtual_modules : Ordered_set_lang.Unexpanded.t option
   ; implements : (Loc.t * Lib_name.t) option
+  ; parameters : (Loc.t * Lib_name.t) list
   ; default_implementation : (Loc.t * Lib_name.t) option
   ; private_modules : Ordered_set_lang.Unexpanded.t option
   ; stdlib : Ocaml_stdlib.t option
@@ -63,15 +65,19 @@ val foreign_archives : t -> Foreign.Archive.t list
 val foreign_lib_files
   :  t
   -> dir:Path.Build.t
-  -> ext_lib:string
+  -> ext_lib:Filename.Extension.t
   -> for_mode:Mode.Select.t
   -> Path.Build.t list
 
 (** The path to a library archive. [dir] is the directory the library is
     declared in. *)
-val archive : t -> dir:Path.Build.t -> ext:string -> Path.Build.t
+val archive : t -> dir:Path.Build.t -> ext:Filename.Extension.t -> Path.Build.t
 
 val best_name : t -> Lib_name.t
+
+(** The public name of the library, if it has one. *)
+val public_name : t -> Lib_name.t option
+
 val is_virtual : t -> bool
 val is_impl : t -> bool
 val obj_dir : dir:Path.Build.t -> t -> Path.Build.t Obj_dir.t

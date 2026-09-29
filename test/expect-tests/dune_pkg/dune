@@ -1,20 +1,27 @@
 (library
  (name dune_pkg_unit_tests)
  (inline_tests
-  (deps tar-inputs/plaintext.md tarball.tar.gz %{bin:git}))
+  (deps
+   tar-inputs/plaintext.md
+   tarball.tar.gz
+   %{bin:git}
+   %{bin:curl}
+   (env_var DUNE_CONFIG__REV_STORE_CACHE)))
  (libraries
   dune_tests_common
+  git_test_utils
   stdune
   dune_pkg
   dune_engine
+  dune_scheduler
   dune_util
   dune_lang
-  dune_vcs
   fiber
   http
   opam_core
   threads.posix
   unix
+  xdg
   base
   ;; This is because of the (implicit_transitive_deps false)
   ;; in dune-project
@@ -29,9 +36,16 @@
  (deps
   (source_tree tar-inputs))
  (action
-  (run tar -czf %{target} %{deps})))
+  ;; Dependencies are symlinks in the action sandbox. Dereference them so the
+  ;; archive is self-contained rather than referring back to _build/default.
+  (run tar -chzf %{target} %{deps})))
 
 (alias
  (name pkg)
  (deps
   (alias runtest)))
+
+(env
+ (_
+  (env-vars
+   (DUNE_CONFIG__REV_STORE_CACHE enabled))))

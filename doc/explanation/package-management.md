@@ -41,7 +41,7 @@ stay installable with opam.
 This section describes what happens in a Dune project using the package
 management feature.
 
-## Dependency Selection
+### Dependency Selection
 
 The first step is to determine which packages need to be installed.
 Traditionally this has been defined in the `depends` field of a project's opam
@@ -57,19 +57,20 @@ file. This allows projects to completely omit generation of `.opam` files, as
 long as they use Dune for package management. Thus all dependencies on OCaml
 packages are only declared in one single file.
 
-For compatibility with a larger amount of existing projects, Dune will also
-collect dependencies from `.opam` files in the project. So while recommended,
-there is no obligation to switch to declaring dependencies in the
-`dune-project`. Likewise the generation of `.opam` files continues to be
-supported.
+To maintain compatibility with a large number of existing projects, Dune
+continues to support `.opam` files. While it is recommended to declare the
+dependencies directly in the `dune-project` file, it is not mandatory to do so.
+Dune will fall back to reading dependencies from `.opam` files when the package
+is not defined in `dune-project`.
 
-## Locking
+
+### Locking
 
 Given the list of the project's dependencies and their version
 constraints, the next steps are:
 
 1. Find the transitive dependencies and figure out a version for each
-   dependency that satisifies the constraints
+   dependency that satisfies the constraints
 2. For each dependency, download it, build it, and make it available to the
    project
 
@@ -104,7 +105,7 @@ The information is stored in a directory (`dune.lock` by default) as separate
 files, to reduce potential merge conflicts and simplify code review. Storing
 additional files like patches is also simpler this way.
 
-### Package Repository Management
+#### Package Repository Management
 
 To find a valid solution that allows a project to be built, it is necessary to
 know what packages exist, what versions of these packages exist, and what other
@@ -136,20 +137,25 @@ However, it is also possible to declare specific revisions of the repositories,
 to get a reproducible solution. Due to using Git, any previous revision of the
 repository can be used by specifying a commit hash.
 
-Dune uses two repositories by default:
+Dune uses three repositories by default, in order of priority:
 
-* `upstream` refers to the default branch of `opam-repository`, which contains
-  all the publicly released packages.
 * `overlay` refers to
-  [opam-overlay](https://github.com/ocaml-dune/opam-overlays), which defines
+  [opam-overlays](https://github.com/ocaml-dune/opam-overlays), which defines
   packages patched to work with package management. The long-term goal is to
   have as few packages as possible in this repository as more and more packages
   work within Dune Package Management upstream. Check the
   [compatibility](#compatibility) section for details.
+* `relocatable` refers to the `relocatable` branch of
+  [dra27/opam-repository](https://github.com/dra27/opam-repository/tree/relocatable),
+  which provides a relocatable version of the OCaml compiler. This allows the
+  compiler to be built and cached independently of the project's build
+  directory.
+* `upstream` refers to the default branch of `opam-repository`, which contains
+  all the publicly released packages.
 
-### Solving
+#### Solving
 
-After Dune has read the constraints and loaded set of candidate packages, it is
+After Dune has read the constraints and loaded the set of candidate packages, it is
 necessary to determine which packages and versions should be selected for the
 package lock.
 
@@ -179,7 +185,7 @@ in the build step.
 :::
 
 (building)=
-## Building
+### Building
 
 When building, Dune will read the information from the lock directory and set
 up rules for the packages. Check {doc}`/explanation/mental-model` for details
@@ -202,6 +208,46 @@ The results of the rules are stored in the project's `_build` directory and
 managed automatically by Dune. Thus, when cleaning the build directory, the
 installed packages are cleaned as well and will be reinstalled at the next
 build.
+
+## External System Dependencies (depexts)
+
+OCaml packages sometimes require system packages at build or run time, such as
+C libraries, system tools, or `pkg-config` packages. In the opam ecosystem,
+these are called "depexts" (external dependencies) and are declared using the
+[`depexts` field in opam files](https://opam.ocaml.org/doc/Manual.html#opamfield-depexts).
+
+Dune does not install or manage system packages. It reads depexts information
+from opam package metadata and surfaces it to help users identify what needs to
+be installed on their system.
+
+### How Dune Handles Depexts
+
+During dependency solving, Dune reads the `depexts` field from each package's
+opam metadata. The depexts and their platform filter conditions (using opam
+variables like `os-family`, `os-distribution`, and `arch`) are recorded in the
+lock directory. The filters are preserved as conditionals so that the lock
+directory remains portable across platforms. When depexts are queried or
+displayed (e.g., via `dune show depexts`), the filters are evaluated against
+the current platform.
+
+### Surfacing Depexts to Users
+
+Dune surfaces depexts information in two ways:
+
+- **`dune show depexts`** prints all system packages required by the project's
+  locked dependencies (aggregated and deduplicated across all packages). See
+  {doc}`/howto/handle-depexts` for usage.
+
+- **Build failure hints:** when a locked package fails to build and has
+  associated depexts, Dune prints a hint listing that package's depexts after
+  the error message. This can help diagnose failures caused by missing system
+  packages.
+
+<!-- TODO: The `depexts` field cannot currently be set in the `(package)`
+stanza of a `dune-project` file. Projects must use `.opam.template` files to
+declare depexts for their own packages, which is unfortunate for projects using
+Dune package management that otherwise don't need `.opam` files. See
+https://github.com/ocaml/dune/issues/5506 -->
 
 (compatibility)=
 ## Packaging for Dune Compatibility

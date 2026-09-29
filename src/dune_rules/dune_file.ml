@@ -41,26 +41,26 @@ module Mask = struct
         | Library.T l ->
           (match Library_redirect.Local.of_private_lib l with
            | None -> Drop
-           | Some p -> Convert (Library_redirect.Local.make_stanza p))
+           | Some p -> Convert (Library_redirect.Local.make_stanza p None))
         | _ -> Drop)
   ;;
 
   let of_only_packages_mask mask =
-    match mask with
-    | None -> True
-    | Some visible_pkgs ->
+    match Only_packages.enumerate mask with
+    | `All -> True
+    | `Set visible_pkgs ->
       Fun
         (fun stanza ->
           match Stanzas.stanza_package stanza with
           | None -> true
           | Some package ->
-            let name = Package.name package in
-            Package.Name.Map.mem visible_pkgs name)
+            let name = Package.Id.name package in
+            Package.Name.Set.mem visible_pkgs name)
   ;;
 
   let is_promoted_rule =
     let is_promoted_mode version = function
-      | Rule.Mode.Promote { only = None; lifetime; _ } ->
+      | Rule_mode.Promote { only = None; lifetime; _ } ->
         if version >= (3, 5)
         then (
           match lifetime with
@@ -113,10 +113,11 @@ let parse_stanzas ~file ~(eval : eval) sexps =
       | Some f -> f
       | None ->
         (* TODO this is wrong *)
-        Path.Source.relative eval.dir Dune_file0.fname
+        Path.Source.relative_fname eval.dir Source.Dune_file.fname
     in
     let stanza_parser =
-      Dune_project.stanza_parser eval.project |> Warning_emit.Bag.set warnings
+      Dune_project.stanza_parser ~dir:eval.dir eval.project
+      |> Warning_emit.Bag.set warnings
     in
     parse_file_includes ~stanza_parser ~context sexps
   in
@@ -179,7 +180,7 @@ let to_dyn = Dyn.opaque
 
 let find_stanzas t key =
   let+ stanzas = Memo.Lazy.force t.stanzas in
-  (* CR-rgrinberg: save a map to represent the stanzas to make this fast. *)
+  (* CR-someday rgrinberg: save a map to represent the stanzas to make this fast. *)
   List.filter_map stanzas ~f:(Stanza.Key.get key)
 ;;
 
@@ -306,7 +307,7 @@ module Script = struct
     ; from_parent : Dune_lang.Ast.t list
     }
 
-  (* CR-rgrinberg: context handling code should be aware of this special
+  (* CR-someday rgrinberg: context handling code should be aware of this special
      directory *)
   let generated_dune_files_dir = Path.Build.relative Path.Build.root ".dune"
 
@@ -316,7 +317,11 @@ module Script = struct
         (Path.Build.relative generated_dune_files_dir (Context_name.to_string context))
         file
     in
-    let wrapper = Path.Build.extend_basename generated_dune_file ~suffix:".ml" in
+    let wrapper =
+      Path.Build.extend_basename
+        generated_dune_file
+        ~suffix:(Filename.Extension.to_filename Filename.Extension.ml)
+    in
     generated_dune_file |> Path.build |> Path.parent |> Option.iter ~f:Path.mkdir_p;
     let* context = Context.DB.get context in
     let* ocaml = Context.ocaml context in
@@ -338,7 +343,7 @@ module Script = struct
       Process.run Strict ~display:Quiet ~dir:(Path.source eval.dir) ~env ocaml args
       |> Memo.of_reproducible_fiber
     in
-    if not (Path.Untracked.exists (Path.build generated_dune_file))
+    if not (Fpath.exists (Path.to_string (Path.build generated_dune_file)))
     then
       User_error.raise
         ~loc:(Loc.in_file (Path.source file))
@@ -355,14 +360,14 @@ module Script = struct
 end
 
 let check_dynamic_stanza =
-  (* CR-rgrinberg: unfortunately this needs to kept in sync with the rules
+  (* CR-someday rgrinberg: unfortunately this needs to kept in sync with the rules
      manually *)
   let err = [ Pp.text "This stanza cannot be generated dynamically" ] in
   fun stanza ->
     match Stanza.repr stanza with
     | Install_conf.T { section = loc, Section Bin; _ } ->
       User_error.raise ~loc [ Pp.text "binary section cannot be generated dynamically" ]
-    | Coq_stanza.Theory.T { buildable = { Coq_stanza.Buildable.loc; _ }; _ }
+    | Rocq_stanza.Theory.T { buildable = { Rocq_stanza.Buildable.loc; _ }; _ }
     | Library.T { buildable = { loc; _ }; _ }
     | Install_conf.T { section = _, Site { loc; _ }; _ }
     | Executables.T
@@ -380,9 +385,9 @@ module Eval = struct
   open Memo.O
 
   let context_independent ~eval dune_file =
-    let file = Dune_file0.path dune_file in
-    let static = Dune_file0.get_static_sexp dune_file in
-    match Dune_file0.kind dune_file with
+    let file = Source.Dune_file.path dune_file in
+    let static = Source.Dune_file.get_static_sexp dune_file in
+    match Source.Dune_file.kind dune_file with
     | Plain ->
       let+ dune_file, dynamic_includes = parse static ~file ~eval in
       Literal (eval, dune_file, dynamic_includes)
@@ -424,13 +429,13 @@ module Eval = struct
       match dynamic_includes with
       | [] -> Memo.Lazy.of_val t.static_stanzas
       | _ :: _ ->
-        Memo.lazy_
+        Memo.lazy_ ~name:"dynamic-includes"
         @@ fun () ->
         let+ stanzas =
           let origin =
             Path.Build.append_source
               (Context_name.build_dir context)
-              (Path.Source.relative eval.dir Dune_file0.fname)
+              (Path.Source.relative_fname eval.dir Source.Dune_file.fname)
           in
           let include_context = Include_stanza.in_build_file origin in
           collect_dynamic_includes eval include_context origin dynamic_includes
@@ -443,7 +448,7 @@ module Eval = struct
 
   let eval dune_files mask =
     let mask = Mask.of_only_packages_mask mask in
-    (* CR-rgrinberg: all this evaluation complexity is to share
+    (* CR-someday rgrinberg: all this evaluation complexity is to share
        some work in multi context builds. Is it worth it? *)
     let+ dune_syntax, ocaml_syntax =
       Appendable_list.to_list_rev dune_files

@@ -1,9 +1,7 @@
 Since dune 2.8 libraries `enabled_if` can use the `%{context_name}` variable.
 
 dune < 2.8
-  $ cat >dune-project <<EOF
-  > (lang dune 2.7)
-  > EOF
+  $ make_dune_project 2.7
 
   $ dune build bar
   File "dune", line 8, characters 16-31:
@@ -20,9 +18,7 @@ dune < 2.8
 
 
 dune >= 2.8
-  $ cat >dune-project <<EOF
-  > (lang dune 2.8)
-  > EOF
+  $ make_dune_project 2.8
 
 + Print the context
   $ dune build @print_context
@@ -34,7 +30,6 @@ dune >= 2.8
   18 |  (libraries bar))
                    ^^^
   Error: Library "bar" in _build/default is hidden (unsatisfied 'enabled_if').
-  -> required by _build/default/.bar_exe.eobjs/byte/dune__exe__Bar_exe.cmi
   -> required by _build/default/.bar_exe.eobjs/native/dune__exe__Bar_exe.cmx
   -> required by _build/default/bar_exe.exe
   [1]

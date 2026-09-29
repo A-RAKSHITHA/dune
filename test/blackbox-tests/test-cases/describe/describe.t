@@ -225,7 +225,7 @@ are reproducible, and are kept consistent between different machines.
 ``dune describe workspace`` may indeed print absolute paths, that are
 not stable across different setups.
 
-  $ dune describe workspace --lang 0.1 --sanitize-for-tests
+  $ dune describe workspace --lang 0.1 --sanitize-for-tests | censor
   ((root /WORKSPACE_ROOT)
    (build_context _build/default)
    (executables
@@ -236,64 +236,74 @@ not stable across different setups.
         (impl (_build/default/refmt.ml))
         (intf ())
         (cmt (_build/default/.refmt.eobjs/byte/dune__exe__Refmt.cmt))
-        (cmti ()))))
+        (cmti ())
+        (origin source))))
      (include_dirs (_build/default/.refmt.eobjs/byte))))
    (executables
     ((names (main))
      (requires
-      (c17373aee51bab94097b4b7818553cf3 5dd4bd87ad37b4f5713085aff4bee9c9))
+      ($DIGEST1 $DIGEST2))
      (modules
       (((name Main)
         (impl (_build/default/main.ml))
         (intf ())
         (cmt (_build/default/.main.eobjs/byte/dune__exe__Main.cmt))
-        (cmti ()))))
+        (cmti ())
+        (origin source))))
      (include_dirs (_build/default/.main.eobjs/byte))))
    (executables
     ((names (main2))
      (requires
-      (c17373aee51bab94097b4b7818553cf3 5dd4bd87ad37b4f5713085aff4bee9c9))
+      ($DIGEST1 $DIGEST2))
      (modules
       (((name Main2_aux4)
         (impl ())
         (intf (_build/default/main2_aux4.mli))
         (cmt ())
-        (cmti (_build/default/.main2.eobjs/byte/dune__exe__Main2_aux4.cmti)))
+        (cmti (_build/default/.main2.eobjs/byte/dune__exe__Main2_aux4.cmti))
+        (origin source))
        ((name Main2_aux3)
         (impl (_build/default/main2_aux3.ml))
         (intf (_build/default/main2_aux3.mli))
         (cmt (_build/default/.main2.eobjs/byte/dune__exe__Main2_aux3.cmt))
-        (cmti (_build/default/.main2.eobjs/byte/dune__exe__Main2_aux3.cmti)))
+        (cmti (_build/default/.main2.eobjs/byte/dune__exe__Main2_aux3.cmti))
+        (origin source))
        ((name Main2_aux2)
         (impl (_build/default/main2_aux2.ml))
         (intf ())
         (cmt (_build/default/.main2.eobjs/byte/dune__exe__Main2_aux2.cmt))
-        (cmti ()))
+        (cmti ())
+        (origin source))
        ((name Main2_aux1)
         (impl (_build/default/main2_aux1.ml))
         (intf (_build/default/main2_aux1.mli))
         (cmt (_build/default/.main2.eobjs/byte/dune__exe__Main2_aux1.cmt))
-        (cmti (_build/default/.main2.eobjs/byte/dune__exe__Main2_aux1.cmti)))
+        (cmti (_build/default/.main2.eobjs/byte/dune__exe__Main2_aux1.cmti))
+        (origin source))
        ((name Main2)
         (impl (_build/default/main2.ml))
         (intf ())
         (cmt (_build/default/.main2.eobjs/byte/dune__exe__Main2.cmt))
-        (cmti ()))
+        (cmti ())
+        (origin source))
        ((name Dune__exe)
         (impl (_build/default/.main2.eobjs/dune__exe.ml-gen))
         (intf ())
         (cmt (_build/default/.main2.eobjs/byte/dune__exe.cmt))
-        (cmti ()))))
+        (cmti ())
+        (origin
+         (wrapper dune)))))
      (include_dirs (_build/default/.main2.eobjs/byte))))
    (executables
     ((names (main3))
-     (requires (c480a7c584d174c22d86dbdb79515d7d))
+     (requires ($DIGEST3))
      (modules
       (((name Main3)
         (impl (_build/default/main3.ml))
         (intf ())
         (cmt (_build/default/.main3.eobjs/byte/dune__exe__Main3.cmt))
-        (cmti ()))))
+        (cmti ())
+        (origin source))))
      (include_dirs (_build/default/.main3.eobjs/byte))))
    (executables
     ((names (per_module_pp_exe))
@@ -303,23 +313,28 @@ not stable across different setups.
         (impl (_build/default/pp4.ml))
         (intf ())
         (cmt (_build/default/.per_module_pp_exe.eobjs/byte/dune__exe__Pp4.cmt))
-        (cmti ()))
+        (cmti ())
+        (origin source))
        ((name Pp3)
         (impl (_build/default/pp3.ml))
         (intf ())
         (cmt (_build/default/.per_module_pp_exe.eobjs/byte/dune__exe__Pp3.cmt))
-        (cmti ()))
+        (cmti ())
+        (origin source))
        ((name Per_module_pp_exe)
         (impl (_build/default/per_module_pp_exe.ml))
         (intf ())
         (cmt
          (_build/default/.per_module_pp_exe.eobjs/byte/dune__exe__Per_module_pp_exe.cmt))
-        (cmti ()))
+        (cmti ())
+        (origin source))
        ((name Dune__exe)
         (impl (_build/default/.per_module_pp_exe.eobjs/dune__exe.ml-gen))
         (intf ())
         (cmt (_build/default/.per_module_pp_exe.eobjs/byte/dune__exe.cmt))
-        (cmti ()))))
+        (cmti ())
+        (origin
+         (wrapper dune)))))
      (include_dirs (_build/default/.per_module_pp_exe.eobjs/byte))))
    (executables
     ((names (re_exe))
@@ -329,26 +344,31 @@ not stable across different setups.
         (impl (_build/default/re_exe2.re))
         (intf ())
         (cmt (_build/default/.re_exe.eobjs/byte/dune__exe__Re_exe2.cmt))
-        (cmti ()))
+        (cmti ())
+        (origin source))
        ((name Re_exe1)
         (impl (_build/default/re_exe1.re))
         (intf (_build/default/re_exe1.rei))
         (cmt (_build/default/.re_exe.eobjs/byte/dune__exe__Re_exe1.cmt))
-        (cmti (_build/default/.re_exe.eobjs/byte/dune__exe__Re_exe1.cmti)))
+        (cmti (_build/default/.re_exe.eobjs/byte/dune__exe__Re_exe1.cmti))
+        (origin source))
        ((name Re_exe)
         (impl (_build/default/re_exe.re))
         (intf ())
         (cmt (_build/default/.re_exe.eobjs/byte/dune__exe__Re_exe.cmt))
-        (cmti ()))
+        (cmti ())
+        (origin source))
        ((name Dune__exe)
         (impl (_build/default/.re_exe.eobjs/dune__exe.ml-gen))
         (intf ())
         (cmt (_build/default/.re_exe.eobjs/byte/dune__exe.cmt))
-        (cmti ()))))
+        (cmti ())
+        (origin
+         (wrapper dune)))))
      (include_dirs (_build/default/.re_exe.eobjs/byte))))
    (library
     ((name bar)
-     (uid 97586d5adea44246d88d31b0f6e340ed)
+     (uid $DIGEST4)
      (local true)
      (requires ())
      (source_dir _build/default)
@@ -357,21 +377,25 @@ not stable across different setups.
         (impl (_build/default/bar2.ml))
         (intf ())
         (cmt (_build/default/.bar.objs/byte/bar__Bar2.cmt))
-        (cmti ()))
+        (cmti ())
+        (origin source))
        ((name Bar)
         (impl (_build/default/bar.ml))
         (intf ())
         (cmt (_build/default/.bar.objs/byte/bar.cmt))
-        (cmti ()))
+        (cmti ())
+        (origin source))
        ((name Bar__)
         (impl (_build/default/bar__.ml-gen))
         (intf ())
         (cmt (_build/default/.bar.objs/byte/bar__.cmt))
-        (cmti ()))))
+        (cmti ())
+        (origin
+         (wrapper dune)))))
      (include_dirs (_build/default/.bar.objs/byte))))
    (library
     ((name cmdliner)
-     (uid c480a7c584d174c22d86dbdb79515d7d)
+     (uid $DIGEST3)
      (local false)
      (requires ())
      (source_dir /FINDLIB/cmdliner)
@@ -379,7 +403,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/cmdliner))))
    (library
     ((name compiler-libs)
-     (uid c39d8e11db2363236e69af7750ce7b9a)
+     (uid $DIGEST5)
      (local false)
      (requires ())
      (source_dir /FINDLIB/compiler-libs)
@@ -387,42 +411,44 @@ not stable across different setups.
      (include_dirs (/FINDLIB/compiler-libs))))
    (library
     ((name compiler-libs.common)
-     (uid c9367091ddd9a70d99fc22ede348f17c)
+     (uid $DIGEST6)
      (local false)
-     (requires (c39d8e11db2363236e69af7750ce7b9a))
+     (requires ($DIGEST5))
      (source_dir /FINDLIB/compiler-libs)
      (modules ())
      (include_dirs (/FINDLIB/compiler-libs))))
    (library
     ((name dummy_ppx)
-     (uid 8773da23dc506fbda63b4ff411075fb9)
+     (uid $DIGEST7)
      (local true)
      (requires
-      (ba85adfb1c97e7d7af3df35b16b2fc0d 2c61db8e94cb08e0fe642152aee8121a))
+      ($DIGEST8 $DIGEST9))
      (source_dir _build/default)
      (modules
       (((name Dummy_ppx)
         (impl (_build/default/dummy_ppx.ml))
         (intf ())
         (cmt (_build/default/.dummy_ppx.objs/byte/dummy_ppx.cmt))
-        (cmti ()))))
+        (cmti ())
+        (origin source))))
      (include_dirs (_build/default/.dummy_ppx.objs/byte))))
    (library
     ((name foo)
-     (uid 5dd4bd87ad37b4f5713085aff4bee9c9)
+     (uid $DIGEST2)
      (local true)
-     (requires (c17373aee51bab94097b4b7818553cf3))
+     (requires ($DIGEST1))
      (source_dir _build/default)
      (modules
       (((name Foo)
         (impl (_build/default/foo.ml))
         (intf ())
         (cmt (_build/default/.foo.objs/byte/foo.cmt))
-        (cmti ()))))
+        (cmti ())
+        (origin source))))
      (include_dirs (_build/default/.foo.objs/byte))))
    (library
     ((name foo.x)
-     (uid c17373aee51bab94097b4b7818553cf3)
+     (uid $DIGEST1)
      (local true)
      (requires ())
      (source_dir _build/default)
@@ -431,19 +457,20 @@ not stable across different setups.
         (impl (_build/default/foo_x.ml))
         (intf ())
         (cmt (_build/default/.foo_x.objs/byte/foo_x.cmt))
-        (cmti ()))))
+        (cmti ())
+        (origin source))))
      (include_dirs (_build/default/.foo_x.objs/byte))))
    (library
     ((name ocaml-compiler-libs.common)
-     (uid 1f2b5eb300ea716920494385a31bb5fb)
+     (uid $DIGEST10)
      (local false)
-     (requires (c9367091ddd9a70d99fc22ede348f17c))
+     (requires ($DIGEST6))
      (source_dir /FINDLIB/ocaml-compiler-libs/common)
      (modules ())
      (include_dirs (/FINDLIB/ocaml-compiler-libs/common))))
    (library
     ((name ocaml-compiler-libs.shadow)
-     (uid 2363fd46dac995a1c79679dfa1a9881b)
+     (uid $DIGEST11)
      (local false)
      (requires ())
      (source_dir /FINDLIB/ocaml-compiler-libs/shadow)
@@ -451,7 +478,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ocaml-compiler-libs/shadow))))
    (library
     ((name per_module_action_exe)
-     (uid 241344d239919555633eb26a01215e22)
+     (uid $DIGEST12)
      (local true)
      (requires ())
      (source_dir _build/default)
@@ -461,29 +488,34 @@ not stable across different setups.
         (intf ())
         (cmt
          (_build/default/.per_module_action_exe.objs/byte/per_module_action_exe.cmt))
-        (cmti ()))
+        (cmti ())
+        (origin source))
        ((name Action4)
         (impl (_build/default/action4.ml))
         (intf ())
         (cmt
          (_build/default/.per_module_action_exe.objs/byte/per_module_action_exe__Action4.cmt))
-        (cmti ()))
+        (cmti ())
+        (origin source))
        ((name Action3)
         (impl (_build/default/action3.ml))
         (intf ())
         (cmt
          (_build/default/.per_module_action_exe.objs/byte/per_module_action_exe__Action3.cmt))
-        (cmti ()))
+        (cmti ())
+        (origin source))
        ((name Per_module_action_exe__)
         (impl (_build/default/per_module_action_exe__.ml-gen))
         (intf ())
         (cmt
          (_build/default/.per_module_action_exe.objs/byte/per_module_action_exe__.cmt))
-        (cmti ()))))
+        (cmti ())
+        (origin
+         (wrapper dune)))))
      (include_dirs (_build/default/.per_module_action_exe.objs/byte))))
    (library
     ((name per_module_action_lib)
-     (uid a8434281597a2d5c0db820319d93c1f7)
+     (uid $DIGEST13)
      (local true)
      (requires ())
      (source_dir _build/default)
@@ -493,23 +525,27 @@ not stable across different setups.
         (intf ())
         (cmt
          (_build/default/.per_module_action_lib.objs/byte/per_module_action_lib__Action2.cmt))
-        (cmti ()))
+        (cmti ())
+        (origin source))
        ((name Action1)
         (impl (_build/default/action1.ml))
         (intf ())
         (cmt
          (_build/default/.per_module_action_lib.objs/byte/per_module_action_lib__Action1.cmt))
-        (cmti ()))
+        (cmti ())
+        (origin source))
        ((name Per_module_action_lib)
         (impl (_build/default/per_module_action_lib.ml-gen))
         (intf ())
         (cmt
          (_build/default/.per_module_action_lib.objs/byte/per_module_action_lib.cmt))
-        (cmti ()))))
+        (cmti ())
+        (origin
+         (wrapper dune)))))
      (include_dirs (_build/default/.per_module_action_lib.objs/byte))))
    (library
     ((name per_module_pp_lib)
-     (uid 7fc36e5c5f46521a6842f4167e4c75b2)
+     (uid $DIGEST14)
      (local true)
      (requires ())
      (source_dir _build/default)
@@ -519,23 +555,27 @@ not stable across different setups.
         (intf ())
         (cmt
          (_build/default/.per_module_pp_lib.objs/byte/per_module_pp_lib__Pp2.cmt))
-        (cmti ()))
+        (cmti ())
+        (origin source))
        ((name Pp1)
         (impl (_build/default/pp1.ml))
         (intf ())
         (cmt
          (_build/default/.per_module_pp_lib.objs/byte/per_module_pp_lib__Pp1.cmt))
-        (cmti ()))
+        (cmti ())
+        (origin source))
        ((name Per_module_pp_lib)
         (impl (_build/default/per_module_pp_lib.ml-gen))
         (intf ())
         (cmt
          (_build/default/.per_module_pp_lib.objs/byte/per_module_pp_lib.cmt))
-        (cmti ()))))
+        (cmti ())
+        (origin
+         (wrapper dune)))))
      (include_dirs (_build/default/.per_module_pp_lib.objs/byte))))
    (library
     ((name ppx_derivers)
-     (uid e68a558facd1546b51c7abdbf6aed1cb)
+     (uid $DIGEST15)
      (local false)
      (requires ())
      (source_dir /FINDLIB/ppx_derivers)
@@ -543,43 +583,43 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ppx_derivers))))
    (library
     ((name ppxlib)
-     (uid 2c61db8e94cb08e0fe642152aee8121a)
+     (uid $DIGEST9)
      (local false)
      (requires
-      (ba85adfb1c97e7d7af3df35b16b2fc0d
-       2363fd46dac995a1c79679dfa1a9881b
-       5014e215e204cf8da6c32644cda1b31e
-       43b7cbe1f93f4f502ec614971027cff9
-       e68a558facd1546b51c7abdbf6aed1cb
-       24f4eb12e3ff51b310dbf7443c6087be
-       5ae836dcdead11d5c16815297c5a1ae6
-       249b2edaf3cc552a247667041bb5f015
-       449445be7a24ce51e119d57e9e255d3f
-       c9367091ddd9a70d99fc22ede348f17c))
+      ($DIGEST8
+       $DIGEST11
+       $DIGEST16
+       $DIGEST17
+       $DIGEST15
+       $DIGEST18
+       $DIGEST19
+       $DIGEST20
+       $DIGEST21
+       $DIGEST6))
      (source_dir /FINDLIB/ppxlib)
      (modules ())
      (include_dirs (/FINDLIB/ppxlib))))
    (library
     ((name ppxlib.ast)
-     (uid ba85adfb1c97e7d7af3df35b16b2fc0d)
+     (uid $DIGEST8)
      (local false)
      (requires
-      (5014e215e204cf8da6c32644cda1b31e 249b2edaf3cc552a247667041bb5f015))
+      ($DIGEST16 $DIGEST20))
      (source_dir /FINDLIB/ppxlib/ast)
      (modules ())
      (include_dirs (/FINDLIB/ppxlib/ast))))
    (library
     ((name ppxlib.astlib)
-     (uid 5014e215e204cf8da6c32644cda1b31e)
+     (uid $DIGEST16)
      (local false)
      (requires
-      (1f2b5eb300ea716920494385a31bb5fb c9367091ddd9a70d99fc22ede348f17c))
+      ($DIGEST10 $DIGEST6))
      (source_dir /FINDLIB/ppxlib/astlib)
      (modules ())
      (include_dirs (/FINDLIB/ppxlib/astlib))))
    (library
     ((name ppxlib.print_diff)
-     (uid 43b7cbe1f93f4f502ec614971027cff9)
+     (uid $DIGEST17)
      (local false)
      (requires ())
      (source_dir /FINDLIB/ppxlib/print_diff)
@@ -587,16 +627,16 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ppxlib/print_diff))))
    (library
     ((name ppxlib.stdppx)
-     (uid 5ae836dcdead11d5c16815297c5a1ae6)
+     (uid $DIGEST19)
      (local false)
      (requires
-      (449445be7a24ce51e119d57e9e255d3f 249b2edaf3cc552a247667041bb5f015))
+      ($DIGEST21 $DIGEST20))
      (source_dir /FINDLIB/ppxlib/stdppx)
      (modules ())
      (include_dirs (/FINDLIB/ppxlib/stdppx))))
    (library
     ((name ppxlib.traverse_builtins)
-     (uid 24f4eb12e3ff51b310dbf7443c6087be)
+     (uid $DIGEST18)
      (local false)
      (requires ())
      (source_dir /FINDLIB/ppxlib/traverse_builtins)
@@ -604,7 +644,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ppxlib/traverse_builtins))))
    (library
     ((name re_lib)
-     (uid 798aa1770524e0cedf34956792e4feac)
+     (uid $DIGEST22)
      (local true)
      (requires ())
      (source_dir _build/default)
@@ -613,21 +653,25 @@ not stable across different setups.
         (impl (_build/default/re_lib2.re))
         (intf (_build/default/re_lib2.rei))
         (cmt (_build/default/.re_lib.objs/byte/re_lib__Re_lib2.cmt))
-        (cmti (_build/default/.re_lib.objs/byte/re_lib__Re_lib2.cmti)))
+        (cmti (_build/default/.re_lib.objs/byte/re_lib__Re_lib2.cmti))
+        (origin source))
        ((name Re_lib1)
         (impl (_build/default/re_lib1.re))
         (intf ())
         (cmt (_build/default/.re_lib.objs/byte/re_lib__Re_lib1.cmt))
-        (cmti ()))
+        (cmti ())
+        (origin source))
        ((name Re_lib)
         (impl (_build/default/re_lib.ml-gen))
         (intf ())
         (cmt (_build/default/.re_lib.objs/byte/re_lib.cmt))
-        (cmti ()))))
+        (cmti ())
+        (origin
+         (wrapper dune)))))
      (include_dirs (_build/default/.re_lib.objs/byte))))
    (library
     ((name sexplib0)
-     (uid 449445be7a24ce51e119d57e9e255d3f)
+     (uid $DIGEST21)
      (local false)
      (requires ())
      (source_dir /FINDLIB/sexplib0)
@@ -635,7 +679,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/sexplib0))))
    (library
     ((name stdlib-shims)
-     (uid 249b2edaf3cc552a247667041bb5f015)
+     (uid $DIGEST20)
      (local false)
      (requires ())
      (source_dir /FINDLIB/stdlib-shims)
@@ -643,7 +687,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/stdlib-shims))))
    (library
     ((name subfolder_lib)
-     (uid edb8ce3704b7983446d5ffb4cea0b51e)
+     (uid $DIGEST23)
      (local true)
      (requires ())
      (source_dir _build/default/subdir/subfolder)
@@ -653,11 +697,12 @@ not stable across different setups.
         (intf ())
         (cmt
          (_build/default/subdir/subfolder/.subfolder_lib.objs/byte/subfolder_lib.cmt))
-        (cmti ()))))
+        (cmti ())
+        (origin source))))
      (include_dirs (_build/default/subdir/subfolder/.subfolder_lib.objs/byte))))
    (library
     ((name virtual)
-     (uid f0299ba46dc29b8d4bd2f5d1cf82587c)
+     (uid $DIGEST24)
      (local true)
      (requires ())
      (source_dir _build/default/virtual)
@@ -666,13 +711,14 @@ not stable across different setups.
         (impl ())
         (intf (_build/default/virtual/virtual.mli))
         (cmt ())
-        (cmti (_build/default/virtual/.virtual.objs/byte/virtual.cmti)))))
+        (cmti (_build/default/virtual/.virtual.objs/byte/virtual.cmti))
+        (origin source))))
      (include_dirs (_build/default/virtual/.virtual.objs/byte))))
    (library
     ((name virtual_impl1)
-     (uid 243949502d62f27969aff867fdfb0c6a)
+     (uid $DIGEST25)
      (local true)
-     (requires (f0299ba46dc29b8d4bd2f5d1cf82587c))
+     (requires ($DIGEST24))
      (source_dir _build/default/virtual_impl1)
      (modules
       (((name Virtual)
@@ -680,19 +726,22 @@ not stable across different setups.
         (intf ())
         (cmt
          (_build/default/virtual_impl1/.virtual_impl1.objs/byte/virtual.cmt))
-        (cmti ()))
+        (cmti ())
+        (origin source))
        ((name Virtual__virtual_impl1__)
         (impl (_build/default/virtual_impl1/virtual__virtual_impl1__.ml-gen))
         (intf ())
         (cmt
          (_build/default/virtual_impl1/.virtual_impl1.objs/byte/virtual__virtual_impl1__.cmt))
-        (cmti ()))))
+        (cmti ())
+        (origin
+         (wrapper virtual_impl1/dune)))))
      (include_dirs (_build/default/virtual_impl1/.virtual_impl1.objs/byte))))
    (library
     ((name virtual_impl2)
-     (uid bfe8d16a00ac2473ce3fc5fc99d7c6cb)
+     (uid $DIGEST26)
      (local true)
-     (requires (f0299ba46dc29b8d4bd2f5d1cf82587c))
+     (requires ($DIGEST24))
      (source_dir _build/default/virtual_impl2)
      (modules
       (((name Virtual)
@@ -700,16 +749,19 @@ not stable across different setups.
         (intf ())
         (cmt
          (_build/default/virtual_impl2/.virtual_impl2.objs/byte/virtual.cmt))
-        (cmti ()))
+        (cmti ())
+        (origin source))
        ((name Virtual__virtual_impl2__)
         (impl (_build/default/virtual_impl2/virtual__virtual_impl2__.ml-gen))
         (intf ())
         (cmt
          (_build/default/virtual_impl2/.virtual_impl2.objs/byte/virtual__virtual_impl2__.cmt))
-        (cmti ()))))
+        (cmti ())
+        (origin
+         (wrapper virtual_impl2/dune)))))
      (include_dirs (_build/default/virtual_impl2/.virtual_impl2.objs/byte)))))
 
-  $ dune describe workspace --lang 0.1 --with-deps --sanitize-for-tests
+  $ dune describe workspace --lang 0.1 --with-deps --sanitize-for-tests | censor
   ((root /WORKSPACE_ROOT)
    (build_context _build/default)
    (executables
@@ -721,30 +773,33 @@ not stable across different setups.
         (intf ())
         (cmt (_build/default/.refmt.eobjs/byte/dune__exe__Refmt.cmt))
         (cmti ())
+        (origin source)
         (module_deps ((for_intf ()) (for_impl ()))))))
      (include_dirs (_build/default/.refmt.eobjs/byte))))
    (executables
     ((names (main))
      (requires
-      (c17373aee51bab94097b4b7818553cf3 5dd4bd87ad37b4f5713085aff4bee9c9))
+      ($DIGEST1 $DIGEST2))
      (modules
       (((name Main)
         (impl (_build/default/main.ml))
         (intf ())
         (cmt (_build/default/.main.eobjs/byte/dune__exe__Main.cmt))
         (cmti ())
+        (origin source)
         (module_deps ((for_intf ()) (for_impl ()))))))
      (include_dirs (_build/default/.main.eobjs/byte))))
    (executables
     ((names (main2))
      (requires
-      (c17373aee51bab94097b4b7818553cf3 5dd4bd87ad37b4f5713085aff4bee9c9))
+      ($DIGEST1 $DIGEST2))
      (modules
       (((name Main2_aux4)
         (impl ())
         (intf (_build/default/main2_aux4.mli))
         (cmt ())
         (cmti (_build/default/.main2.eobjs/byte/dune__exe__Main2_aux4.cmti))
+        (origin source)
         (module_deps
          ((for_intf ())
           (for_impl ()))))
@@ -753,6 +808,7 @@ not stable across different setups.
         (intf (_build/default/main2_aux3.mli))
         (cmt (_build/default/.main2.eobjs/byte/dune__exe__Main2_aux3.cmt))
         (cmti (_build/default/.main2.eobjs/byte/dune__exe__Main2_aux3.cmti))
+        (origin source)
         (module_deps
          ((for_intf ())
           (for_impl ()))))
@@ -761,6 +817,7 @@ not stable across different setups.
         (intf ())
         (cmt (_build/default/.main2.eobjs/byte/dune__exe__Main2_aux2.cmt))
         (cmti ())
+        (origin source)
         (module_deps
          ((for_intf ())
           (for_impl ()))))
@@ -769,6 +826,7 @@ not stable across different setups.
         (intf (_build/default/main2_aux1.mli))
         (cmt (_build/default/.main2.eobjs/byte/dune__exe__Main2_aux1.cmt))
         (cmti (_build/default/.main2.eobjs/byte/dune__exe__Main2_aux1.cmti))
+        (origin source)
         (module_deps
          ((for_intf
            (Main2_aux3 Main2_aux4))
@@ -779,6 +837,7 @@ not stable across different setups.
         (intf ())
         (cmt (_build/default/.main2.eobjs/byte/dune__exe__Main2.cmt))
         (cmti ())
+        (origin source)
         (module_deps
          ((for_intf ())
           (for_impl (Main2_aux1)))))
@@ -787,19 +846,22 @@ not stable across different setups.
         (intf ())
         (cmt (_build/default/.main2.eobjs/byte/dune__exe.cmt))
         (cmti ())
+        (origin
+         (wrapper dune))
         (module_deps
          ((for_intf ())
           (for_impl ()))))))
      (include_dirs (_build/default/.main2.eobjs/byte))))
    (executables
     ((names (main3))
-     (requires (c480a7c584d174c22d86dbdb79515d7d))
+     (requires ($DIGEST3))
      (modules
       (((name Main3)
         (impl (_build/default/main3.ml))
         (intf ())
         (cmt (_build/default/.main3.eobjs/byte/dune__exe__Main3.cmt))
         (cmti ())
+        (origin source)
         (module_deps ((for_intf ()) (for_impl ()))))))
      (include_dirs (_build/default/.main3.eobjs/byte))))
    (executables
@@ -811,6 +873,7 @@ not stable across different setups.
         (intf ())
         (cmt (_build/default/.per_module_pp_exe.eobjs/byte/dune__exe__Pp4.cmt))
         (cmti ())
+        (origin source)
         (module_deps
          ((for_intf ())
           (for_impl ()))))
@@ -819,6 +882,7 @@ not stable across different setups.
         (intf ())
         (cmt (_build/default/.per_module_pp_exe.eobjs/byte/dune__exe__Pp3.cmt))
         (cmti ())
+        (origin source)
         (module_deps
          ((for_intf ())
           (for_impl (Pp4)))))
@@ -828,6 +892,7 @@ not stable across different setups.
         (cmt
          (_build/default/.per_module_pp_exe.eobjs/byte/dune__exe__Per_module_pp_exe.cmt))
         (cmti ())
+        (origin source)
         (module_deps
          ((for_intf ())
           (for_impl
@@ -837,6 +902,8 @@ not stable across different setups.
         (intf ())
         (cmt (_build/default/.per_module_pp_exe.eobjs/byte/dune__exe.cmt))
         (cmti ())
+        (origin
+         (wrapper dune))
         (module_deps
          ((for_intf ())
           (for_impl ()))))))
@@ -850,6 +917,7 @@ not stable across different setups.
         (intf ())
         (cmt (_build/default/.re_exe.eobjs/byte/dune__exe__Re_exe2.cmt))
         (cmti ())
+        (origin source)
         (module_deps
          ((for_intf ())
           (for_impl ()))))
@@ -858,6 +926,7 @@ not stable across different setups.
         (intf (_build/default/re_exe1.rei))
         (cmt (_build/default/.re_exe.eobjs/byte/dune__exe__Re_exe1.cmt))
         (cmti (_build/default/.re_exe.eobjs/byte/dune__exe__Re_exe1.cmti))
+        (origin source)
         (module_deps
          ((for_intf ())
           (for_impl ()))))
@@ -866,6 +935,7 @@ not stable across different setups.
         (intf ())
         (cmt (_build/default/.re_exe.eobjs/byte/dune__exe__Re_exe.cmt))
         (cmti ())
+        (origin source)
         (module_deps
          ((for_intf ())
           (for_impl ()))))
@@ -874,13 +944,15 @@ not stable across different setups.
         (intf ())
         (cmt (_build/default/.re_exe.eobjs/byte/dune__exe.cmt))
         (cmti ())
+        (origin
+         (wrapper dune))
         (module_deps
          ((for_intf ())
           (for_impl ()))))))
      (include_dirs (_build/default/.re_exe.eobjs/byte))))
    (library
     ((name bar)
-     (uid 97586d5adea44246d88d31b0f6e340ed)
+     (uid $DIGEST4)
      (local true)
      (requires ())
      (source_dir _build/default)
@@ -890,6 +962,7 @@ not stable across different setups.
         (intf ())
         (cmt (_build/default/.bar.objs/byte/bar__Bar2.cmt))
         (cmti ())
+        (origin source)
         (module_deps
          ((for_intf ())
           (for_impl ()))))
@@ -898,6 +971,7 @@ not stable across different setups.
         (intf ())
         (cmt (_build/default/.bar.objs/byte/bar.cmt))
         (cmti ())
+        (origin source)
         (module_deps
          ((for_intf ())
           (for_impl (Bar2)))))
@@ -906,13 +980,15 @@ not stable across different setups.
         (intf ())
         (cmt (_build/default/.bar.objs/byte/bar__.cmt))
         (cmti ())
+        (origin
+         (wrapper dune))
         (module_deps
          ((for_intf ())
           (for_impl ()))))))
      (include_dirs (_build/default/.bar.objs/byte))))
    (library
     ((name cmdliner)
-     (uid c480a7c584d174c22d86dbdb79515d7d)
+     (uid $DIGEST3)
      (local false)
      (requires ())
      (source_dir /FINDLIB/cmdliner)
@@ -920,7 +996,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/cmdliner))))
    (library
     ((name compiler-libs)
-     (uid c39d8e11db2363236e69af7750ce7b9a)
+     (uid $DIGEST5)
      (local false)
      (requires ())
      (source_dir /FINDLIB/compiler-libs)
@@ -928,18 +1004,18 @@ not stable across different setups.
      (include_dirs (/FINDLIB/compiler-libs))))
    (library
     ((name compiler-libs.common)
-     (uid c9367091ddd9a70d99fc22ede348f17c)
+     (uid $DIGEST6)
      (local false)
-     (requires (c39d8e11db2363236e69af7750ce7b9a))
+     (requires ($DIGEST5))
      (source_dir /FINDLIB/compiler-libs)
      (modules ())
      (include_dirs (/FINDLIB/compiler-libs))))
    (library
     ((name dummy_ppx)
-     (uid 8773da23dc506fbda63b4ff411075fb9)
+     (uid $DIGEST7)
      (local true)
      (requires
-      (ba85adfb1c97e7d7af3df35b16b2fc0d 2c61db8e94cb08e0fe642152aee8121a))
+      ($DIGEST8 $DIGEST9))
      (source_dir _build/default)
      (modules
       (((name Dummy_ppx)
@@ -947,13 +1023,14 @@ not stable across different setups.
         (intf ())
         (cmt (_build/default/.dummy_ppx.objs/byte/dummy_ppx.cmt))
         (cmti ())
+        (origin source)
         (module_deps ((for_intf ()) (for_impl ()))))))
      (include_dirs (_build/default/.dummy_ppx.objs/byte))))
    (library
     ((name foo)
-     (uid 5dd4bd87ad37b4f5713085aff4bee9c9)
+     (uid $DIGEST2)
      (local true)
-     (requires (c17373aee51bab94097b4b7818553cf3))
+     (requires ($DIGEST1))
      (source_dir _build/default)
      (modules
       (((name Foo)
@@ -961,11 +1038,12 @@ not stable across different setups.
         (intf ())
         (cmt (_build/default/.foo.objs/byte/foo.cmt))
         (cmti ())
+        (origin source)
         (module_deps ((for_intf ()) (for_impl ()))))))
      (include_dirs (_build/default/.foo.objs/byte))))
    (library
     ((name foo.x)
-     (uid c17373aee51bab94097b4b7818553cf3)
+     (uid $DIGEST1)
      (local true)
      (requires ())
      (source_dir _build/default)
@@ -975,19 +1053,20 @@ not stable across different setups.
         (intf ())
         (cmt (_build/default/.foo_x.objs/byte/foo_x.cmt))
         (cmti ())
+        (origin source)
         (module_deps ((for_intf ()) (for_impl ()))))))
      (include_dirs (_build/default/.foo_x.objs/byte))))
    (library
     ((name ocaml-compiler-libs.common)
-     (uid 1f2b5eb300ea716920494385a31bb5fb)
+     (uid $DIGEST10)
      (local false)
-     (requires (c9367091ddd9a70d99fc22ede348f17c))
+     (requires ($DIGEST6))
      (source_dir /FINDLIB/ocaml-compiler-libs/common)
      (modules ())
      (include_dirs (/FINDLIB/ocaml-compiler-libs/common))))
    (library
     ((name ocaml-compiler-libs.shadow)
-     (uid 2363fd46dac995a1c79679dfa1a9881b)
+     (uid $DIGEST11)
      (local false)
      (requires ())
      (source_dir /FINDLIB/ocaml-compiler-libs/shadow)
@@ -995,7 +1074,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ocaml-compiler-libs/shadow))))
    (library
     ((name per_module_action_exe)
-     (uid 241344d239919555633eb26a01215e22)
+     (uid $DIGEST12)
      (local true)
      (requires ())
      (source_dir _build/default)
@@ -1006,6 +1085,7 @@ not stable across different setups.
         (cmt
          (_build/default/.per_module_action_exe.objs/byte/per_module_action_exe.cmt))
         (cmti ())
+        (origin source)
         (module_deps
          ((for_intf ())
           (for_impl
@@ -1016,6 +1096,7 @@ not stable across different setups.
         (cmt
          (_build/default/.per_module_action_exe.objs/byte/per_module_action_exe__Action4.cmt))
         (cmti ())
+        (origin source)
         (module_deps
          ((for_intf ())
           (for_impl ()))))
@@ -1025,6 +1106,7 @@ not stable across different setups.
         (cmt
          (_build/default/.per_module_action_exe.objs/byte/per_module_action_exe__Action3.cmt))
         (cmti ())
+        (origin source)
         (module_deps
          ((for_intf ())
           (for_impl ()))))
@@ -1034,13 +1116,15 @@ not stable across different setups.
         (cmt
          (_build/default/.per_module_action_exe.objs/byte/per_module_action_exe__.cmt))
         (cmti ())
+        (origin
+         (wrapper dune))
         (module_deps
          ((for_intf ())
           (for_impl ()))))))
      (include_dirs (_build/default/.per_module_action_exe.objs/byte))))
    (library
     ((name per_module_action_lib)
-     (uid a8434281597a2d5c0db820319d93c1f7)
+     (uid $DIGEST13)
      (local true)
      (requires ())
      (source_dir _build/default)
@@ -1051,6 +1135,7 @@ not stable across different setups.
         (cmt
          (_build/default/.per_module_action_lib.objs/byte/per_module_action_lib__Action2.cmt))
         (cmti ())
+        (origin source)
         (module_deps
          ((for_intf ())
           (for_impl (Action1)))))
@@ -1060,6 +1145,7 @@ not stable across different setups.
         (cmt
          (_build/default/.per_module_action_lib.objs/byte/per_module_action_lib__Action1.cmt))
         (cmti ())
+        (origin source)
         (module_deps
          ((for_intf ())
           (for_impl ()))))
@@ -1069,13 +1155,15 @@ not stable across different setups.
         (cmt
          (_build/default/.per_module_action_lib.objs/byte/per_module_action_lib.cmt))
         (cmti ())
+        (origin
+         (wrapper dune))
         (module_deps
          ((for_intf ())
           (for_impl ()))))))
      (include_dirs (_build/default/.per_module_action_lib.objs/byte))))
    (library
     ((name per_module_pp_lib)
-     (uid 7fc36e5c5f46521a6842f4167e4c75b2)
+     (uid $DIGEST14)
      (local true)
      (requires ())
      (source_dir _build/default)
@@ -1086,6 +1174,7 @@ not stable across different setups.
         (cmt
          (_build/default/.per_module_pp_lib.objs/byte/per_module_pp_lib__Pp2.cmt))
         (cmti ())
+        (origin source)
         (module_deps
          ((for_intf ())
           (for_impl ()))))
@@ -1095,6 +1184,7 @@ not stable across different setups.
         (cmt
          (_build/default/.per_module_pp_lib.objs/byte/per_module_pp_lib__Pp1.cmt))
         (cmti ())
+        (origin source)
         (module_deps
          ((for_intf ())
           (for_impl ()))))
@@ -1104,13 +1194,15 @@ not stable across different setups.
         (cmt
          (_build/default/.per_module_pp_lib.objs/byte/per_module_pp_lib.cmt))
         (cmti ())
+        (origin
+         (wrapper dune))
         (module_deps
          ((for_intf ())
           (for_impl ()))))))
      (include_dirs (_build/default/.per_module_pp_lib.objs/byte))))
    (library
     ((name ppx_derivers)
-     (uid e68a558facd1546b51c7abdbf6aed1cb)
+     (uid $DIGEST15)
      (local false)
      (requires ())
      (source_dir /FINDLIB/ppx_derivers)
@@ -1118,43 +1210,43 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ppx_derivers))))
    (library
     ((name ppxlib)
-     (uid 2c61db8e94cb08e0fe642152aee8121a)
+     (uid $DIGEST9)
      (local false)
      (requires
-      (ba85adfb1c97e7d7af3df35b16b2fc0d
-       2363fd46dac995a1c79679dfa1a9881b
-       5014e215e204cf8da6c32644cda1b31e
-       43b7cbe1f93f4f502ec614971027cff9
-       e68a558facd1546b51c7abdbf6aed1cb
-       24f4eb12e3ff51b310dbf7443c6087be
-       5ae836dcdead11d5c16815297c5a1ae6
-       249b2edaf3cc552a247667041bb5f015
-       449445be7a24ce51e119d57e9e255d3f
-       c9367091ddd9a70d99fc22ede348f17c))
+      ($DIGEST8
+       $DIGEST11
+       $DIGEST16
+       $DIGEST17
+       $DIGEST15
+       $DIGEST18
+       $DIGEST19
+       $DIGEST20
+       $DIGEST21
+       $DIGEST6))
      (source_dir /FINDLIB/ppxlib)
      (modules ())
      (include_dirs (/FINDLIB/ppxlib))))
    (library
     ((name ppxlib.ast)
-     (uid ba85adfb1c97e7d7af3df35b16b2fc0d)
+     (uid $DIGEST8)
      (local false)
      (requires
-      (5014e215e204cf8da6c32644cda1b31e 249b2edaf3cc552a247667041bb5f015))
+      ($DIGEST16 $DIGEST20))
      (source_dir /FINDLIB/ppxlib/ast)
      (modules ())
      (include_dirs (/FINDLIB/ppxlib/ast))))
    (library
     ((name ppxlib.astlib)
-     (uid 5014e215e204cf8da6c32644cda1b31e)
+     (uid $DIGEST16)
      (local false)
      (requires
-      (1f2b5eb300ea716920494385a31bb5fb c9367091ddd9a70d99fc22ede348f17c))
+      ($DIGEST10 $DIGEST6))
      (source_dir /FINDLIB/ppxlib/astlib)
      (modules ())
      (include_dirs (/FINDLIB/ppxlib/astlib))))
    (library
     ((name ppxlib.print_diff)
-     (uid 43b7cbe1f93f4f502ec614971027cff9)
+     (uid $DIGEST17)
      (local false)
      (requires ())
      (source_dir /FINDLIB/ppxlib/print_diff)
@@ -1162,16 +1254,16 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ppxlib/print_diff))))
    (library
     ((name ppxlib.stdppx)
-     (uid 5ae836dcdead11d5c16815297c5a1ae6)
+     (uid $DIGEST19)
      (local false)
      (requires
-      (449445be7a24ce51e119d57e9e255d3f 249b2edaf3cc552a247667041bb5f015))
+      ($DIGEST21 $DIGEST20))
      (source_dir /FINDLIB/ppxlib/stdppx)
      (modules ())
      (include_dirs (/FINDLIB/ppxlib/stdppx))))
    (library
     ((name ppxlib.traverse_builtins)
-     (uid 24f4eb12e3ff51b310dbf7443c6087be)
+     (uid $DIGEST18)
      (local false)
      (requires ())
      (source_dir /FINDLIB/ppxlib/traverse_builtins)
@@ -1179,7 +1271,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/ppxlib/traverse_builtins))))
    (library
     ((name re_lib)
-     (uid 798aa1770524e0cedf34956792e4feac)
+     (uid $DIGEST22)
      (local true)
      (requires ())
      (source_dir _build/default)
@@ -1189,6 +1281,7 @@ not stable across different setups.
         (intf (_build/default/re_lib2.rei))
         (cmt (_build/default/.re_lib.objs/byte/re_lib__Re_lib2.cmt))
         (cmti (_build/default/.re_lib.objs/byte/re_lib__Re_lib2.cmti))
+        (origin source)
         (module_deps
          ((for_intf ())
           (for_impl ()))))
@@ -1197,6 +1290,7 @@ not stable across different setups.
         (intf ())
         (cmt (_build/default/.re_lib.objs/byte/re_lib__Re_lib1.cmt))
         (cmti ())
+        (origin source)
         (module_deps
          ((for_intf ())
           (for_impl ()))))
@@ -1205,13 +1299,15 @@ not stable across different setups.
         (intf ())
         (cmt (_build/default/.re_lib.objs/byte/re_lib.cmt))
         (cmti ())
+        (origin
+         (wrapper dune))
         (module_deps
          ((for_intf ())
           (for_impl ()))))))
      (include_dirs (_build/default/.re_lib.objs/byte))))
    (library
     ((name sexplib0)
-     (uid 449445be7a24ce51e119d57e9e255d3f)
+     (uid $DIGEST21)
      (local false)
      (requires ())
      (source_dir /FINDLIB/sexplib0)
@@ -1219,7 +1315,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/sexplib0))))
    (library
     ((name stdlib-shims)
-     (uid 249b2edaf3cc552a247667041bb5f015)
+     (uid $DIGEST20)
      (local false)
      (requires ())
      (source_dir /FINDLIB/stdlib-shims)
@@ -1227,7 +1323,7 @@ not stable across different setups.
      (include_dirs (/FINDLIB/stdlib-shims))))
    (library
     ((name subfolder_lib)
-     (uid edb8ce3704b7983446d5ffb4cea0b51e)
+     (uid $DIGEST23)
      (local true)
      (requires ())
      (source_dir _build/default/subdir/subfolder)
@@ -1238,11 +1334,12 @@ not stable across different setups.
         (cmt
          (_build/default/subdir/subfolder/.subfolder_lib.objs/byte/subfolder_lib.cmt))
         (cmti ())
+        (origin source)
         (module_deps ((for_intf ()) (for_impl ()))))))
      (include_dirs (_build/default/subdir/subfolder/.subfolder_lib.objs/byte))))
    (library
     ((name virtual)
-     (uid f0299ba46dc29b8d4bd2f5d1cf82587c)
+     (uid $DIGEST24)
      (local true)
      (requires ())
      (source_dir _build/default/virtual)
@@ -1252,13 +1349,14 @@ not stable across different setups.
         (intf (_build/default/virtual/virtual.mli))
         (cmt ())
         (cmti (_build/default/virtual/.virtual.objs/byte/virtual.cmti))
+        (origin source)
         (module_deps ((for_intf ()) (for_impl ()))))))
      (include_dirs (_build/default/virtual/.virtual.objs/byte))))
    (library
     ((name virtual_impl1)
-     (uid 243949502d62f27969aff867fdfb0c6a)
+     (uid $DIGEST25)
      (local true)
-     (requires (f0299ba46dc29b8d4bd2f5d1cf82587c))
+     (requires ($DIGEST24))
      (source_dir _build/default/virtual_impl1)
      (modules
       (((name Virtual)
@@ -1267,6 +1365,7 @@ not stable across different setups.
         (cmt
          (_build/default/virtual_impl1/.virtual_impl1.objs/byte/virtual.cmt))
         (cmti ())
+        (origin source)
         (module_deps
          ((for_intf ())
           (for_impl ()))))
@@ -1276,15 +1375,17 @@ not stable across different setups.
         (cmt
          (_build/default/virtual_impl1/.virtual_impl1.objs/byte/virtual__virtual_impl1__.cmt))
         (cmti ())
+        (origin
+         (wrapper virtual_impl1/dune))
         (module_deps
          ((for_intf ())
           (for_impl ()))))))
      (include_dirs (_build/default/virtual_impl1/.virtual_impl1.objs/byte))))
    (library
     ((name virtual_impl2)
-     (uid bfe8d16a00ac2473ce3fc5fc99d7c6cb)
+     (uid $DIGEST26)
      (local true)
-     (requires (f0299ba46dc29b8d4bd2f5d1cf82587c))
+     (requires ($DIGEST24))
      (source_dir _build/default/virtual_impl2)
      (modules
       (((name Virtual)
@@ -1293,6 +1394,7 @@ not stable across different setups.
         (cmt
          (_build/default/virtual_impl2/.virtual_impl2.objs/byte/virtual.cmt))
         (cmti ())
+        (origin source)
         (module_deps
          ((for_intf ())
           (for_impl ()))))
@@ -1302,17 +1404,25 @@ not stable across different setups.
         (cmt
          (_build/default/virtual_impl2/.virtual_impl2.objs/byte/virtual__virtual_impl2__.cmt))
         (cmti ())
+        (origin
+         (wrapper virtual_impl2/dune))
         (module_deps
          ((for_intf ())
           (for_impl ()))))))
      (include_dirs (_build/default/virtual_impl2/.virtual_impl2.objs/byte)))))
 
-  $ dune describe workspace --lang 0.1 --sanitize-for-tests virtual
+Absolute directory filters inside the workspace are accepted.
+
+  $ dune describe workspace --lang 0.1 --sanitize-for-tests "$PWD/virtual" \
+  > | grep -o '(name virtual)'
+  (name virtual)
+
+  $ dune describe workspace --lang 0.1 --sanitize-for-tests virtual | censor
   ((root /WORKSPACE_ROOT)
    (build_context _build/default)
    (library
     ((name virtual)
-     (uid f0299ba46dc29b8d4bd2f5d1cf82587c)
+     (uid $DIGEST)
      (local true)
      (requires ())
      (source_dir _build/default/virtual)
@@ -1321,23 +1431,29 @@ not stable across different setups.
         (impl ())
         (intf (_build/default/virtual/virtual.mli))
         (cmt ())
-        (cmti (_build/default/virtual/.virtual.objs/byte/virtual.cmti)))))
+        (cmti (_build/default/virtual/.virtual.objs/byte/virtual.cmti))
+        (origin source))))
      (include_dirs (_build/default/virtual/.virtual.objs/byte)))))
 
+  $ dune describe workspace --lang 0.1 --sanitize-for-tests --no-recursive subdir
+  ((root /WORKSPACE_ROOT)
+   (build_context _build/default))
 
 Test other formats
 ------------------
 
-  $ dune describe workspace --format csexp --lang 0.1 --sanitize-for-tests | cut -c 1-85
-  ((4:root15:/WORKSPACE_ROOT)(13:build_context14:_build/default)(11:executables((5:name
+  $ dune describe workspace --format csexp --lang 0.1 --sanitize-for-tests > workspace.csexp
+  $ dune internal sexp-pp --format csexp workspace.csexp | head -3
+  ((root /WORKSPACE_ROOT)
+   (build_context _build/default)
+   (executables
 
 Test errors
 -----------
 
   $ dune describe workspacw --lang 0.1 
-  dune: unknown command 'workspacw', did you mean 'workspace'?
-  Usage: dune describe [COMMAND] …
-  Try 'dune describe --help' or 'dune --help' for more information.
+  Usage: dune describe [--help] [COMMAND] …
+  dune: unknown command 'workspacw'. Did you mean 'workspace'?
   [1]
 
   $ dune describe workspace --lang 0.1 xxx
@@ -1350,12 +1466,11 @@ Test errors
   [1]
 
   $ dune describe workspace --lang 1.0
+  Usage: dune describe workspace [--help] [OPTION]… [DIRS]…
   dune: Only --lang 0.1 is available at the moment as this command is not yet
-        stabilised. If you would like to release a software that relies on the output
-        of 'dune describe', please open a ticket on
+        stabilised. If you would like to release a software that relies on the
+        output of 'dune describe', please open a ticket on
         https://github.com/ocaml/dune.
-  Usage: dune describe workspace [OPTION]… [DIRS]…
-  Try 'dune describe workspace --help' or 'dune --help' for more information.
   [1]
 
 opam file listing

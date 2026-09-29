@@ -27,7 +27,7 @@ module Link_mode : sig
     -> loc:Loc.t
     -> ext_obj:Filename.Extension.t
     -> ext_dll:Filename.Extension.t
-    -> string
+    -> Filename.Extension.t
 
   module Map : sig
     include Map.S with type key = t
@@ -39,13 +39,14 @@ end
 
 type t =
   { names : (Loc.t * string) Nonempty_list.t
-  ; link_flags : Link_flags.Spec.t
+  ; public_names : (Loc.t * string option) Nonempty_list.t option
+  ; link_flags : Dune_lang.Link_flags.Spec.t
   ; link_deps : Dep_conf.t list
   ; modes : Loc.t Link_mode.Map.t
   ; optional : bool
   ; buildable : Buildable.t
   ; package : Package.t option
-  ; promote : Rule.Promote.t option
+  ; promote : Rule_mode.Promote.t option
   ; install_conf : Install_conf.t option
   ; embed_in_plugin_libraries : (Loc.t * Lib_name.t) list
   ; forbidden_libraries : (Loc.t * Lib_name.t) list
@@ -62,6 +63,7 @@ val has_foreign : t -> bool
 (** Check if the executables have any c++ foreign stubs. *)
 val has_foreign_cxx : t -> bool
 
+val exe_target : t -> Exe_target.t
 val obj_dir : t -> dir:Path.Build.t -> Path.Build.t Obj_dir.t
 val single : t Dune_lang.Decoder.t
 val multi : t Dune_lang.Decoder.t

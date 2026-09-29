@@ -9,7 +9,15 @@ val symlink_rules : Super_context.t -> dir:Path.Build.t -> (Subdir_set.t * Rules
 
 val stanzas_to_entries
   :  Super_context.t
-  -> Install.Entry.Sourced.t list Dune_lang.Package_name.Map.t Memo.t
+  -> Install.Entry.Sourced.Unexpanded.t list Dune_lang.Package_name.Map.t Memo.t
+
+val resolve_package_install_file
+  :  loc:Loc.t
+  -> Super_context.t
+  -> pkg:Package.Name.t
+  -> section:Section.t
+  -> file:Path.Local.t
+  -> Path.Build.t Memo.t
 
 (** Generate rules for [.dune-package], [META.<package-name>] files. and
     [<package-name>.install] files. *)

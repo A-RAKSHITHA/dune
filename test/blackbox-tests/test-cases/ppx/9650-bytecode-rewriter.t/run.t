@@ -1,6 +1,6 @@
-  $ cat >dune-project <<EOF
-  > (lang dune 3.12)
-  > EOF
+Runs bytecode-only PPX rewriters when preprocessing executables.
+
+  $ make_dune_project 3.12
 
   $ mkdir bin
   $ cat > bin/dune << EOF

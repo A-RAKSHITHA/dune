@@ -19,9 +19,9 @@ include (
   end) :
     Stringlike with type t := t)
 
+let repr = Repr.view Repr.string ~to_:to_string
 let to_opam_hash v = v
 let of_opam_hash v = v
-let of_dune_digest dune_digest = OpamHash.md5 (Dune_digest.to_string dune_digest)
 
 let pp v =
   let s = to_string v in
@@ -29,6 +29,7 @@ let pp v =
 ;;
 
 let equal = OpamHash.equal
+let hash = Poly.hash
 
 include Comparable.Make (struct
     type nonrec t = t

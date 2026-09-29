@@ -1,83 +1,40 @@
 (* Because other the syntax s.[x] causes trouble *)
 module String = Stdlib.String
 
-module StringLabels = struct
-  (* functions potentially in the stdlib, depending on OCaml version *)
-
-  let[@warning "-32"] exists =
-    let rec loop s i len f =
-      if i = len then false else f (String.unsafe_get s i) || loop s (i + 1) len f
-    in
-    fun ~f s -> loop s 0 (String.length s) f
-  ;;
-
-  let[@warning "-32"] for_all =
-    let rec loop s i len f =
-      i = len || (f (String.unsafe_get s i) && loop s (i + 1) len f)
-    in
-    fun ~f s -> loop s 0 (String.length s) f
-  ;;
-
-  (* overwrite them with stdlib versions if available *)
-  include Stdlib.StringLabels
-end
-
-include StringLabels
-
-let compare a b = Ordering.of_int (String.compare a b)
-
-module T = struct
-  type t = StringLabels.t
-
-  let compare = compare
-  let equal (x : t) (y : t) = x = y
-  let hash (s : t) = Poly.hash s
-  let to_dyn s = Dyn.String s
-end
-
-let to_dyn = T.to_dyn
-let equal : string -> string -> bool = ( = )
-let hash = Poly.hash
-let capitalize = capitalize_ascii
-let uncapitalize = uncapitalize_ascii
-let uppercase = uppercase_ascii
-let lowercase = lowercase_ascii
-let index = index_opt
-let index_from = index_from_opt
-let rindex = rindex_opt
-let rindex_from = rindex_from_opt
-let break s ~pos = sub s ~pos:0 ~len:pos, sub s ~pos ~len:(length s - pos)
-let is_empty s = length s = 0
-
 module Cased_functions (X : sig
     val normalize : char -> char
   end) =
 struct
+  let length = String.length
+  let sub = StringLabels.sub
+
   let rec check_prefix s ~prefix len i =
     i = len
-    || (X.normalize s.[i] = X.normalize prefix.[i] && check_prefix s ~prefix len (i + 1))
+    || (X.normalize (String.unsafe_get s i) = X.normalize (String.unsafe_get prefix i)
+        && check_prefix s ~prefix len (i + 1))
   ;;
 
   let rec check_suffix s ~suffix suffix_len offset i =
     i = suffix_len
-    || (X.normalize s.[offset + i] = X.normalize suffix.[i]
+    || (X.normalize (String.unsafe_get s (offset + i))
+        = X.normalize (String.unsafe_get suffix i)
         && check_suffix s ~suffix suffix_len offset (i + 1))
   ;;
 
-  let is_prefix s ~prefix =
+  let starts_with ~prefix s =
     let len = length s in
     let prefix_len = length prefix in
     len >= prefix_len && check_prefix s ~prefix prefix_len 0
   ;;
 
-  let is_suffix s ~suffix =
+  let ends_with ~suffix s =
     let len = length s in
     let suffix_len = length suffix in
     len >= suffix_len && check_suffix s ~suffix suffix_len (len - suffix_len) 0
   ;;
 
-  let drop_prefix s ~prefix =
-    if is_prefix s ~prefix
+  let drop_prefix ~prefix s =
+    if starts_with ~prefix s
     then
       if length s = length prefix
       then Some ""
@@ -91,8 +48,8 @@ struct
     | Some s -> s
   ;;
 
-  let drop_suffix s ~suffix =
-    if is_suffix s ~suffix
+  let drop_suffix ~suffix s =
+    if ends_with ~suffix s
     then
       if length s = length suffix
       then Some ""
@@ -107,13 +64,89 @@ struct
   ;;
 end
 
-include Cased_functions (struct
+module Case_sensitive = Cased_functions (struct
     let normalize c = c
   end)
+
+include Case_sensitive
 
 module Caseless = Cased_functions (struct
     let normalize = Char.lowercase_ascii
   end)
+
+include Stdlib.StringLabels
+
+external index_from_unchecked : t -> int -> char -> int = "dune_string_index_from"
+[@@noalloc]
+
+external rindex_from_unchecked : t -> int -> char -> int = "dune_string_rindex_from"
+[@@noalloc]
+
+let index_from s i c =
+  let length = length s in
+  if i < 0 || i > length then invalid_arg "String.index_from_opt / Bytes.index_from_opt";
+  if i = length
+  then None
+  else (
+    match index_from_unchecked s i c with
+    | -1 -> None
+    | index -> Some index)
+;;
+
+let index_from_opt = index_from
+let index s c = index_from s 0 c
+let index_opt = index
+
+let contains_from s i c =
+  let length = length s in
+  if i < 0 || i > length then invalid_arg "String.contains_from / Bytes.contains_from";
+  i < length && index_from_unchecked s i c <> -1
+;;
+
+let contains s c =
+  let length = length s in
+  length > 0 && index_from_unchecked s 0 c <> -1
+;;
+
+(* [StringLabels] shadows these implementations with versions that allocate a
+   local recursive closure on each call. *)
+let starts_with = Case_sensitive.starts_with
+let ends_with = Case_sensitive.ends_with
+let repr = Repr.string
+let compare a b = Ordering.of_int (String.compare a b)
+
+module T = struct
+  type t = StringLabels.t
+
+  let repr = repr
+  let compare = compare
+  let equal (x : t) (y : t) = x = y
+  let hash (s : t) = Poly.hash s
+  let to_dyn = Repr.to_dyn repr
+end
+
+let compare = T.compare
+let to_dyn = T.to_dyn
+let equal = T.equal
+let hash = Poly.hash
+let capitalize = capitalize_ascii
+let uncapitalize = uncapitalize_ascii
+let uppercase = uppercase_ascii
+let lowercase = lowercase_ascii
+let rindex = rindex_opt
+let rindex_from s i c = rindex_from_opt s i c
+let break s ~pos = sub s ~pos:0 ~len:pos, sub s ~pos ~len:(length s - pos)
+let is_empty s = length s = 0
+
+let append_with_char x ~sep y =
+  let len_x = length x in
+  let len_y = length y in
+  let result = Bytes.create (len_x + 1 + len_y) in
+  Bytes.unsafe_blit_string ~src:x ~src_pos:0 ~dst:result ~dst_pos:0 ~len:len_x;
+  Bytes.unsafe_set result len_x sep;
+  Bytes.unsafe_blit_string ~src:y ~src_pos:0 ~dst:result ~dst_pos:(len_x + 1) ~len:len_y;
+  Bytes.unsafe_to_string result
+;;
 
 let extract_words s ~is_word_char =
   let rec skip_blanks i =
@@ -164,6 +197,8 @@ let rsplit2 s ~on =
 
 include String_split
 
+let split_on_char ~sep s = split s ~on:sep
+
 let escape_only c s =
   let n = ref 0 in
   let len = length s in
@@ -194,7 +229,9 @@ let longest_prefix = function
   | [ x ] -> x
   | x :: xs ->
     let rec loop len i =
-      if i < len && List.for_all xs ~f:(fun s -> s.[i] = x.[i])
+      if
+        i < len
+        && List.for_all xs ~f:(fun s -> String.unsafe_get s i = String.unsafe_get x i)
       then loop len (i + 1)
       else i
     in
@@ -206,11 +243,13 @@ let quoted = Printf.sprintf "%S"
 
 let maybe_quoted s =
   let escaped = escaped s in
-  if (s == escaped || s = escaped) && not (String.contains s ' ') then s else quoted s
+  if (s == escaped || s = escaped) && not (contains s ' ') then s else quoted s
 ;;
 
 include Comparable.Make (T)
 module Table = Hashtbl.Make (T)
+module Array0 = Array
+module Array = Array0.Sorted.Make (T)
 
 let enumerate_gen s =
   let s = " " ^ s ^ " " in
@@ -231,16 +270,20 @@ let enumerate_one_of = function
   | s -> "One of " ^ enumerate_or s
 ;;
 
-let take s len = sub s ~pos:0 ~len:(min (length s) len)
+let[@inline always] take s len =
+  let length = length s in
+  if len >= length then s else sub s ~pos:0 ~len
+;;
 
 let drop s n =
   let len = length s in
-  sub s ~pos:(min n len) ~len:(max (len - n) 0)
+  let pos = if n < len then n else len in
+  sub s ~pos ~len:(len - pos)
 ;;
 
 let split_n s n =
   let len = length s in
-  let n = min n len in
+  let n = if n < len then n else len in
   sub s ~pos:0 ~len:n, sub s ~pos:n ~len:(len - n)
 ;;
 
@@ -270,7 +313,7 @@ let need_quoting s =
     if i = len
     then false
     else (
-      match s.[i] with
+      match String.unsafe_get s i with
       | ' ' | '\"' | '(' | ')' | '{' | '}' | ';' | '#' -> true
       | _ -> loop (i + 1))
   in
@@ -311,7 +354,7 @@ let drop_prefix_and_suffix t ~prefix ~suffix =
   let s_len = String.length suffix in
   let t_len = String.length t in
   let p_s_len = p_len + s_len in
-  if p_s_len <= t_len && is_prefix t ~prefix && is_suffix t ~suffix
+  if p_s_len <= t_len && starts_with ~prefix t && ends_with ~suffix t
   then Some (sub t ~pos:p_len ~len:(t_len - p_s_len))
   else None
 ;;
@@ -320,9 +363,20 @@ let contains_double_underscore =
   let rec aux s len i =
     if i > len - 2
     then false
-    else if s.[i] = '_' && s.[i + 1] = '_'
+    else if String.unsafe_get s i = '_' && String.unsafe_get s (i + 1) = '_'
     then true
     else aux s len (i + 1)
   in
   fun s -> aux s (String.length s) 0
 ;;
+
+let last s =
+  let len = length s in
+  if len > 0 then Some (String.unsafe_get s (len - 1)) else None
+;;
+
+let replace_char s ~from ~to_ =
+  String.map (fun c -> if Char.equal c from then to_ else c) s
+;;
+
+let to_string x = x

@@ -1,6 +1,6 @@
-open Stdune
-module Scheduler = Dune_engine.Scheduler
+open Import
 module Checksum = Dune_pkg.Checksum
+module Rev_store = Dune_pkg.Rev_store
 module Fetch = Dune_pkg.Fetch
 
 let plaintext_md = "tar-inputs/plaintext.md"
@@ -31,13 +31,11 @@ let serve_once ~filename =
   Http.Server.start server;
   let port = Http.Server.port server in
   let thread =
-    Thread.create
-      (fun server ->
-         Http.Server.accept server ~f:(fun session ->
-           let () = Http.Server.accept_request session in
-           Http.Server.respond_file session ~file:filename);
-         Http.Server.stop server)
-      server
+    Scheduler.spawn_thread ~name:"http-server" (fun () ->
+      Http.Server.accept server ~f:(fun session ->
+        let () = Http.Server.accept_request session in
+        Http.Server.respond_file session ~file:filename);
+      Http.Server.stop server)
   in
   port, thread
 ;;
@@ -69,11 +67,12 @@ let download ?(reproducible = true) ~unpack ~port ~filename ~target ?checksum ()
 ;;
 
 let run thunk =
-  let on_event _config _event = () in
   let config : Scheduler.Config.t =
-    { concurrency = 1; stats = None; print_ctrl_c_warning = false; watch_exclusions = [] }
+    { concurrency = 1; print_ctrl_c_warning = false; watch_exclusions = [] }
   in
-  Scheduler.Run.go config ~on_event thunk
+  Scheduler.Run.go config (fun () ->
+    let open Fiber.O in
+    Git_test_utils.git_init_and_config_user (Path.of_string ".") >>> thunk ())
 ;;
 
 let%expect_test "downloading simple file" =
@@ -88,8 +87,8 @@ let%expect_test "downloading simple file" =
        ~target:(subdir destination)
        ~checksum:(calculate_checksum ~filename));
   Thread.join server;
-  let served_content = Io.String_path.read_file filename in
-  let downloaded_content = Io.String_path.read_file destination in
+  let served_content = Io.String_path.read_file_exn filename in
+  let downloaded_content = Io.String_path.read_file_exn destination in
   Printf.printf
     "Served file:\n%s\nDownloaded file:\n%s\nEqual: %B"
     served_content
@@ -191,6 +190,7 @@ let%expect_test "downloading, tarball with no checksum match" =
     print_endline "------\nfiles in target dir:";
     Dune_engine.No_io.Path.Untracked.readdir_unsorted target
     |> Result.value ~default:[]
+    |> Filename.L.to_string
     |> List.sort ~compare:String.compare
     |> List.iter ~f:print_endline
   in
@@ -206,7 +206,8 @@ let%expect_test "downloading, tarball with no checksum match" =
 
 let download_git rev_store url ~target =
   let open Fiber.O in
-  Fetch.fetch_git rev_store ~target ~url:(Loc.none, url)
+  Git_test_utils.git_init_and_config_user (Path.of_string ".")
+  >>> Fetch.fetch_git rev_store ~target ~url:(Loc.none, url)
   >>| function
   | Error _ ->
     let errs = [ Pp.text "Failure while downloading" ] in
@@ -217,32 +218,30 @@ let download_git rev_store url ~target =
 let%expect_test "downloading via git" =
   let source = subdir "source-repository" in
   let url = OpamUrl.parse (sprintf "git+file://%s" (Path.to_string source)) in
-  let rev_store_dir = subdir "rev-store" in
   let target = subdir "checkout-into-here" in
   (* The file at [entry] is created by [create_repo_at] *)
   let entry = Path.relative target "entry" in
   Path.mkdir_p target;
   run (fun () ->
     let open Fiber.O in
-    let* rev_store = Dune_pkg.Rev_store.load_or_create ~dir:rev_store_dir in
-    let* (_commit : string) = Rev_store_tests.create_repo_at source in
+    let* rev_store = Rev_store.get in
+    let* (_commit : string) = Git_test_utils.create_repo_at source in
     let+ () = download_git rev_store url ~target in
-    print_endline (Io.read_file entry));
+    print_endline (Io.read_file_exn entry));
   [%expect {| just some content |}]
 ;;
 
 let%expect_test "attempting to download an invalid git url" =
   let source = subdir "source" in
   let url = OpamUrl.parse "git+file://foo/bar" in
-  let rev_store_dir = subdir "rev-store-dir" in
   let target = subdir "target" in
   let entry = Path.relative target "e" in
   run (fun () ->
     let open Fiber.O in
-    let* rev_store = Dune_pkg.Rev_store.load_or_create ~dir:rev_store_dir in
-    let* (_commit : string) = Rev_store_tests.create_repo_at source in
+    let* rev_store = Rev_store.get in
+    let* (_commit : string) = Git_test_utils.create_repo_at source in
     let+ () = download_git rev_store url ~target in
-    print_endline (Io.read_file entry));
+    print_endline (Io.read_file_exn entry));
   [%expect.unreachable]
 [@@expect.uncaught_exn
   {|

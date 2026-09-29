@@ -1,14 +1,22 @@
 open Import
 open Memo.O
 
-let melc sctx ~loc ~dir =
+let resolve_program sctx ~loc ~dir name =
   Super_context.resolve_program_memo
     sctx
     ~loc
     ~dir
     ~where:Original_path
     ~hint:"opam install melange"
-    "melc"
+    name
+;;
+
+let melc sctx ~loc ~dir = resolve_program sctx ~loc ~dir "melc"
+let melobjinfo sctx ~loc ~dir = resolve_program sctx ~loc ~dir "melobjinfo"
+
+let available sctx ~dir =
+  let+ melc = melc sctx ~loc:None ~dir in
+  Result.is_ok melc
 ;;
 
 let where =
@@ -24,7 +32,7 @@ let where =
   fun sctx ~loc ~dir ->
     let* env = Super_context.env_node sctx ~dir >>= Env_node.external_env in
     let+ melange_dirs =
-      match Env.get env "MELANGELIB" with
+      match Env.get env (Env.Var.of_string "MELANGELIB") with
       | Some p -> Memo.return (Some p)
       | None ->
         let* melc = melc sctx ~loc ~dir in

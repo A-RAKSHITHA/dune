@@ -24,6 +24,8 @@ module File = struct
 
   let dialect t = t.dialect
   let path t = t.path
+  let original_path t = t.original_path
+  let set_path t path = { t with path }
 
   let version_installed t ~src_root ~install_dir =
     let path =
@@ -35,7 +37,10 @@ module File = struct
     { t with path }
   ;;
 
-  let make dialect path = { dialect; path; original_path = path }
+  let make ?original_path dialect path =
+    let original_path = Option.value original_path ~default:path in
+    { dialect; path; original_path }
+  ;;
 
   let to_dyn { path; original_path; dialect } =
     let open Dyn in
@@ -52,22 +57,11 @@ module Kind = struct
     | Intf_only
     | Virtual
     | Impl
-    | Alias of Module_name.Path.t
+    | Alias of Module_name.t list
     | Impl_vmodule
     | Wrapped_compat
     | Root
-
-  let to_dyn =
-    let open Dyn in
-    function
-    | Intf_only -> variant "Intf_only" []
-    | Virtual -> variant "Virtual" []
-    | Impl -> variant "Impl" []
-    | Alias path -> variant "Alias" [ Module_name.Path.to_dyn path ]
-    | Impl_vmodule -> variant "Impl_vmodule" []
-    | Wrapped_compat -> variant "Wrapped_compat" []
-    | Root -> variant "Root" []
-  ;;
+    | Parameter
 
   let encode =
     let open Dune_lang.Encoder in
@@ -78,11 +72,14 @@ module Kind = struct
     | Alias path ->
       (match path with
        | [] -> string "alias"
-       | _ :: _ -> constr "alias" (fun x -> List (Module_name.Path.encode x)) path)
+       | x :: xs -> constr "alias" (fun x -> List (Module_name.Path.encode x)) (x :: xs))
     | Impl_vmodule -> string "impl_vmodule"
     | Wrapped_compat -> string "wrapped_compat"
     | Root -> string "root"
+    | Parameter -> string "parameter"
   ;;
+
+  let to_dyn t = Dune_sexp.to_dyn (encode t)
 
   let decode =
     let open Dune_lang.Decoder in
@@ -93,6 +90,7 @@ module Kind = struct
       ; "impl_vmodule", return Impl_vmodule
       ; "wrapped_compat", return Wrapped_compat
       ; "root", return Root
+      ; "parameter", return Parameter
       ; ( "alias"
         , let* next = peek in
           (* TODO remove this once everyone recompiles *)
@@ -100,13 +98,13 @@ module Kind = struct
           | None -> return (Alias [])
           | Some _ ->
             let+ path = enter Module_name.Path.decode in
-            Alias path )
+            Alias (Nonempty_list.to_list path) )
       ]
   ;;
 
   let has_impl = function
     | Alias _ | Impl_vmodule | Wrapped_compat | Root | Impl -> true
-    | Intf_only | Virtual -> false
+    | Intf_only | Virtual | Parameter -> false
   ;;
 end
 
@@ -117,16 +115,37 @@ module Source = struct
     ; files : File.t option Ml_kind.Dict.t
     }
 
+  let logical_path_of_trie_path path =
+    match Nonempty_list.rev path with
+    | name :: parent :: rest when Module_name.equal name parent ->
+      Nonempty_list.(rev (parent :: rest))
+    | _ -> path
+  ;;
+
+  let path_for_dune_package ~is_nested_group_interface path =
+    (* Module paths in dune-package files historically used trie paths for
+       nested group interfaces. Preserve that representation, and escape a
+       logical path that already ends in a repeated component so [decode] can
+       always remove exactly one repeated final component. *)
+    match is_nested_group_interface, Nonempty_list.rev path with
+    | true, name :: _ -> Nonempty_list.(to_list path @ [ name ])
+    | false, name :: parent :: _ when Module_name.equal name parent ->
+      Nonempty_list.(to_list path @ [ name ])
+    | false, _ -> path
+  ;;
+
   let decode ~dir =
     let open Dune_lang.Decoder in
     fields
-    @@ let+ path = field "path" Module_name.Path.decode
+    @@ let+ path =
+         let+ path = field "path" Module_name.Path.decode in
+         logical_path_of_trie_path path
        and+ intf = field_o "intf" (File.decode ~dir)
        and+ impl = field_o "impl" (File.decode ~dir) in
        { path; files = { Ml_kind.Dict.intf; impl } }
   ;;
 
-  let encode ~dir { path; files = { Ml_kind.Dict.intf; impl } } =
+  let encode ~dir ~path { path = _; files = { Ml_kind.Dict.intf; impl } } =
     let open Dune_lang.Encoder in
     let file = function
       | None -> []
@@ -147,8 +166,7 @@ module Source = struct
       ]
   ;;
 
-  let make ?impl ?intf path =
-    if path = [] then Code_error.raise "path cannot be empty" [];
+  let make ~impl ~intf path =
     (match impl, intf with
      | None, None ->
        Code_error.raise
@@ -160,7 +178,7 @@ module Source = struct
   ;;
 
   let has t ~ml_kind = Ml_kind.Dict.get t.files ml_kind |> Option.is_some
-  let name t = List.last t.path |> Option.value_exn
+  let name t = Nonempty_list.last t.path
   let path t = t.path
 
   let choose_file { files = { impl; intf }; path = _ } =
@@ -180,7 +198,7 @@ module Source = struct
     | Intf -> { t with files = { t.files with intf = Some file } }
   ;;
 
-  let set_source t ml_kind file =
+  let set_source t ~ml_kind file =
     match ml_kind with
     | Ml_kind.Impl -> { t with files = { t.files with impl = file } }
     | Intf -> { t with files = { t.files with intf = file } }
@@ -195,6 +213,8 @@ module Source = struct
     | None -> base
     | Some i -> i :: base
   ;;
+
+  let files_by_ml_kind t = t.files
 
   let map_files t ~f =
     let files = Ml_kind.Dict.mapi ~f t.files in
@@ -212,16 +232,16 @@ type t =
   }
 
 let name t = Source.name t.source
-let path t = t.source.path
+let path t = Source.path t.source
 let kind t = t.kind
 let pp_flags t = t.pp
 let install_as t = t.install_as
 
-let of_source ?install_as ~obj_name ~visibility ~(kind : Kind.t) (source : Source.t) =
+let of_source ~install_as ~obj_name ~visibility ~(kind : Kind.t) (source : Source.t) =
   (match kind, visibility with
    | (Alias _ | Impl_vmodule | Virtual | Wrapped_compat), Visibility.Public
-   | Root, Private
-   | (Impl | Intf_only), _ -> ()
+   | Root, Public
+   | (Impl | Intf_only | Parameter), _ -> ()
    | _, _ ->
      Code_error.raise
        "Module.of_source: invalid kind, visibility combination"
@@ -272,18 +292,13 @@ let iter t ~f =
 
 let set_obj_name t obj_name = { t with obj_name }
 
-let set_path t path =
-  let source = { t.source with Source.path } in
-  { t with source }
-;;
-
 let add_file t kind file =
   let source = Source.add_file t.source kind file in
   { t with source }
 ;;
 
-let set_source t kind file =
-  let source = Source.set_source t.source kind file in
+let set_source t ~ml_kind file =
+  let source = Source.set_source t.source ~ml_kind file in
   { t with source }
 ;;
 
@@ -306,8 +321,6 @@ let to_dyn { source; obj_name; pp; visibility; kind; install_as } =
     ]
 ;;
 
-let ml_gen = ".ml-gen"
-
 let wrapped_compat t =
   assert (t.visibility = Public);
   let source =
@@ -320,7 +333,10 @@ let wrapped_compat t =
            a source dir *)
         Path.L.relative
           (src_dir t)
-          [ ".wrapped_compat"; Module_name.Path.to_string t.source.path ^ ml_gen ]
+          [ ".wrapped_compat"
+          ; (Module_name.Path.to_string t.source.path
+             ^ Filename.Extension.(to_string ml_gen))
+          ]
       in
       Some { File.dialect = Dialect.ocaml; path; original_path = path }
     in
@@ -343,6 +359,15 @@ let sources_without_pp t =
     ~f:(Option.map ~f:(fun (x : File.t) -> x.original_path))
 ;;
 
+let source_without_pp t ~ml_kind =
+  let source =
+    match (ml_kind : Ml_kind.t) with
+    | Impl -> t.source.files.impl
+    | Intf -> t.source.files.intf
+  in
+  Option.map source ~f:File.original_path
+;;
+
 module Obj_map = struct
   include Map.Make (struct
       type nonrec t = t
@@ -352,30 +377,48 @@ module Obj_map = struct
     end)
 end
 
-let encode ({ source; obj_name; pp = _; visibility; kind; install_as = _ } as t) ~src_dir =
+let encode_with_source_path
+      ({ source; obj_name; pp = _; visibility; kind; install_as = _ } as t)
+      ~src_dir
+      ~source_path
+  =
   let open Dune_lang.Encoder in
   let has_impl = has t ~ml_kind:Impl in
   let kind =
     match kind with
     | Kind.Impl when has_impl -> None
     | Intf_only when not has_impl -> None
-    | Root | Wrapped_compat | Impl_vmodule | Alias _ | Impl | Virtual | Intf_only ->
-      Some kind
+    | Root
+    | Wrapped_compat
+    | Impl_vmodule
+    | Alias _
+    | Impl
+    | Virtual
+    | Intf_only
+    | Parameter -> Some kind
   in
   record_fields
     [ field "obj_name" Module_name.Unique.encode obj_name
     ; field "visibility" Visibility.encode visibility
     ; field_o "kind" Kind.encode kind
-    ; field_l "source" Fun.id (Source.encode ~dir:src_dir source)
+    ; field_l "source" Fun.id (Source.encode ~dir:src_dir ~path:source_path source)
     ]
 ;;
 
+let encode t ~src_dir ~is_nested_group_interface =
+  let source_path =
+    Source.path t.source |> Source.path_for_dune_package ~is_nested_group_interface
+  in
+  encode_with_source_path t ~src_dir ~source_path
+;;
+
 let decode ~src_dir =
+  let module K = Kind in
   let open Dune_lang.Decoder in
   fields
     (let+ obj_name = field "obj_name" Module_name.Unique.decode
      and+ visibility = field "visibility" Visibility.decode
-     and+ kind = field_o "kind" Kind.decode
+     and+ kind = field_o "kind" K.decode
      and+ source = field "source" (Source.decode ~dir:src_dir) in
      let kind =
        match kind with
@@ -390,7 +433,11 @@ let pped =
   map_files ~f:(fun _kind (file : File.t) ->
     (* We need to insert the suffix before the extension as some tools inspect
        the extension *)
-    let pp_path = Path.map_extension file.path ~f:(fun ext -> ".pp" ^ ext) in
+    let pp_path =
+      Path.map_extension file.path ~f:(fun ext ->
+        Filename.Extension.Or_empty.of_string_exn
+          (".pp" ^ Filename.Extension.Or_empty.to_string ext))
+    in
     { file with path = pp_path })
 ;;
 
@@ -399,7 +446,9 @@ let ml_source =
     match Dialect.ml_suffix f.dialect ml_kind with
     | None -> f
     | Some suffix ->
-      let path = Path.extend_basename f.path ~suffix in
+      let path =
+        Path.extend_basename f.path ~suffix:(Filename.Extension.to_filename suffix)
+      in
       { f with dialect = Dialect.ocaml; path })
 ;;
 
@@ -407,7 +456,14 @@ let version_installed t ~src_root ~install_dir =
   map_files t ~f:(fun _ -> File.version_installed ~src_root ~install_dir)
 ;;
 
-let generated ?install_as ?obj_name ~(kind : Kind.t) ~src_dir (path : Module_name.Path.t) =
+let generated
+      ?install_as
+      ?obj_name
+      ~(kind : Kind.t)
+      ~(for_ : Compilation_mode.t)
+      ~src_dir
+      (path : Module_name.Path.t)
+  =
   let obj_name =
     match obj_name with
     | Some obj_name -> obj_name
@@ -415,20 +471,36 @@ let generated ?install_as ?obj_name ~(kind : Kind.t) ~src_dir (path : Module_nam
   in
   let source =
     let impl =
-      let basename = Module_name.Unique.artifact_filename obj_name ~ext:ml_gen in
-      Path.Build.relative src_dir basename |> Path.build |> File.make Dialect.ocaml
+      let basename =
+        Module_name.Unique.artifact_filename obj_name ~ext:Filename.Extension.ml_gen
+      in
+      let src_dir =
+        match for_ with
+        | Ocaml -> src_dir
+        | Melange -> Path.Build.relative src_dir Melange.Source.dir
+      in
+      Path.Build.relative_fname src_dir basename |> Path.build |> File.make Dialect.ocaml
     in
-    Source.make ~impl path
+    Source.make ~impl:(Some impl) ~intf:None path
   in
   let visibility : Visibility.t =
-    match kind with
-    | Root -> Private
-    | _ -> Public
+    Public
+    (* CR-someday rgrinberg: This used to be;:
+      {[
+        match kind with
+        | Root -> Private
+        | _ -> Public
+      ]}
+
+      But this currently triggers module hiding via [-I]. We need to fix that.
+    *)
   in
-  of_source ?install_as ~visibility ~kind ~obj_name:(Some obj_name) source
+  of_source ~install_as ~visibility ~kind ~obj_name:(Some obj_name) source
 ;;
 
-let of_source ~visibility ~kind source = of_source ~obj_name:None ~visibility ~kind source
+let of_source ~visibility ~kind source =
+  of_source ~install_as:None ~obj_name:None ~visibility ~kind source
+;;
 
 module Name_map = struct
   type nonrec t = t Module_name.Map.t
@@ -442,7 +514,33 @@ module Name_map = struct
   ;;
 
   let encode t ~src_dir =
-    Module_name.Map.to_list_map t ~f:(fun _ x -> Dune_lang.List (encode ~src_dir x))
+    Module_name.Map.to_list_map t ~f:(fun _ x ->
+      Dune_lang.List (encode ~src_dir ~is_nested_group_interface:false x))
+  ;;
+
+  let encode_stdlib t ~src_dir ~main_module_name =
+    Module_name.Map.to_list_map t ~f:(fun _ m ->
+      let name = name m in
+      let wrapped_path = Nonempty_list.[ main_module_name; name ] in
+      (* Wrapped stdlib modules historically included their wrapper in the
+         source path. The object name distinguishes wrapped modules from
+         exceptions such as compiler-internal and exit modules. *)
+      let source_path =
+        if Module_name.Unique.equal (obj_name m) (Module_name.Path.wrap wrapped_path)
+        then wrapped_path
+        else Nonempty_list.[ name ]
+      in
+      Dune_lang.List (encode_with_source_path m ~src_dir ~source_path))
+  ;;
+
+  let decode_stdlib ~src_dir =
+    let open Dune_lang.Decoder in
+    let+ modules = decode ~src_dir in
+    Module_name.Map.map modules ~f:(fun m ->
+      (* Qualified subdirectories are forbidden for stdlib libraries. *)
+      let name = name m in
+      let source = { m.source with Source.path = Nonempty_list.[ name ] } in
+      { m with source })
   ;;
 
   let add t module_ = Module_name.Map.set t (name module_) module_

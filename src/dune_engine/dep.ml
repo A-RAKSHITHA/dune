@@ -20,6 +20,23 @@ module T = struct
           }
       | File_selector of Digest.t (* Digest of the underlying [File_selector.t] *)
       | Universe
+
+    let digest d = function
+      | Env var ->
+        Digest.Manual.int d 0;
+        Digest.Manual.string d var
+      | File digest ->
+        Digest.Manual.int d 1;
+        Digest.Manual.digest d digest
+      | Alias { dir; name } ->
+        Digest.Manual.int d 2;
+        Digest.Manual.string d dir;
+        Digest.Manual.string d name
+      | File_selector digest ->
+        Digest.Manual.int d 3;
+        Digest.Manual.digest d digest
+      | Universe -> Digest.Manual.int d 4
+    ;;
   end
 
   let env e = Env e
@@ -45,15 +62,28 @@ module T = struct
     | Universe, Universe -> Ordering.Eq
   ;;
 
-  let to_dyn t =
-    let open Dyn in
-    match t with
-    | File_selector g -> variant "File_selector" [ File_selector.to_dyn g ]
-    | Env e -> variant "Env" [ string e ]
-    | File f -> variant "File" [ Path.to_dyn f ]
-    | Alias a -> variant "Alias" [ Alias.to_dyn a ]
-    | Universe -> variant "Universe" []
+  let repr =
+    Repr.variant
+      "dep"
+      [ Repr.case "File_selector" File_selector.repr ~proj:(function
+          | File_selector g -> Some g
+          | _ -> None)
+      ; Repr.case "Env" Env.Var.repr ~proj:(function
+          | Env e -> Some e
+          | _ -> None)
+      ; Repr.case "File" Path.repr ~proj:(function
+          | File f -> Some f
+          | _ -> None)
+      ; Repr.case "Alias" (Repr.abstract Alias.to_dyn) ~proj:(function
+          | Alias a -> Some a
+          | _ -> None)
+      ; Repr.case0 "Universe" ~test:(function
+          | Universe -> true
+          | _ -> false)
+      ]
   ;;
+
+  let to_dyn = Repr.to_dyn repr
 end
 
 include T
@@ -61,7 +91,7 @@ include T
 module Map = struct
   module M = Map.Make (T)
   include M
-  include Memo.Make_parallel_map (M)
+  include Memo.Map (M)
 
   let has_universe t = mem t Universe
 end
@@ -95,10 +125,14 @@ module Fact = struct
 
     (* The caller should ensure that [files] and [digests] are listed in the same order *)
     let combined_digest ?empty_dir (files : Path.t list) (digests : Digest.t list) =
-      let files = List.map files ~f:Path.to_string in
-      match empty_dir with
-      | None -> Digest.generic (files, digests)
-      | Some empty_dir -> Digest.generic (empty_dir, files, digests)
+      let d = Digest.Manual.create () in
+      Digest.Manual.option
+        d
+        ~f:(fun d path -> Digest.Manual.repr d Path.Build.repr path)
+        empty_dir;
+      Digest.Manual.list d files ~f:(fun d path -> Digest.Manual.repr d Path.repr path);
+      Digest.Manual.list d digests ~f:Digest.Manual.digest;
+      Digest.Manual.get d
     ;;
 
     let create files ~build_file =
@@ -142,7 +176,10 @@ module Fact = struct
     let empty =
       { files = Path.Set.empty
       ; empty_dirs = Path.Build.Set.empty
-      ; digest = Digest.generic []
+      ; digest =
+          (let d = Digest.Manual.create () in
+           Digest.Manual.list d [] ~f:Digest.Manual.digest;
+           Digest.Manual.get d)
       }
     ;;
 
@@ -160,7 +197,13 @@ module Fact = struct
       | ts ->
         { files = Path.Set.union_map ts ~f:(fun t -> t.files)
         ; empty_dirs = Path.Build.Set.union_map ts ~f:(fun t -> t.empty_dirs)
-        ; digest = Digest.generic (List.map ts ~f:(fun t -> t.digest))
+        ; digest =
+            (let d = Digest.Manual.create () in
+             Digest.Manual.list
+               d
+               (List.map ts ~f:(fun t -> t.digest))
+               ~f:Digest.Manual.digest;
+             Digest.Manual.get d)
         }
     ;;
   end
@@ -192,34 +235,46 @@ module Fact = struct
   ;;
 
   module Stable_for_digest = struct
-    type t =
-      | Env of string * string option
-      | File of
-          { path_digest : Digest.t
-          ; file_digest : Digest.t
-          }
-      | File_selector of
-          { file_selector_digest : Digest.t
-          ; facts_digest : Digest.t
-          }
-      | Alias of Digest.t
+    let[@inline always] env d var value =
+      Digest.Manual.int d 0;
+      Digest.Manual.string d var;
+      Digest.Manual.option d ~f:Digest.Manual.string value
+    ;;
+
+    let[@inline always] file d path_digest file_digest =
+      Digest.Manual.int d 1;
+      Digest.Manual.digest d path_digest;
+      Digest.Manual.digest d file_digest
+    ;;
+
+    let[@inline always] file_selector d file_selector_digest facts_digest =
+      Digest.Manual.int d 2;
+      Digest.Manual.digest d file_selector_digest;
+      Digest.Manual.digest d facts_digest
+    ;;
+
+    let[@inline always] alias d digest =
+      Digest.Manual.int d 3;
+      Digest.Manual.digest d digest
+    ;;
   end
 
   let compare a b =
-    let open Ordering.O in
     match a, b with
     | Nothing, Nothing -> Eq
     | Nothing, _ -> Lt
     | _, Nothing -> Gt
     | File (f1, d1), File (f2, d2) ->
-      let= () = Path.compare f1 f2 in
-      Digest.compare d1 d2
+      (match Path.compare f1 f2 with
+       | Eq -> Digest.compare d1 d2
+       | (Lt | Gt) as ordering -> ordering)
     | File _, _ -> Lt
     | _, File _ -> Gt
     | ( File_selector { file_selector_digest = d1; facts = f1 }
       , File_selector { file_selector_digest = d2; facts = f2 } ) ->
-      let= () = Digest.compare d1 d2 in
-      Files.compare f1 f2
+      (match Digest.compare d1 d2 with
+       | Eq -> Files.compare f1 f2
+       | (Lt | Gt) as ordering -> ordering)
     | File_selector _, _ -> Lt
     | _, File_selector _ -> Gt
     | Alias f1, Alias f2 -> Files.compare f1 f2
@@ -235,11 +290,7 @@ module Fact = struct
   let file fn digest = File (fn, digest)
 
   let file_selector fs facts =
-    (* CR-someday amokhov: We used to call [File_selector.to_dyn] here that raises under
-       the same conditions that [File_selector.digest_exn] is raising, namely, when
-       the underlying glob is not serialisable. We should make all globs serialisable
-       or use stronger types to statically rule out the possibility of raising here. *)
-    File_selector { file_selector_digest = File_selector.digest_exn fs; facts }
+    File_selector { file_selector_digest = File_selector.digest fs; facts }
   ;;
 
   let alias _alias files = Alias files
@@ -251,7 +302,6 @@ module Set = struct
 
   let of_files l = of_list_map l ~f:file
   let of_files_set = Path.Set.fold ~init:empty ~f:(fun f acc -> add acc (file f))
-  let add_paths t paths = Path.Set.fold paths ~init:t ~f:(fun p set -> add set (File p))
 
   (* This is to force the rules to be loaded for directories without files when
      depending on [(source_tree x)]. Otherwise, we wouldn't clean up stale
@@ -266,25 +316,27 @@ module Set = struct
       add acc (dir_without_files_dep path))
   ;;
 
-  let digest t =
-    fold t ~init:[] ~f:(fun dep acc : Stable_for_digest.t list ->
+  let digest t digest =
+    iter t ~f:(fun dep ->
       match dep with
-      | Env var -> Env var :: acc
-      | Universe -> Universe :: acc
-      | File p -> File (Path.to_string p |> Digest.string) :: acc
+      | Env var ->
+        Stable_for_digest.digest digest (Stable_for_digest.Env (Env.Var.to_string var))
+      | Universe -> Stable_for_digest.digest digest Stable_for_digest.Universe
+      | File p ->
+        Stable_for_digest.digest
+          digest
+          (Stable_for_digest.File (Path.to_string p |> Digest.string))
       | File_selector fs ->
-        (* CR-someday amokhov: We used to call [File_selector.to_dyn] here that raises under
-           the same conditions that [File_selector.digest_exn] is raising, namely, when
-           the underlying glob is not serialisable. We should make all globs serialisable
-           or use stronger types to statically rule out the possibility of raising here. *)
-        File_selector (File_selector.digest_exn fs) :: acc
+        Stable_for_digest.digest
+          digest
+          (Stable_for_digest.File_selector (File_selector.digest fs))
       | Alias a ->
-        Alias
-          { dir = Path.Build.to_string (Alias.dir a)
-          ; name = Alias.Name.to_string (Alias.name a)
-          }
-        :: acc)
-    |> Digest.generic
+        Stable_for_digest.digest
+          digest
+          (Stable_for_digest.Alias
+             { dir = Path.Build.to_string (Alias.dir a)
+             ; name = Alias.Name.to_string (Alias.name a)
+             }))
   ;;
 end
 
@@ -298,7 +350,8 @@ module Facts = struct
 
   let union a b =
     Map.union a b ~f:(fun _ a b ->
-      assert (a = b);
+      (* Conflicting facts for the same dependency are invalid. *)
+      assert (Fact.equal a b);
       Some a)
   ;;
 
@@ -342,22 +395,19 @@ module Facts = struct
         Path.Build.Set.union_all [ acc; Fact.Files.necessary_dirs_for_sandboxing facts ])
   ;;
 
-  let digest t ~env =
-    let facts =
-      Map.foldi t ~init:[] ~f:(fun dep fact acc : Fact.Stable_for_digest.t list ->
-        match dep with
-        | Env var -> Env (var, Env.get env var) :: acc
-        | Universe -> acc
-        | File _ | File_selector _ | Alias _ ->
-          (match (fact : Fact.t) with
-           | Nothing -> acc
-           | File (p, d) ->
-             File { path_digest = Digest.string (Path.to_string p); file_digest = d }
-             :: acc
-           | File_selector { file_selector_digest; facts } ->
-             File_selector { file_selector_digest; facts_digest = facts.digest } :: acc
-           | Alias ps -> Alias ps.digest :: acc))
-    in
-    Digest.generic facts
+  let digest t digest ~env =
+    Map.iteri t ~f:(fun dep fact ->
+      match dep with
+      | Env var ->
+        Fact.Stable_for_digest.env digest (Env.Var.to_string var) (Env.get env var)
+      | Universe -> ()
+      | File _ | File_selector _ | Alias _ ->
+        (match (fact : Fact.t) with
+         | Nothing -> ()
+         | File (p, d) ->
+           Fact.Stable_for_digest.file digest (Digest.string (Path.to_string p)) d
+         | File_selector { file_selector_digest; facts } ->
+           Fact.Stable_for_digest.file_selector digest file_selector_digest facts.digest
+         | Alias ps -> Fact.Stable_for_digest.alias digest ps.digest))
   ;;
 end

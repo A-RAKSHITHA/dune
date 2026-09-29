@@ -39,20 +39,25 @@ Cram
       will apply the options to all tests in all subdirectories (recursively).
       This is useful to apply common options to an entire test suite.
 
-      The following will apply the stanza to all tests in this directory,
-      except for ``foo.t`` and ``bar.t``:
+      Starting with Dune 3.25, test names include the ``.t`` suffix. In earlier
+      versions, the suffix is omitted. The following will apply the stanza to
+      all tests in this directory except for ``foo.t`` and ``bar.t``:
 
       .. code:: dune
 
          (cram
-          (applies_to * \ foo bar)
+          (applies_to * \ foo.t bar.t)
           (deps ../foo.exe))
 
       .. seealso:: :doc:`/reference/predicate-language`
 
    .. describe:: (enabled_if <blang>)
 
-      Control whether the tests are enabled.
+      Control whether the tests are included in the ``runtest`` alias and other
+      aliases specified by the ``alias`` field. When ``enabled_if`` evaluates to
+      ``false``, the test is excluded from these aliases but can still be run
+      explicitly via its own alias (e.g., ``dune build @foo.t`` for ``foo.t``
+      starting with Dune 3.25).
 
       .. seealso:: :doc:`/reference/boolean-language`, :doc:`/concepts/variables`
 
@@ -60,8 +65,9 @@ Cram
 
       Alias that can be used to run the test. In addition to the user alias,
       every test ``foo.t`` is attached to the :doc:`/reference/aliases/runtest`
-      alias and gets its own ``@foo`` alias to make it convenient to run
-      individually.
+      alias and gets its own alias to make it convenient to run individually.
+      Starting with Dune 3.25, this alias is ``@foo.t``; in earlier versions it
+      is ``@foo``.
 
    .. describe:: (locks <lock-names>)
 
@@ -80,3 +86,59 @@ Cram
       When set to ``false``, do not add the tests to the ``runtest`` alias.
       The default is to add every Cram test to ``runtest``, but this is not
       always desired.
+
+   .. describe:: (timeout <float>)
+
+      .. versionadded:: 3.20
+
+      Specify a time limit (in seconds) for each individual Cram test.
+
+      If a test takes longer than the specified timeout, Dune will terminate it
+      and report a timeout error. This can be useful to catch tests that hang
+      or take unexpectedly long.
+
+      The timeout is a floating-point number (e.g., `1.5` for 1.5 seconds).
+      Zero or negative values cause immediate failure when running the cram
+      test.
+
+      If multiple ``cram`` stanzas apply to the same test, the **lowest** of
+      all specified timeouts is used.
+
+      This field is typically used to guard against unresponsive or
+      non-terminating test cases.
+
+      Example:
+
+      .. code:: dune
+
+         (cram
+          (timeout 2.5))
+
+      This limits each selected test to at most 2.5 seconds of execution time.
+
+   .. describe:: (conflict_markers <ignore|error>)
+
+      .. versionadded:: 3.21
+
+      Determines how conflict markers inserted by version control systems are
+      inserted. The default behavior is to ``ignore`` them. Setting ``error``
+      will make the test runner reject such conflicts and refuse to run the
+      test.
+
+   .. describe:: (setup_scripts <files-list>)
+
+      .. versionadded:: 3.21
+
+      Determines the list of shell files that will be sourced before the
+      execution of every cram test this stanza is applied to. A single script
+      will not be sourced more than once, no matter how many times it is listed
+      in this field. The order of evaluation for these scripts is deterministic
+      but is left undefined, so it is not recommended that these scripts have
+      side effects.
+
+   .. describe:: (shell <sh|bash>)
+
+      .. versionadded:: 3.22
+
+      Determines the shell executable to use to execute the cram script. By
+      default, cram scripts will execute with ``sh``.

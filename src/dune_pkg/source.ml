@@ -24,11 +24,11 @@ let equal
        other_checksum
 ;;
 
-let to_dyn { url = _loc, url; checksum } =
-  Dyn.record
-    [ "url", Dyn.string (OpamUrl.to_string url)
-    ; "checksum", Dyn.option (fun (_loc, checksum) -> Checksum.to_dyn checksum) checksum
-    ]
+let hash { url; checksum } =
+  Tuple.T2.hash
+    (Tuple.T2.hash Loc.hash OpamUrl.hash)
+    (Option.hash (Tuple.T2.hash Loc.hash Checksum.hash))
+    (url, checksum)
 ;;
 
 let fetch_archive_cached =
@@ -38,23 +38,30 @@ let fetch_archive_cached =
       Fetch.fetch_without_checksum ~unpack:false ~target ~url:(url_loc, url))
 ;;
 
+let archive_fetch_error url =
+  Option.value
+    ~default:
+      (User_message.make
+         [ Pp.textf "Failed to retrieve source archive from: %s" (OpamUrl.to_string url) ])
+;;
+
 let fetch_and_hash_archive_cached (url_loc, url) =
   let open Fiber.O in
   fetch_archive_cached (url_loc, url)
   >>| function
-  | Ok target -> Some (Dune_digest.file target |> Checksum.of_dune_digest)
+  | Ok target ->
+    Some
+      (match
+         Result.try_with (fun () ->
+           OpamHash.compute ~kind:`SHA256 (Path.to_string target))
+       with
+       | Ok checksum -> Checksum.of_opam_hash checksum
+       | Error exn ->
+         User_error.raise
+           ~loc:url_loc
+           [ Pp.textf "failed to fetch %s" (OpamUrl.to_string url); Exn.pp exn ])
   | Error message_opt ->
-    let message =
-      Option.value
-        ~default:
-          (User_message.make
-             [ Pp.textf
-                 "Failed to retrieve source archive from: %s"
-                 (OpamUrl.to_string url)
-             ])
-        message_opt
-    in
-    User_warning.emit_message message;
+    User_warning.emit_message (archive_fetch_error url message_opt);
     None
 ;;
 
@@ -145,6 +152,18 @@ let encode t =
   let open Encoder in
   named_record_fields Fields.fetch (encode_fetch_field t)
 ;;
+
+let repr =
+  let url_repr = Repr.view Repr.string ~to_:OpamUrl.to_string in
+  Repr.record
+    "source"
+    [ Repr.field "url" url_repr ~get:(fun t -> snd t.url)
+    ; Repr.field "checksum" (Repr.option Checksum.repr) ~get:(fun t ->
+        Option.map t.checksum ~f:snd)
+    ]
+;;
+
+let to_dyn = Repr.to_dyn repr
 
 let kind t =
   let _, url = t.url in

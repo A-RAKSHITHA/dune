@@ -1,8 +1,6 @@
 A user may set the build command using the opam template feature. This build
 command is currently not respected when the package is pinned.
 
-  $ . ../helpers.sh
-
   $ mkrepo
   $ add_mock_repo_if_needed
 
@@ -29,13 +27,15 @@ command is currently not respected when the package is pinned.
   > build: [ "echo" "run" "this" ]
   > EOF
 
-  $ dune pkg lock
+  $ dune_pkg_lock_normalized
   Solution for dune.lock:
   - opam-template.dev
   $ build_pkg opam-template
 
-  $ cat dune.lock/opam-template.pkg | sed "/source/,//d"
+  $ dune_cmd delete-between 'source' '^$' < "${default_lock_dir}/opam-template.dev.pkg"
   (version dev)
   
-  (dune)
+  (build
+   (all_platforms ((dune))))
   
+  (dev)

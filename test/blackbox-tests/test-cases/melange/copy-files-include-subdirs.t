@@ -5,10 +5,7 @@ Example using melange.emit, copy_files and include_subdirs
   > hello from file
   > EOF
 
-  $ cat > dune-project <<EOF
-  > (lang dune 3.8)
-  > (using melange 0.1)
-  > EOF
+  $ make_melange_project 3.8 0.1
 
   $ mkdir src
 
@@ -16,7 +13,6 @@ Example using melange.emit, copy_files and include_subdirs
   > (melange.emit
   >  (target app)
   >  (emit_stdlib false)
-  >  (libraries melange.node)
   >  (preprocess (pps melange.ppx))
   >  (alias mel))
   > 
@@ -30,9 +26,11 @@ Example using melange.emit, copy_files and include_subdirs
   > EOF
 
   $ cat > src/main.ml <<EOF
+  > external readFileSync : string -> encoding:string -> string = "readFileSync"
+  > [@@mel.module "fs"]
   > let dirname = [%mel.raw "__dirname"]
   > let file_path = "../file.txt"
-  > let file_content = Node.Fs.readFileSync (dirname ^ "/" ^ file_path) \`utf8
+  > let file_content = readFileSync (dirname ^ "/" ^ file_path) ~encoding:"utf8"
   > let () = Js.log file_content
   > EOF
 

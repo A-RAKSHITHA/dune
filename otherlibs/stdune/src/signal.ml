@@ -33,35 +33,34 @@ type t =
 external sigwinch : unit -> int = "stdune_winch_number" [@@noalloc]
 
 let all =
-  let open Sys in
-  [ Abrt, sigabrt
-  ; Alrm, sigalrm
-  ; Fpe, sigfpe
-  ; Hup, sighup
-  ; Ill, sigill
-  ; Int, sigint
-  ; Kill, sigkill
-  ; Pipe, sigpipe
-  ; Quit, sigquit
-  ; Segv, sigsegv
-  ; Term, sigterm
-  ; Usr1, sigusr1
-  ; Usr2, sigusr2
-  ; Chld, sigchld
-  ; Cont, sigcont
-  ; Stop, sigstop
-  ; Tstp, sigtstp
-  ; Ttin, sigttin
-  ; Ttou, sigttou
-  ; Vtalrm, sigvtalrm
-  ; Prof, sigprof
-  ; Bus, sigbus
-  ; Poll, sigpoll
-  ; Sys, sigsys
-  ; Trap, sigtrap
-  ; Urg, sigurg
-  ; Xcpu, sigxcpu
-  ; Xfsz, sigxfsz
+  [ Abrt, Sys.sigabrt
+  ; Alrm, Sys.sigalrm
+  ; Fpe, Sys.sigfpe
+  ; Hup, Sys.sighup
+  ; Ill, Sys.sigill
+  ; Int, Sys.sigint
+  ; Kill, Sys.sigkill
+  ; Pipe, Sys.sigpipe
+  ; Quit, Sys.sigquit
+  ; Segv, Sys.sigsegv
+  ; Term, Sys.sigterm
+  ; Usr1, Sys.sigusr1
+  ; Usr2, Sys.sigusr2
+  ; Chld, Sys.sigchld
+  ; Cont, Sys.sigcont
+  ; Stop, Sys.sigstop
+  ; Tstp, Sys.sigtstp
+  ; Ttin, Sys.sigttin
+  ; Ttou, Sys.sigttou
+  ; Vtalrm, Sys.sigvtalrm
+  ; Prof, Sys.sigprof
+  ; Bus, Sys.sigbus
+  ; Poll, Sys.sigpoll
+  ; Sys, Sys.sigsys
+  ; Trap, Sys.sigtrap
+  ; Urg, Sys.sigurg
+  ; Xcpu, Sys.sigxcpu
+  ; Xfsz, Sys.sigxfsz
   ; Winch, sigwinch ()
   ]
 ;;
@@ -100,6 +99,7 @@ let name = function
 ;;
 
 let compare (x : t) (y : t) = Poly.compare x y
+let equal (x : t) (y : t) = Poly.equal x y
 
 let to_dyn =
   let open Dyn in
@@ -122,9 +122,10 @@ let to_int =
   | t -> Map.find_exn table t
 ;;
 
-let of_int i =
+let of_int =
   let table = Int.Map.of_list_exn (List.map all ~f:(fun (t, i) -> i, t)) in
-  match Int.Map.find table i with
-  | None -> Unknown i
-  | Some s -> s
+  fun i ->
+    match Int.Map.find table i with
+    | None -> Unknown i
+    | Some s -> s
 ;;

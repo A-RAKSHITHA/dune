@@ -1,0 +1,213 @@
+open Stdune
+open Fiber.O
+open Git_test_utils
+module Rev_store = Dune_pkg.Rev_store
+module Console = Console
+
+let () =
+  let cache_dir = lazy (Temp.create Dir ~prefix:"isolated-cache-" ~suffix:"") in
+  let env =
+    let env =
+      Env.update Env.initial ~var:Env.Var._XDG_CACHE_HOME ~f:(fun _ ->
+        Some (Path.to_string (Lazy.force cache_dir)))
+    in
+    fun var -> Env.get env (Env.Var.of_string var)
+  in
+  Dune_util.override_xdg (Xdg.create ~env ());
+  Config.init String.Map.empty;
+  Dune_tests_common.init ()
+;;
+
+let with_git_daemon ~parent_dir ~port ~repo_dir ~unrelated_repo_dir ~f =
+  let git_prog = Lazy.force Dune_vcs.Vcs.git in
+  let git_prog_str = Path.to_string git_prog in
+  let daemon_pid =
+    Spawn.spawn
+      ~prog:git_prog_str
+      ~argv0:git_prog_str
+      ~args:
+        (Array.Immutable.of_list
+           [ "daemon"
+           ; "--export-all"
+           ; sprintf "--base-path=%s" (Path.to_string parent_dir)
+           ; "--listen=127.0.0.1"
+           ; sprintf "--port=%d" port
+           ; "--reuseaddr"
+           ; Path.to_string repo_dir
+           ; Path.to_string unrelated_repo_dir
+           ])
+      ~stdin:(Lazy.force Dev_null.in_)
+      ~stdout:(Lazy.force Dev_null.out)
+      ~stderr:(Lazy.force Dev_null.out)
+      ()
+  in
+  let stop_daemon () =
+    (* The scheduler's process watcher can reap an unregistered child that exits
+       before cleanup runs. Don't turn that into a second failure. *)
+    match Unix.kill (Pid.to_int daemon_pid) Sys.sigterm with
+    | exception Unix.Unix_error (ESRCH, _, _) -> Fiber.return ()
+    | () ->
+      Dune_scheduler.Scheduler.wait_for_process
+        ~timeout:(Time.Span.of_secs 1.0)
+        ~is_process_group_leader:false
+        daemon_pid
+      >>| fun _ -> ()
+  in
+  Fiber.finalize ~finally:stop_daemon (fun () -> f ~git_prog)
+;;
+
+let%expect_test "second fetch uses refs for efficient negotiation (fix #13323)" =
+  (* This test verifies that when fetching a second commit from the same repo,
+     git can negotiate what it already has using refs created by previous
+     fetches. This avoids re-downloading objects we already have.
+
+     We also verify that refs from unrelated remotes are not used for
+     negotiation - each remote's refs are namespaced by escaped URL and we use
+     --negotiation-tip to restrict to only the relevant namespace. *)
+  let repo_dir = Temp.create Dir ~prefix:"git-repo-" ~suffix:"" in
+  let unrelated_repo_dir = Temp.create Dir ~prefix:"git-unrelated-" ~suffix:"" in
+  let trace_file = Temp.create File ~prefix:"git-trace-" ~suffix:".log" in
+  let env =
+    Env.add
+      Env.initial
+      ~var:(Env.Var.of_string "GIT_TRACE_PACKET")
+      ~value:(Path.to_string trace_file)
+    |> Env.add ~var:(Env.Var.of_string "GIT_PROTOCOL") ~value:"version=2"
+  in
+  (Dune_scheduler.Scheduler.Run.go
+     { concurrency = 2; print_ctrl_c_warning = false; watch_exclusions = [] }
+   @@ fun () ->
+   let* rev_store = Rev_store.get in
+   let git = git ~dir:repo_dir in
+   (* Create a repository with initial commits *)
+   let* () = git_init_and_config_user repo_dir in
+   (* Allow fetching commits by SHA1 directly. By default git servers only
+      allow fetching objects reachable from advertised refs. GitHub/GitLab
+      enable this by default; we must enable it explicitly for git daemon. *)
+   let* () = git [ "config"; "uploadpack.allowAnySHA1InWant"; "true" ] in
+   let* () =
+     Fiber.sequential_iter [ 1; 2; 3 ] ~f:(fun i ->
+       let file = sprintf "file%d" i in
+       Io.write_lines (Path.relative repo_dir file) [ sprintf "content %d" i ];
+       git [ "add"; file ] >>> git [ "commit"; "-m"; sprintf "commit %d" i ])
+   in
+   (* Set up an unrelated repository *)
+   let unrelated_git = Git_test_utils.git ~dir:unrelated_repo_dir in
+   let* () =
+     git_init_and_config_user unrelated_repo_dir
+     >>> unrelated_git [ "config"; "uploadpack.allowAnySHA1InWant"; "true" ]
+     >>> (Io.write_lines (Path.relative unrelated_repo_dir "file") [ "content" ];
+          unrelated_git [ "add"; "file" ])
+     >>> unrelated_git [ "commit"; "-m"; "commit" ]
+   in
+   let port =
+     (* Find an available port by binding to port 0 *)
+     let sock = Unix.socket PF_INET SOCK_STREAM 0 in
+     Unix.setsockopt sock SO_REUSEADDR true;
+     Unix.bind sock (ADDR_INET (Unix.inet_addr_loopback, 0));
+     let port =
+       match Unix.getsockname sock with
+       | Unix.ADDR_INET (_, port) -> port
+       | _ -> assert false
+     in
+     Unix.close sock;
+     port
+   in
+   let url =
+     sprintf "git://127.0.0.1:%d/%s" port (Path.basename repo_dir |> Filename.to_string)
+   in
+   let unrelated_url =
+     sprintf
+       "git://127.0.0.1:%d/%s"
+       port
+       (Path.basename unrelated_repo_dir |> Filename.to_string)
+   in
+   let parent_dir = Path.parent_exn repo_dir in
+   with_git_daemon ~parent_dir ~port ~repo_dir ~unrelated_repo_dir ~f:(fun ~git_prog ->
+     (* Wait for daemon to be ready *)
+     let* () =
+       (* Wait for the git daemon to be ready by polling with ls-remote *)
+       let wait_for_daemon ~url ~max_attempts =
+         let rec loop remaining =
+           if remaining <= 0
+           then Fiber.return (Error "git-daemon failed to start")
+           else
+             let* result =
+               Dune_engine.Process.run_capture_lines
+                 ~dir:parent_dir
+                 ~display
+                 ~stderr_to:(make_stderr ())
+                 Dune_engine.Process.Failure_mode.Return
+                 git_prog
+                 [ "ls-remote"; url ]
+             in
+             match result with
+             | _, 0 -> Fiber.return (Ok ())
+             | _, _ ->
+               let* () = Dune_scheduler.Scheduler.sleep (Time.Span.of_secs 0.1) in
+               loop (remaining - 1)
+         in
+         loop max_attempts
+       in
+       wait_for_daemon ~url ~max_attempts:20
+       >>| function
+       | Ok () -> ()
+       | Error msg -> Code_error.raise msg []
+     in
+     let remote = Rev_store.remote rev_store ~loc:Loc.none ~url in
+     (* Get the first HEAD commit *)
+     let* first_head = git_out ~dir:repo_dir [ "rev-parse"; "HEAD" ] in
+     (* First fetch - this populates the cache *)
+     let* () =
+       Rev_store.Object.of_sha1 first_head
+       |> Option.value_exn
+       |> Rev_store.fetch_object rev_store remote
+       >>| function
+       | Ok _ -> ()
+       | Error lines ->
+         Code_error.raise "first fetch failed" [ "output", Dyn.list Dyn.string lines ]
+     in
+     (* Fetch from unrelated remote - this adds another tip to the rev store *)
+     let unrelated_remote = Rev_store.remote rev_store ~loc:Loc.none ~url:unrelated_url in
+     let* unrelated_head = git_out ~dir:unrelated_repo_dir [ "rev-parse"; "HEAD" ] in
+     let* () =
+       Rev_store.Object.of_sha1 unrelated_head
+       |> Option.value_exn
+       |> Rev_store.fetch_object rev_store unrelated_remote
+       >>| function
+       | Ok _ -> ()
+       | Error lines ->
+         Code_error.raise "unrelated fetch failed" [ "output", Dyn.list Dyn.string lines ]
+     in
+     (* Add more commits to the repo *)
+     let* () =
+       Fiber.sequential_iter [ 4; 5 ] ~f:(fun i ->
+         let file = sprintf "file%d" i in
+         Io.write_lines (Path.relative repo_dir file) [ sprintf "content %d" i ];
+         git [ "add"; file ] >>> git [ "commit"; "-m"; sprintf "commit %d" i ])
+     in
+     (* Get the new HEAD commit *)
+     let* second_head = git_out ~dir:repo_dir [ "rev-parse"; "HEAD" ] in
+     (* Second fetch with tracing - negotiation uses refs from all previous
+           fetches, including the unrelated remote *)
+     let* () =
+       Rev_store.Object.of_sha1 second_head
+       |> Option.value_exn
+       |> Rev_store.fetch_object ~env rev_store remote
+       >>| function
+       | Ok _ -> ()
+       | Error lines ->
+         Code_error.raise "second fetch failed" [ "output", Dyn.list Dyn.string lines ]
+     in
+     let have_count =
+       Io.lines_of_file trace_file
+       |> List.filter ~f:(Re.execp (Re.compile (Re.str "> have")))
+       |> List.length
+     in
+     Console.print [ Pp.textf "Negotiation 'have' lines sent: %d" have_count ];
+     Fiber.return ()));
+  (* With refs created by previous fetches, git can tell the server what it
+     already has, avoiding redundant downloads. The count does not include
+     refs from the unrelated remote due to URL-based namespacing. *)
+  [%expect {| Negotiation 'have' lines sent: 3 |}]
+;;

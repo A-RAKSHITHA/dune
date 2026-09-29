@@ -2,6 +2,8 @@
 #include <caml/memory.h>
 #include <caml/mlvalues.h>
 
+#include <errno.h>
+
 #if defined(__APPLE__)
 #define _DARWIN_C_SOURCE
 
@@ -10,7 +12,6 @@
 #include <caml/unixsupport.h>
 
 #include <copyfile.h>
-#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/syslimits.h>
@@ -22,8 +23,14 @@ CAMLprim value stdune_copyfile(value v_from, value v_to) {
   char from[PATH_MAX];
   char to[PATH_MAX];
   char real_from[PATH_MAX];
-  int from_len = caml_string_length(v_from);
-  int to_len = caml_string_length(v_to);
+  mlsize_t from_len = caml_string_length(v_from);
+  mlsize_t to_len = caml_string_length(v_to);
+  if (from_len >= sizeof(from)) {
+    unix_error(ENAMETOOLONG, "copyfile", v_from);
+  }
+  if (to_len >= sizeof(to)) {
+    unix_error(ENAMETOOLONG, "copyfile", v_to);
+  }
   memcpy(from, String_val(v_from), from_len);
   memcpy(to, String_val(v_to), to_len);
   from[from_len] = '\0';
@@ -63,8 +70,11 @@ CAMLprim value stdune_sendfile(value v_in, value v_out, value v_size) {
 #include <caml/unixsupport.h>
 
 #include <sys/sendfile.h>
-#include <unistd.h>
+#include <sys/utsname.h>
+#include <dlfcn.h>
+#include <stdio.h>
 
+#define KERNEL_VERSION(a, b, c) (((a) << 16) + ((b) << 8) + (c))
 #define FD_val(value) Int_val(value)
 
 CAMLprim value stdune_copyfile(value v_from, value v_to) {
@@ -73,24 +83,70 @@ CAMLprim value stdune_copyfile(value v_from, value v_to) {
   caml_failwith("copyfile: only on macos");
 }
 
-static int dune_sendfile(int in, int out, size_t length) {
+static ssize_t dune_sendfile(int in, int out, size_t length) {
   ssize_t ret;
   while (length > 0) {
     ret = sendfile(out, in, NULL, length);
     if (ret < 0) {
       return ret;
     }
+    if (ret == 0) {
+      errno = EIO;
+      return -1;
+    }
     length = length - ret;
   }
   return length;
 }
 
+/* The second and fourth arguments are type-incorrect, but as they are unused,
+   this is OK */
+typedef ssize_t (*copy_file_range_t)(int, void *, int, void *, size_t, unsigned int);
+
+static copy_file_range_t copy_file_range_fn = NULL;
+
+static ssize_t dune_copy_file_range(int in, int out, size_t length) {
+  ssize_t ret;
+  while (length > 0) {
+    ret = copy_file_range_fn(in, NULL, out, NULL, length, 0);
+    if (ret < 0) {
+      return dune_sendfile(in, out, length);
+    }
+    if (ret == 0) {
+      errno = EIO;
+      return -1;
+    }
+    length = length - ret;
+  }
+  return length;
+}
+
+static int kernel_version(void) {
+  struct utsname uts;
+  int major, minor, patch;
+
+  if (uname(&uts) < 0)
+    return -1;
+
+  if (sscanf(uts.release, "%d.%d.%d", &major, &minor, &patch) != 3)
+    return -1;
+
+  return KERNEL_VERSION(major, minor, patch);
+}
+
 CAMLprim value stdune_sendfile(value v_in, value v_out, value v_size) {
+  static ssize_t (*dune_copyfile)(int, int, size_t) = NULL;
+  if (dune_copyfile == NULL) {
+    if (kernel_version() < KERNEL_VERSION(5, 19, 0) ||
+        (copy_file_range_fn = (copy_file_range_t)dlsym(NULL, "copy_file_range")) == NULL) {
+      dune_copyfile = &dune_sendfile;
+    } else {
+      dune_copyfile = &dune_copy_file_range;
+    }
+  }
   CAMLparam3(v_in, v_out, v_size);
   caml_release_runtime_system();
-  /* TODO Use copy_file_range once we have a good mechanism to test for its
-   * existence */
-  int ret = dune_sendfile(FD_val(v_in), FD_val(v_out), Long_val(v_size));
+  ssize_t ret = dune_copyfile(FD_val(v_in), FD_val(v_out), Long_val(v_size));
   caml_acquire_runtime_system();
   if (ret < 0) {
     uerror("sendfile", Nothing);

@@ -1,25 +1,21 @@
 Demonstrate our support for pin-depends.
 
-  $ . ./helpers.sh
-
   $ add_mock_repo_if_needed
-  $ cat >dune-project <<EOF
-  > (lang dune 3.13)
-  > EOF
+  $ make_dune_project 3.13
   $ mkrepo
   $ mkpkg bar 0.0.1
 
   $ runtest() {
-  > cat >foo.opam <<EOF
-  > opam-version: "2.0"
-  > depends: [ "bar" ]
-  > pin-depends: [ "bar.1.0.0" "$1" ]
+  >   cat > foo.opam <<EOF
+  >   opam-version: "2.0"
+  >   depends: [ "bar" ]
+  >   pin-depends: [ "bar.1.0.0" "$1" ]
   > EOF
-  > dune pkg lock && {
-  >   local pkg="dune.lock/bar.pkg";
-  >   grep version $pkg;
-  >   grep dev $pkg;
-  >   print_source "bar";
+  >   dune_pkg_lock_normalized && {
+  >     local pkg="${default_lock_dir}/bar.1.0.0.pkg"
+  >     grep version $pkg
+  >     grep dev $pkg
+  >     print_source "bar.1.0.0"
   >   } 
   > }
 
@@ -37,7 +33,7 @@ Local pinned source.
   - bar.1.0.0
   (version 1.0.0)
   (dev)
-  (source (fetch (url file://PWD/_bar_file))) (dev) 
+  (source (fetch (url file://PWD/_bar_file)))
 
 "opam" directory at the root
 
@@ -51,7 +47,7 @@ Local pinned source.
   - bar.1.0.0
   (version 1.0.0)
   (dev)
-  (source (fetch (url file://PWD/_bar_file_opam_dir))) (dev) 
+  (source (fetch (url file://PWD/_bar_file_opam_dir)))
 
 "bar.opam" file at the root
 
@@ -65,7 +61,7 @@ Local pinned source.
   - bar.1.0.0
   (version 1.0.0)
   (dev)
-  (source (fetch (url file://PWD/_bar_named_opam_root))) (dev) 
+  (source (fetch (url file://PWD/_bar_named_opam_root)))
 
 "bar.opam" file at opam/
 
@@ -79,7 +75,7 @@ Local pinned source.
   - bar.1.0.0
   (version 1.0.0)
   (dev)
-  (source (fetch (url file://PWD/_bar_named_opam_subdir))) (dev) 
+  (source (fetch (url file://PWD/_bar_named_opam_subdir)))
 
 Git pinned source:
 
@@ -92,13 +88,14 @@ Git pinned source:
   > EOF
   $ git add -A
   $ git commit --quiet -m "Initial commit"
+  $ expected_commit=$(git rev-parse HEAD)
   $ cd ..
-  $ runtest "git+file://$PWD/$dir"
+  $ runtest "git+file://$PWD/$dir" | dune_cmd subst $expected_commit '$EXPECTED_COMMIT'
   Solution for dune.lock:
   - bar.1.0.0
   (version 1.0.0)
   (dev)
-  (source (fetch (url git+file://PWD/_bar_git))) (dev) 
+  (source (fetch (url git+file://PWD/_bar_git#$EXPECTED_COMMIT)))
 
 Git pinned source with toplevel opam file:
 
@@ -111,13 +108,14 @@ Git pinned source with toplevel opam file:
   > EOF
   $ git add -A
   $ git commit --quiet -m "Initial commit"
+  $ expected_commit=$(git rev-parse HEAD)
   $ cd ..
-  $ runtest "git+file://$PWD/$dir"
+  $ runtest "git+file://$PWD/$dir" | dune_cmd subst $expected_commit '$EXPECTED_COMMIT'
   Solution for dune.lock:
   - bar.1.0.0
   (version 1.0.0)
   (dev)
-  (source (fetch (url git+file://PWD/_bar_opam_git))) (dev) 
+  (source (fetch (url git+file://PWD/_bar_opam_git#$EXPECTED_COMMIT)))
 
 Git pinned source with toplevel opam dir 1
 
@@ -131,13 +129,14 @@ Git pinned source with toplevel opam dir 1
   > EOF
   $ git add -A
   $ git commit --quiet -m "Initial commit"
+  $ expected_commit=$(git rev-parse HEAD)
   $ cd ..
-  $ runtest "git+file://$PWD/$dir"
+  $ runtest "git+file://$PWD/$dir" | dune_cmd subst $expected_commit '$EXPECTED_COMMIT'
   Solution for dune.lock:
   - bar.1.0.0
   (version 1.0.0)
   (dev)
-  (source (fetch (url git+file://PWD/_bar_opam_dir_git1))) (dev) 
+  (source (fetch (url git+file://PWD/_bar_opam_dir_git1#$EXPECTED_COMMIT)))
 
 Git pinned source with toplevel opam dir 2
 
@@ -182,13 +181,11 @@ Pin to an HTTP archive work
   > opam-version: "2.0"
   > EOF
   $ tar cf tarball.tar -C _source bar.opam
-  $ MD5_CHECKSUM=$(md5sum tarball.tar  | cut -f1 -d' ')
+  $ SHA256_CHECKSUM=$(sha256sum tarball.tar  | cut -f1 -d' ')
   $ echo tarball.tar > fake-curls
   $ PORT=1
   $ runtest "http://0.0.0.0:$PORT/tarball.tar" > output
-  Solution for dune.lock:
-  - bar.1.0.0
-  $ grep "md5=$MD5_CHECKSUM" output 2>&1 > /dev/null && echo "Checksum matches"
+  $ grep "sha256=$SHA256_CHECKSUM" output 2>&1 > /dev/null && echo "Checksum matches"
   Checksum matches
 
 Pin to an HTTP archive detects wrong hash
@@ -198,24 +195,23 @@ Pin to an HTTP archive detects wrong hash
   >  (name foo)
   >  (libraries bar))
   > EOF
-  $ sed -i.tmp "s/$MD5_CHECKSUM/92449184682b45b5f07e811fdd61d35f/g" dune.lock/bar.pkg
+  $ dune_cmd subst "$SHA256_CHECKSUM" '92449184682b45b5f07e811fdd61d35f92449184682b45b5f07e811fdd61d35f' ${default_lock_dir}/bar.1.0.0.pkg
   $ rm -rf already-served
-  $ dune build 2>&1 | grep -v "md5"
-  File "dune.lock/bar.pkg", line 6, characters 12-48:
-                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  $ dune build 2>&1 | grep -v "sha256"
+  File "dune.lock/bar.1.0.0.pkg", line 7, characters 3-74:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   Error: Invalid checksum, got
+  [1]
 
-Pin to an HTTP archive needs `dune pkg lock` to download and compute the hash
+Pin to an HTTP archive needs `dune_pkg_lock_normalized` to download and compute the hash
 of the target again
 
   $ rm tarball.tar already-served
   $ echo "update checksum" > _source/random_file
   $ tar cf tarball.tar -C _source bar.opam random_file
-  $ MD5_CHECKSUM=$(md5sum tarball.tar  | cut -f1 -d' ')
+  $ SHA256_CHECKSUM=$(sha256sum tarball.tar  | cut -f1 -d' ')
   $ echo tarball.tar > fake-curls
   $ runtest "http://0.0.0.0:$PORT/tarball.tar" > output
-  Solution for dune.lock:
-  - bar.1.0.0
-  $ grep "md5=$MD5_CHECKSUM" output 2>&1 > /dev/null && echo "Checksum matches"
+  $ grep "sha256=$SHA256_CHECKSUM" output 2>&1 > /dev/null && echo "Checksum matches"
   Checksum matches
 

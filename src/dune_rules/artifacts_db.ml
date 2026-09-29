@@ -9,26 +9,22 @@ let available_exes ~dir (exes : Executables.t) =
       Dune_project.dune_version project
     in
     let libs = Scope.libs scope in
-    let+ pps =
-      (* Instead of making the binary unavailable, this will just
-         fail when loading artifacts. This is clearly bad but
-         "optional" executables shouldn't be used. *)
-      Preprocess.Per_module.with_instrumentation
-        exes.buildable.preprocess
-        ~instrumentation_backend:(Lib.DB.instrumentation_backend libs)
-      |> Resolve.Memo.read_memo
-      >>| Preprocess.Per_module.pps
-    in
+    (* Instead of making the binary unavailable, this will just fail when
+       loading artifacts. This is clearly bad but "optional" executables
+       shouldn't be used. *)
+    let+ pps = Lib.DB.pps_for_preprocessing libs exes.buildable.preprocess.config in
     Lib.DB.resolve_user_written_deps
       libs
-      (`Exe exes.names)
+      (Executables.exe_target exes)
       exes.buildable.libraries
+      ~allow_unused_libraries:exes.buildable.allow_unused_libraries
       ~pps
       ~dune_version
       ~forbidden_libraries:exes.forbidden_libraries
       ~allow_overlaps:exes.buildable.allow_overlapping_dependencies
   in
-  let+ available = Lib.Compile.direct_requires compile_info in
+  (* CR-someday rgrinberg: what if a preprocessor is unavailable? *)
+  let+ available = Lib.Compile.direct_requires compile_info ~for_:Ocaml in
   Resolve.is_ok available
 ;;
 
@@ -53,27 +49,27 @@ let get_installed_binaries ~(context : Context.t) stanzas =
       >>| fst
     in
     let eval_blang = Expander0.eval_blang expander in
-    let binaries_from_install ~enabled_if files =
+    let binaries_from_install ~enabled_if ~package files =
       let* unexpanded_file_bindings =
         Install_entry.File.to_file_bindings_unexpanded files ~expand:expand_value ~dir
       in
       Memo.List.map unexpanded_file_bindings ~f:(fun fb ->
         let+ p =
-          File_binding.Unexpanded.destination_relative_to_install_path
+          File_binding_expand.destination_relative_to_install_path
             fb
             ~section:Bin
             ~expand:expand_str
             ~expand_partial:expand_str_partial
         in
-        let dst = Path.Local.of_string (Install.Entry.Dst.to_string p) in
+        let dst = Install.Entry.Dst.local p in
         if Path.Local.is_root (Path.Local.parent_exn dst)
         then (
-          let origin = { Artifacts.binding = fb; dir; dst; enabled_if } in
+          let origin = { Artifacts.binding = fb; dir; dst; enabled_if; package } in
           Some (Path.Local.basename dst, origin))
         else None)
       >>| List.filter_opt
       >>| Filename.Map.of_list_reduce ~f:(fun _ y ->
-        (* CR-rgrinberg: we shouldn't allow duplicate bindings, but where's the
+        (* CR-someday rgrinberg: we shouldn't allow duplicate bindings, but where's the
            correct place for this validation? *)
         y)
       >>| Filename.Map.map ~f:Appendable_list.singleton
@@ -81,12 +77,13 @@ let get_installed_binaries ~(context : Context.t) stanzas =
     Dune_file.static_stanzas d
     |> Memo.List.map ~f:(fun stanza ->
       match Stanza.repr stanza with
-      | Install_conf.T { section = _loc, Section Bin; files; enabled_if; _ } ->
+      | Install_conf.T { section = _loc, Section Bin; files; enabled_if; package; _ } ->
         let enabled_if = eval_blang enabled_if in
-        binaries_from_install ~enabled_if files
+        let package = Some (Package.name package) in
+        binaries_from_install ~enabled_if ~package files
       | Executables.T
-          ({ install_conf = Some { section = _loc, Section Bin; files; _ }; _ } as exes)
-        ->
+          ({ install_conf = Some { section = _loc, Section Bin; files; package; _ }; _ }
+           as exes) ->
         let enabled_if =
           let enabled_if = eval_blang exes.enabled_if in
           match exes.optional with
@@ -97,7 +94,8 @@ let get_installed_binaries ~(context : Context.t) stanzas =
              | false -> Memo.return false
              | true -> available_exes ~dir exes)
         in
-        binaries_from_install ~enabled_if files
+        let package = Some (Package.name package) in
+        binaries_from_install ~enabled_if ~package files
       | _ -> Memo.return Filename.Map.empty)
     >>| Filename.Map.union_all ~f:merge)
   >>| Filename.Map.union_all ~f:merge

@@ -1,4 +1,5 @@
-(** Findlib database *)
+(** Findlib database. Returned library descriptions include their resolved
+    package ownership. *)
 
 open Import
 
@@ -31,6 +32,10 @@ val all_packages : t -> Dune_package.Entry.t list Memo.t
 val all_broken_packages : t -> (Package.Name.t * User_message.t) list Memo.t
 
 val create : Context_name.t -> t Memo.t
+
+(** Create a findlib database with a given list of paths corresponding to the
+    "path" field in the findlib.conf file. *)
+val create_with_paths : paths:Path.t list -> Context_name.t -> t Memo.t
 
 module For_tests : sig
   val create : paths:Path.t list -> lib_config:Lib_config.t -> t Memo.t

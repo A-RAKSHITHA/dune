@@ -1,4 +1,4 @@
-open! Import
+open Import
 
 module Module_system : sig
   type t =
@@ -9,27 +9,40 @@ module Module_system : sig
   val to_string : t -> string
 end
 
-module Cm_kind : sig
+module Cli : sig
   type t =
-    | Cmi
-    | Cmj
+    { package_name : string
+    ; package_output : string
+    ; module_name : string
+    ; module_type : string
+    ; stop_after_cmj : string
+    }
 
-  val source : t -> Ocaml.Ml_kind.t
-  val ext : t -> string
-  val to_dyn : t -> Dyn.t
+  val of_project : Dune_project.t -> t
+  val promotes_in_source : Dune_project.t -> bool
+end
 
-  module Map : sig
-    type 'a t =
-      { cmi : 'a
-      ; cmj : 'a
-      }
+module Cm_kind : module type of Dune_lang.Melange.Cm_kind
 
-    val make_all : 'a -> 'a t
-  end
+val output_path : target_dir:Path.Build.t -> Path.Build.t -> Path.Build.t
+
+module Emit : sig
+  type t =
+    { output_dir : Path.Build.t
+    ; stanza_dir : Path.Build.t
+    ; alias : Alias.Name.t
+    }
+end
+
+module Source : sig
+  val dir : string
 end
 
 module Install : sig
   val dir : string
-end
 
-val js_basename : Module.t -> Filename.t
+  val maybe_prepend_melange_install_dir
+    :  for_:Compilation_mode.t
+    -> Path.Local.t option
+    -> Path.Local.t option
+end

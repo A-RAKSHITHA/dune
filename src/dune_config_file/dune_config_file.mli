@@ -1,8 +1,16 @@
+open Import
+module Toggle := Stdune.Toggle
+
 module Dune_config : sig
   (** Dune configuration (visible to the user) *)
 
-  open Stdune
   module Display : module type of Display
+  module Loc := Stdune.Loc
+  module Config := Stdune.Config
+  module Terminal_persistence := Stdune.Terminal_persistence
+  module Path := Stdune.Path
+  module Sandbox_mode := Stdune.Sandbox_mode
+  module Action_output_on_success := Stdune.Action_types.Action_output_on_success
 
   module Project_defaults : sig
     type t =
@@ -20,12 +28,13 @@ module Dune_config : sig
       | Fixed of int
       | Auto
 
+    val equal : t -> t -> bool
     val of_string : string -> (t, string) result
     val to_string : t -> string
   end
 
   module Sandboxing_preference : sig
-    type t = Dune_engine.Sandbox_mode.t list
+    type t = Sandbox_mode.t list
   end
 
   module Cache : sig
@@ -42,10 +51,11 @@ module Dune_config : sig
         -> t Dune_lang.Decoder.t
 
       val to_string : t -> string
+      val to_dyn : t -> Dyn.t
     end
 
     module Storage_mode : sig
-      type t = Dune_cache_storage.Mode.t option
+      type t = Dune_cache.Mode.t option
 
       val all : (string * t) list
       val decode : t Dune_lang.Decoder.t
@@ -53,19 +63,30 @@ module Dune_config : sig
     end
   end
 
-  module Terminal_persistence : sig
+  module Pkg_enabled : sig
+    (** Configuration for Dune's package management features.
+        
+        - [Set (loc, `Enabled)]: Package management is explicitly enabled. Forces package 
+          management to be active even if no lock directories are present.
+
+        - [Set (loc, `Disabled)]: Package management is explicitly disabled. Forces package 
+          management to be inactive even if lock directories are present.
+
+        - [Unset]: Package management enablement is not explicitly configured.
+        
+        [loc] is only relevant for error reporting. *)
+
+    type where =
+      | Cli
+      | Loc of Loc.t
+
     type t =
-      | Preserve
-      | Clear_on_rebuild
-      | Clear_on_rebuild_and_flush_history
+      | Set of where * Toggle.t
+      | Unset
 
-    val all : (string * t) list
-  end
-
-  module Action_output_on_success : sig
-    include module type of struct
-      include Dune_engine.Execution_parameters.Action_output_on_success
-    end
+    val all : where -> (string * t) list
+    val to_dyn : t -> Dyn.t
+    val equal : t -> t -> bool
   end
 
   module type S = sig
@@ -82,6 +103,7 @@ module Dune_config : sig
       ; action_stdout_on_success : Action_output_on_success.t field
       ; action_stderr_on_success : Action_output_on_success.t field
       ; project_defaults : Project_defaults.t field
+      ; pkg_enabled : Pkg_enabled.t field
       ; experimental : (string * (Loc.t * string)) list field
       }
   end
@@ -94,6 +116,7 @@ module Dune_config : sig
     val empty : t
     val superpose : t -> t -> t
     val to_dyn : t -> Dyn.t
+    val equal : t -> t -> bool
   end
 
   (** A standard list of watch exclusions *)
@@ -109,7 +132,7 @@ module Dune_config : sig
 
   val superpose : t -> Partial.t -> t
   val default : t
-  val user_config_file : Path.t
+  val user_config_file : Path.t Lazy.t
 
   (** We return a [Partial.t] here so that the result can easily be merged with
       other sources of configurations. *)
@@ -134,7 +157,6 @@ module Dune_config : sig
   val for_scheduler
     :  t
     -> watch_exclusions:string list
-    -> Dune_stats.t option
     -> print_ctrl_c_warning:bool
-    -> Dune_engine.Scheduler.Config.t
+    -> Scheduler.Config.t
 end

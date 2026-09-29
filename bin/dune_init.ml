@@ -6,15 +6,48 @@ open Import
 module Cst = Dune_lang.Cst
 
 (** Abstractions around the kinds of files handled during initialization *)
-module File = struct
+module File : sig
+  (** Representation of the files used for initializing projects *)
+  type t
+
+  (** {2 Constructors: make representations of files} *)
+
+  (** [load_dune_file ~dir] is the representation of the dune file located at
+      the path [${dir}/dune].
+
+      - If a dune file at that path exists, its content is loaded.
+      - If a dune file at that path does not exist, the content is empty.
+      - If the file cannot be read because it holds invalid syntax or is a
+        directory, a user error is raised. *)
+  val load_dune_file : dir:Path.Source.t -> t
+
+  (** [make_text ~dir name content] represents a file with arbitrary textual
+      [content], named [name] that will be located in [dir] *)
+  val make_text : dir:Path.Source.t -> string -> string -> t
+
+  (** [make_dune ~dir name stanzas] represents a file with the given dune
+      [stanzas], named [name] that will be located in [dir] *)
+  val make_dune : dir:Path.Source.t -> string -> Cst.t list -> t
+
+  (** {2 Transformers: change the properties of file representations} *)
+  module Stanza : sig
+    (** [add project stanzas f] appends the [stanzas] to the dune file [f] *)
+    val add : Dune_project.t -> Cst.t list -> t -> t
+  end
+
+  (** {2 Eliminators: materialize the representation of files (or directories)} *)
+
+  val write : t -> (unit, Path.t) result
+  val create_dir : Path.Source.t -> unit
+end = struct
   type dune =
-    { path : Path.t
+    { dir : Path.Source.t
     ; name : string
     ; content : Cst.t list
     }
 
   type text =
-    { path : Path.t
+    { dir : Path.Source.t
     ; name : string
     ; content : string
     }
@@ -23,10 +56,11 @@ module File = struct
     | Dune of dune
     | Text of text
 
-  let make_text path name content = Text { path; name; content }
+  let make_text ~dir name content = Text { dir; name; content }
+  let make_dune ~dir name content = Dune { dir; name; content }
 
   let full_path = function
-    | Dune { path; name; _ } | Text { path; name; _ } -> Path.relative path name
+    | Dune { dir; name; _ } | Text { dir; name; _ } -> Path.Source.relative dir name
   ;;
 
   (** Inspection and manipulation of stanzas in a file *)
@@ -59,8 +93,11 @@ module File = struct
       | _ -> false
     ;;
 
-    let csts_conflict project (a : Cst.t) (b : Cst.t) =
-      let of_ast = Dune_rules.Stanzas.of_ast project in
+    let csts_conflict project ~dir (a : Cst.t) (b : Cst.t) =
+      let of_ast sexp =
+        let parser = Dune_project.stanza_parser project ~dir in
+        Dune_lang.Decoder.parse parser Univ_map.empty sexp
+      in
       (let open Option.O in
        let* a_ast = Cst.abstract a in
        let+ b_ast = Cst.abstract b in
@@ -71,9 +108,9 @@ module File = struct
     ;;
 
     (* TODO(shonfeder): replace with stanza merging *)
-    let find_conflicting project new_stanzas existing_stanzas =
+    let find_conflicting project ~dir new_stanzas existing_stanzas =
       let conflicting_stanza stanza =
-        match List.find ~f:(csts_conflict project stanza) existing_stanzas with
+        match List.find ~f:(csts_conflict ~dir project stanza) existing_stanzas with
         | Some conflict -> Some (stanza, conflict)
         | None -> None
       in
@@ -83,7 +120,7 @@ module File = struct
     let add (project : Dune_project.t) stanzas = function
       | Text f -> Text f (* Adding a stanza to a text file isn't meaningful *)
       | Dune f ->
-        (match find_conflicting project stanzas f.content with
+        (match find_conflicting project ~dir:f.dir stanzas f.content with
          | None -> Dune { f with content = f.content @ stanzas }
          | Some (a, b) ->
            User_error.raise
@@ -99,9 +136,8 @@ module File = struct
     ;;
   end
 
-  (* Stanza *)
-
   let create_dir path =
+    let path = Path.source path in
     try Path.mkdir_p path with
     | Unix.Unix_error (EACCES, _, _) ->
       User_error.raise
@@ -112,13 +148,13 @@ module File = struct
         ]
   ;;
 
-  let load_dune_file ~path =
+  let load_dune_file ~dir =
     let name = "dune" in
-    let full_path = Path.relative path name in
+    let full_path = Path.relative (Path.source dir) name in
     let content =
-      if not (Path.exists full_path)
+      if not (Fpath.exists (Path.to_string full_path))
       then []
-      else if Path.is_directory full_path
+      else if Fpath.is_directory (Path.to_string full_path)
       then
         User_error.raise
           [ Pp.textf
@@ -135,18 +171,18 @@ module File = struct
                 (Path.to_string_maybe_quoted full_path)
             ])
     in
-    Dune { path; name; content }
+    Dune { dir; name; content }
   ;;
 
   let write_dune_file (dune_file : dune) =
-    let path = Path.relative dune_file.path dune_file.name in
+    let path = Path.Source.relative dune_file.dir dune_file.name in
     let version =
       Dune_lang.Syntax.greatest_supported_version_exn Dune_lang.Stanza.syntax
     in
     Io.with_file_out
       ~binary:true
       (* Why do we pass [~binary:true] but not anywhere else when formatting? *)
-      path
+      (Path.source path)
       ~f:(fun oc ->
         let fmt = Format.formatter_of_out_channel oc in
         Format.fprintf
@@ -161,18 +197,27 @@ module File = struct
     match f with
     | Dune f -> Ok (write_dune_file f)
     | Text f ->
-      if Path.exists path
+      let path = Path.source path in
+      if Fpath.exists (Path.to_string path)
       then Error path
-      else Ok (Io.write_file ~binary:false path f.content)
+      else Ok (Io.write_file_exn ~binary:false path f.content)
   ;;
 end
 
 (** The context in which the initialization is executed *)
-module Init_context = struct
+module Init_context : sig
+  type t =
+    { dir : Path.Source.t
+    ; project : Dune_project.t
+    ; defaults : Dune_config.Project_defaults.t
+    }
+
+  val make : string option -> Dune_config.Project_defaults.t -> t Memo.t
+end = struct
   open Dune_config_file
 
   type t =
-    { dir : Path.t
+    { dir : Path.Source.t
     ; project : Dune_project.t
     ; defaults : Dune_config.Project_defaults.t
     }
@@ -180,11 +225,12 @@ module Init_context = struct
   let make path defaults =
     let open Memo.O in
     let+ project =
-      (* CR-rgrinberg: why not get the project from the source tree? *)
+      (* CR-someday rgrinberg: why not get the project from the source tree? *)
       Dune_project.load
         ~dir:Path.Source.root
-        ~files:Filename.Set.empty
+        ~files:Filename.Array.Set.empty
         ~infer_from_opam_files:true
+        ~load_opam_file_with_contents:Dune_pkg.Opam_file.load_opam_file_with_contents
       >>| function
       | Some p -> p
       | None ->
@@ -195,8 +241,20 @@ module Init_context = struct
     in
     let dir =
       match path with
-      | None -> Path.root
-      | Some p -> Path.of_string p
+      | None -> Path.Source.root
+      | Some p ->
+        (match Path.Outside_build_dir.of_string p with
+         | In_source_dir s -> s
+         | External e ->
+           (match Path.Expert.try_localize_external (Path.external_ e) with
+            | In_build_dir _ ->
+              (* Impossible because we never passed in a build path. It would
+                 be nice to have a [Path.Outside_build_dir.try_localize_external]
+                 reflect that
+              *)
+              assert false
+            | In_source_tree p -> p
+            | External _ -> User_error.raise [ Pp.textf "%s isn't in the workspace" p ]))
     in
     File.create_dir dir;
     { dir; project; defaults }
@@ -205,8 +263,8 @@ end
 
 let check_module_name name =
   let s = Dune_lang.Atom.to_string name in
-  let (_ : Dune_rules.Module_name.t) =
-    Dune_rules.Module_name.of_string_user_error (Loc.none, s) |> User_error.ok_exn
+  let (_ : Dune_lang.Module_name.t) =
+    Dune_lang.Module_name.of_string_user_error (Loc.none, s) |> User_error.ok_exn
   in
   ()
 ;;
@@ -240,12 +298,16 @@ module Public_name = struct
   ;;
 end
 
+(** The components of a dune project: components generalize over executables,
+    libraries, tests, and projects (the latter of which can include the others) *)
 module Component = struct
+  (** The options that can be provided to specify a component *)
   module Options = struct
+    (** Options common to all components *)
     module Common = struct
       type t =
         { name : Dune_lang.Atom.t
-        ; public : Public_name.t option
+        ; public : Public_name.t option (** [public_name] field, if any *)
         ; libraries : Dune_lang.Atom.t list
         ; pps : Dune_lang.Atom.t list
         }
@@ -260,14 +322,24 @@ module Component = struct
       ;;
     end
 
+    (** The type of options, parameterized on the kind of component *)
+    type 'options t =
+      { context : Init_context.t
+      ; common : Common.t
+      ; options : 'options
+      }
+
+    (** Options for an executable *)
     module Executable = struct
       type t = unit
     end
 
+    (** Options for a library *)
     module Library = struct
       type t = { inline_tests : bool }
     end
 
+    (** Options for a whole project *)
     module Project = struct
       module Template = struct
         type t =
@@ -298,33 +370,50 @@ module Component = struct
         }
     end
 
+    (** Options for a test *)
     module Test = struct
       type t = unit
     end
-
-    type 'options t =
-      { context : Init_context.t
-      ; common : Common.t
-      ; options : 'options
-      }
   end
 
-  (* Options *)
+  (** The type of components, specified by the kind of options appropriate to
+      them *)
+  type t =
+    | Executable of Options.Executable.t Options.t
+    | Library of Options.Library.t Options.t
+    | Project of Options.Project.t Options.t
+    | Test of Options.Test.t Options.t
 
-  type 'options t =
-    | Executable : Options.Executable.t Options.t -> Options.Executable.t t
-    | Library : Options.Library.t Options.t -> Options.Library.t t
-    | Project : Options.Project.t Options.t -> Options.Project.t t
-    | Test : Options.Test.t Options.t -> Options.Test.t t
-
-  (** Internal representation of the files comprising a component *)
+  (** Internal representation of the files comprising a component, and the
+      directory in which they live *)
   type target =
-    { dir : Path.t
+    { dir : Path.Source.t
     ; files : File.t list
     }
 
+  let add_to_list_set elem set =
+    if List.mem ~equal:Dune_lang.Atom.equal set elem then set else elem :: set
+  ;;
+
   (** Creates Dune language CST stanzas describing components *)
-  module Stanza_cst = struct
+  module Stanza_cst : sig
+    val executable : Options.Common.t -> Options.Executable.t -> Cst.t list
+    val library : Options.Common.t -> Options.Library.t -> Cst.t list
+    val test : Options.Common.t -> Options.Test.t -> Cst.t list
+
+    val dune_project_file
+      :  opam_file_gen:bool
+      -> defaults:Dune_config.Project_defaults.t
+      -> Path.Source.t
+      -> Options.Common.t
+      -> Cst.t list
+
+    val opam_file
+      :  defaults:Dune_config.Project_defaults.t
+      -> Path.Source.t
+      -> Options.Common.t
+      -> string
+  end = struct
     open Dune_lang
 
     module Field = struct
@@ -356,11 +445,14 @@ module Component = struct
       (* Package as a list CSTs *) |> List.singleton
     ;;
 
-    let add_to_list_set elem set =
-      if List.mem ~equal:Dune_lang.Atom.equal set elem then set else elem :: set
-    ;;
-
     let public_name_field = Encoder.field_o "public_name" Public_name.encode
+
+    let project_info ~(defaults : Dune_config_file.Dune_config.Project_defaults.t) =
+      Package_info.example
+        ~authors:defaults.authors
+        ~maintainers:defaults.maintainers
+        ~license:defaults.license
+    ;;
 
     let executable (common : Options.Common.t) (() : Options.Executable.t) =
       make "executable" common [ public_name_field common.public ]
@@ -385,46 +477,52 @@ module Component = struct
 
     let test common (() : Options.Test.t) = make "test" common []
 
-    (* A list of CSTs for dune-project file content *)
     let dune_project
           ~opam_file_gen
           ~(defaults : Dune_config_file.Dune_config.Project_defaults.t)
           dir
           (common : Options.Common.t)
       =
+      let package =
+        Package.create
+          ~name:(Options.Common.package_name common)
+          ~loc:Loc.none
+          ~version:None
+          ~conflicts:[]
+          ~depopts:[]
+          ~info:Package_info.empty
+          ~sites:Site.Map.empty
+          ~allow_empty:false
+          ~deprecated_package_names:Package.Name.Map.empty
+          ~has_opam_file:(Exists false)
+          ~original_opam_file:None
+          ~dir
+          ~synopsis:(Some "A short synopsis")
+          ~description:(Some "A longer description")
+          ~tags:[ "add topics"; "to describe"; "your"; "project" ]
+          ~depends:
+            [ { Package_dependency.name = Package.Name.of_string "ocaml"
+              ; constraint_ = None
+              }
+            ]
+          ~contents_basename:None
+          ~enabled_if:None
+      in
+      let packages = Package.Name.Map.singleton (Package.name package) package in
+      let info = project_info ~defaults in
+      Dune_project.anonymous ~dir info packages
+      |> Dune_project.set_generate_opam_files opam_file_gen
+    ;;
+
+    (* A list of CSTs for dune-project file content *)
+    let dune_project_file
+          ~opam_file_gen
+          ~(defaults : Dune_config_file.Dune_config.Project_defaults.t)
+          dir
+          (common : Options.Common.t)
+      =
       let cst =
-        let package =
-          Package.create
-            ~name:(Options.Common.package_name common)
-            ~loc:Loc.none
-            ~version:None
-            ~conflicts:[]
-            ~depopts:[]
-            ~info:Package_info.empty
-            ~sites:Site.Map.empty
-            ~allow_empty:false
-            ~deprecated_package_names:Package.Name.Map.empty
-            ~has_opam_file:(Exists false)
-            ~original_opam_file:None
-            ~dir
-            ~synopsis:(Some "A short synopsis")
-            ~description:(Some "A longer description")
-            ~tags:[ "add topics"; "to describe"; "your"; "project" ]
-            ~depends:
-              [ { Package_dependency.name = Package.Name.of_string "ocaml"
-                ; constraint_ = None
-                }
-              ]
-        in
-        let packages = Package.Name.Map.singleton (Package.name package) package in
-        let info =
-          Package_info.example
-            ~authors:defaults.authors
-            ~maintainers:defaults.maintainers
-            ~license:defaults.license
-        in
-        Dune_project.anonymous ~dir info packages
-        |> Dune_project.set_generate_opam_files opam_file_gen
+        dune_project ~opam_file_gen ~defaults dir common
         |> Dune_project.encode
         |> List.map ~f:(fun exp ->
           exp |> Dune_lang.Ast.add_loc ~loc:Loc.none |> Cst.concrete)
@@ -438,31 +536,60 @@ module Component = struct
               ] )
         ]
     ;;
+
+    let opam_file
+          ~(defaults : Dune_config_file.Dune_config.Project_defaults.t)
+          dir
+          (common : Options.Common.t)
+      =
+      let project = dune_project ~opam_file_gen:true ~defaults dir common in
+      let package_name = Options.Common.package_name common in
+      let package =
+        Package.Name.Map.find_exn (Dune_project.packages project) package_name
+      in
+      let info = Package_info.superpose (project_info ~defaults) (Package.info package) in
+      let package =
+        Package.set_version_and_info package ~version:(Package.version package) ~info
+      in
+      Dune_rules.Opam_create.generate project package ~template:None
+    ;;
   end
 
   (* TODO Support for merging in changes to an existing stanza *)
   let add_stanza_to_dune_file ~(project : Dune_project.t) ~dir stanza =
-    File.load_dune_file ~path:dir |> File.Stanza.add project stanza
+    File.load_dune_file ~dir |> File.Stanza.add project stanza
   ;;
 
-  (* Functions to make the various components, represented as lists of files *)
-  module Make = struct
+  (** Functions to make the various components, represented as lists of targets *)
+  module Make : sig
+    (** A binary, which, as per convention, is defined in a ./bin subdirectory *)
+    val bin : Options.Executable.t Options.t -> target list
+
+    (** A library, which, as per convention, is defined in a ./lib subdirectory *)
+    val lib : Options.Library.t Options.t -> target list
+
+    (** A test suite, which, as per convention, is defined in a ./test subdirectory *)
+    val test : Options.Test.t Options.t -> target list
+
+    (** A project, which, as per convention, includes a ./lib and ./test and optionally a ./bin *)
+    val proj : Options.Project.t Options.t -> target list
+  end = struct
     let bin ({ context; common; options } : Options.Executable.t Options.t) =
       let dir = context.dir in
       let bin_dune =
         Stanza_cst.executable common options
-        |> add_stanza_to_dune_file ~project:context.project ~dir
+        |> add_stanza_to_dune_file ~dir ~project:context.project
       in
       let bin_ml =
         let name = sprintf "%s.ml" (Dune_lang.Atom.to_string common.name) in
         let content = sprintf "let () = print_endline \"Hello, World!\"\n" in
-        File.make_text dir name content
+        File.make_text ~dir name content
       in
       let files = [ bin_dune; bin_ml ] in
       [ { dir; files } ]
     ;;
 
-    let src ({ context; common; options } : Options.Library.t Options.t) =
+    let lib ({ context; common; options } : Options.Library.t Options.t) =
       let dir = context.dir in
       let lib_dune =
         Stanza_cst.library common options
@@ -473,7 +600,6 @@ module Component = struct
     ;;
 
     let test ({ context; common; options } : Options.Test.t Options.t) =
-      (* Marking the current absence of test-specific options *)
       let dir = context.dir in
       let test_dune =
         Stanza_cst.test common options
@@ -482,13 +608,15 @@ module Component = struct
       let test_ml =
         let name = sprintf "%s.ml" (Dune_lang.Atom.to_string common.name) in
         let content = "" in
-        File.make_text dir name content
+        File.make_text ~dir name content
       in
       let files = [ test_dune; test_ml ] in
       [ { dir; files } ]
     ;;
 
-    let dune_project_file dir ({ context; common; options } : Options.Project.t Options.t)
+    let dune_project_file
+          ~dir
+          ({ context; common; options } : Options.Project.t Options.t)
       =
       let opam_file_gen =
         match options.pkg with
@@ -496,36 +624,53 @@ module Component = struct
         | Esy -> false
       in
       let content =
-        Stanza_cst.dune_project
+        Stanza_cst.dune_project_file
           ~opam_file_gen
           ~defaults:context.defaults
-          Path.(as_in_source_tree_exn context.dir)
+          context.dir
           common
       in
-      File.Dune { path = dir; content; name = "dune-project" }
+      File.make_dune ~dir "dune-project" content
+    ;;
+
+    (* Convert a libname to a dune atom that can be used to declare a library as
+       a dependency  *)
+    let lib_name_to_atom lib : Dune_lang.Atom.t =
+      Lib_name.to_string lib
+      |> String.map ~f:(function
+        | '-' -> '_' (* in case the lib_name is public, containing a `-` *)
+        | c -> c)
+      |> Dune_lang.Atom.of_string
+    ;;
+
+    let proj_test dir context (common : Options.Common.t) =
+      let test_name = "test_" ^ Dune_lang.Atom.to_string common.name in
+      let libraries =
+        match common.public with
+        | None -> []
+        | Some lib -> [ lib_name_to_atom lib ]
+      in
+      test
+        { context = { context with dir = Path.Source.relative dir "test" }
+        ; options = ()
+        ; common = { common with name = Dune_lang.Atom.of_string test_name; libraries }
+        }
     ;;
 
     let proj_exec dir ({ context; common; options } : Options.Project.t Options.t) =
       let lib_target =
-        src
-          { context = { context with dir = Path.relative dir "lib" }
+        lib
+          { context = { context with dir = Path.Source.relative dir "lib" }
           ; options = { inline_tests = options.inline_tests }
           ; common = { common with public = None }
           }
       in
-      let test_target =
-        let test_name = "test_" ^ Dune_lang.Atom.to_string common.name in
-        test
-          { context = { context with dir = Path.relative dir "test" }
-          ; options = ()
-          ; common = { common with name = Dune_lang.Atom.of_string test_name }
-          }
-      in
+      let test_target = proj_test dir context common in
       let bin_target =
         (* Add the lib_target as a library to the executable*)
-        let libraries = Stanza_cst.add_to_list_set common.name common.libraries in
+        let libraries = add_to_list_set common.name common.libraries in
         bin
-          { context = { context with dir = Path.relative dir "bin" }
+          { context = { context with dir = Path.Source.relative dir "bin" }
           ; options = ()
           ; common = { common with libraries; name = Dune_lang.Atom.of_string "main" }
           }
@@ -535,24 +680,17 @@ module Component = struct
 
     let proj_lib dir ({ context; common; options } : Options.Project.t Options.t) =
       let lib_target =
-        src
-          { context = { context with dir = Path.relative dir "lib" }
+        lib
+          { context = { context with dir = Path.Source.relative dir "lib" }
           ; options = { inline_tests = options.inline_tests }
           ; common
           }
       in
-      let test_target =
-        let test_name = "test_" ^ Dune_lang.Atom.to_string common.name in
-        test
-          { context = { context with dir = Path.relative dir "test" }
-          ; options = ()
-          ; common = { common with name = Dune_lang.Atom.of_string test_name }
-          }
-      in
+      let test_target = proj_test dir context common in
       lib_target @ test_target
     ;;
 
-    let proj ({ common; options; _ } as opts : Options.Project.t Options.t) =
+    let proj ({ context; common; options } as opts : Options.Project.t Options.t) =
       let ({ template; pkg; _ } : Options.Project.t) = options in
       let dir = Path.Source.root in
       let proj_target =
@@ -560,18 +698,24 @@ module Component = struct
           match (pkg : Options.Project.Pkg.t) with
           | Opam ->
             let name = Options.Common.package_name common in
-            let opam_file = Path.source @@ Package_name.file name ~dir in
-            [ File.make_text (Path.parent_exn opam_file) (Path.basename opam_file) "" ]
-          | Esy -> [ File.make_text (Path.source dir) "package.json" "" ]
+            let opam_file = Package_name.file name ~dir in
+            let content =
+              Stanza_cst.opam_file ~defaults:context.defaults context.dir common
+            in
+            [ File.make_text
+                ~dir:(Path.Source.parent_exn opam_file)
+                (Path.Source.basename opam_file |> Filename.to_string)
+                content
+            ]
+          | Esy -> [ File.make_text ~dir "package.json" "" ]
         in
-        let dir = Path.source dir in
-        { dir; files = dune_project_file dir opts :: package_files }
+        { dir; files = dune_project_file ~dir opts :: package_files }
       in
       let component_targets =
         (match (template : Options.Project.Template.t) with
          | Exec -> proj_exec
          | Lib -> proj_lib)
-          (Path.source dir)
+          dir
           opts
       in
       proj_target :: component_targets
@@ -597,11 +741,11 @@ module Component = struct
     List.map ~f:File.write target.files
   ;;
 
-  let init (type options) (t : options t) =
+  let init (t : t) =
     let target =
       match t with
       | Executable params -> Make.bin params
-      | Library params -> Make.src params
+      | Library params -> Make.lib params
       | Project params -> Make.proj params
       | Test params -> Make.test params
     in

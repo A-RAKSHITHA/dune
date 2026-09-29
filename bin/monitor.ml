@@ -1,7 +1,7 @@
 open Import
 open Fiber.O
-module Client = Dune_rpc_client.Client
-module Version_error = Dune_rpc_private.Version_error
+module Client = Root.Rpc.Client
+module Version_error = Dune_rpc.Version_error
 
 include struct
   open Dune_rpc
@@ -9,7 +9,6 @@ include struct
   module Progress = Progress
   module Job = Job
   module Sub = Sub
-  module Conv = Conv
 end
 
 (** Utility module for generating [Map] modules for [Diagnostic]s and [Job]s which use
@@ -84,10 +83,6 @@ end = struct
     Pp.seq message (Pp.verbatim ", waiting for filesystem changes...")
   ;;
 
-  let restarting_current_build message =
-    Pp.seq message (Pp.verbatim ", restarting current build...")
-  ;;
-
   let had_errors state =
     match Diagnostic_id_map.cardinal state.diagnostics with
     | 1 -> Pp.verbatim "Had 1 error"
@@ -102,9 +97,7 @@ end = struct
            | Waiting -> Pp.verbatim "Initializing..."
            | In_progress { complete; remaining; failed } ->
              done_status ~complete ~remaining ~failed state
-           | Interrupted ->
-             Pp.tag User_message.Style.Error (Pp.verbatim "Source files changed")
-             |> restarting_current_build
+           | Interrupted -> Pp.verbatim "Restarting current build..."
            | Success ->
              Pp.tag User_message.Style.Success (Pp.verbatim "Success")
              |> waiting_for_file_system_changes
@@ -178,18 +171,18 @@ end
 
 (* A generic loop that continuously fetches events from a [sub] that it opens a
    poll to and writes them to the [event] bus. *)
-let fetch_loop ~(event : Event.t Fiber_event_bus.t) ~client ~f sub =
+let fetch_loop ~(event : Event.t Fiber.Event_bus.t) ~client ~f sub =
   Client.poll client sub
   >>= function
   | Error version_error ->
-    let* () = Fiber_event_bus.close event in
+    let* () = Fiber.Event_bus.close event in
     User_error.raise [ Pp.verbatim (Version_error.message version_error) ]
   | Ok poller ->
     let rec loop () =
       Fiber.collect_errors (fun () -> Client.Stream.next poller)
       >>= (function
-       | Ok (Some payload) -> Fiber_event_bus.push event (f payload)
-       | Error _ | Ok None -> Fiber_event_bus.close event >>> Fiber.return `Closed)
+       | Ok (Some payload) -> Fiber.Event_bus.push event (f payload)
+       | Error _ | Ok None -> Fiber.Event_bus.close event >>> Fiber.return `Closed)
       >>= function
       | `Closed -> Fiber.return ()
       | `Ok -> loop ()
@@ -198,11 +191,11 @@ let fetch_loop ~(event : Event.t Fiber_event_bus.t) ~client ~f sub =
 ;;
 
 (* Main render loop *)
-let render_loop ~(event : Event.t Fiber_event_bus.t) =
+let render_loop ~(event : Event.t Fiber.Event_bus.t) =
   Console.reset ();
   let state = State.init () in
   let rec loop () =
-    Fiber_event_bus.pop event
+    Fiber.Event_bus.pop event
     >>= function
     | `Closed ->
       Console.print_user_message
@@ -230,8 +223,8 @@ let monitor ~quit_on_disconnect () =
           (Dune_rpc.Initialize.Request.create
              ~id:(Dune_rpc.Id.make (Sexp.Atom "monitor_cmd")))
           ~f:(fun client ->
-            let event = Fiber_event_bus.create () in
-            let module Sub = Dune_rpc_private.Public.Sub in
+            let event = Fiber.Event_bus.create () in
+            let module Sub = Dune_rpc.Public.Sub in
             Fiber.all_concurrently_unit
               [ render_loop ~event
               ; fetch_loop ~event ~client ~f:(fun x -> Event.Jobs x) Sub.running_jobs
@@ -246,7 +239,7 @@ let monitor ~quit_on_disconnect () =
       Console.Status_line.set
         (Console.Status_line.Live
            (fun () -> Pp.verbatim ("Waiting for RPC server" ^ String.make (i mod 4) '.')));
-      let+ () = Scheduler.sleep ~seconds:0.3 in
+      let+ () = Scheduler.sleep (Time.Span.of_secs 0.3) in
       Some (i + 1))
 ;;
 
@@ -272,24 +265,15 @@ let command =
         & flag
         & info
             [ "quit-on-disconnect" ]
-            ~doc:"Quit if the connection to the server is lost.")
+            ~doc:(Some "Quit if the connection to the server is lost."))
     in
     let builder = Common.Builder.forbid_builds builder in
     let builder = Common.Builder.disable_log_file builder in
-    let common, config = Common.init builder in
-    let stats = Common.stats common in
+    let _common, config = Common.init builder in
     let config =
-      Dune_config.for_scheduler
-        config
-        stats
-        ~print_ctrl_c_warning:true
-        ~watch_exclusions:[]
+      Dune_config.for_scheduler config ~print_ctrl_c_warning:true ~watch_exclusions:[]
     in
-    Scheduler.Run.go
-      config
-      ~on_event:(fun _ _ -> ())
-      ~file_watcher:No_watcher
-      (monitor ~quit_on_disconnect)
+    Scheduler.Run.go config ~file_watcher:No_watcher (monitor ~quit_on_disconnect)
   in
   Cmd.v info term
 ;;

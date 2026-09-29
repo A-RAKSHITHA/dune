@@ -1,7 +1,5 @@
 Test rules that copy source files in file-watching mode.
 
-  $ . ./helpers.sh
-
   $ echo '(lang dune 3.0)' > dune-project
   $ cat > dune <<EOF
   > (rule
@@ -74,8 +72,4 @@ Note that [d.txt] is here but [c.txt] isn't (it's not promoted).
 
 We're done.
 
-  $ stop_dune
-  Success, waiting for filesystem changes...
-  Success, waiting for filesystem changes...
-  Success, waiting for filesystem changes...
-  Success, waiting for filesystem changes...
+  $ stop_dune_quiet

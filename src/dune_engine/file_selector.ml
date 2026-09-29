@@ -1,10 +1,7 @@
 open Import
 
 type t =
-  { (* CR-someday rgrinberg: this [dir] is ignored when evaluating the
-       selector with [test]. It's better to just drop it completely and
-       provide the directory explicitly when building or evaluating *)
-    dir : Path.t
+  { dir : Path.t
   ; predicate : Predicate_lang.Glob.t
   ; only_generated_files : bool
   }
@@ -13,15 +10,24 @@ let dir t = t.dir
 let only_generated_files t = t.only_generated_files
 let predicate t = t.predicate
 
-let digest_exn { dir; predicate; only_generated_files } =
-  Digest.generic (dir, Predicate_lang.Glob.digest_exn predicate, only_generated_files)
+let repr =
+  Repr.record
+    "file-selector"
+    [ Repr.field "dir" Path.repr ~get:dir
+    ; Repr.field "predicate" Predicate_lang.Glob.repr ~get:predicate
+    ; Repr.field "only_generated_files" Repr.bool ~get:only_generated_files
+    ]
 ;;
 
+let digest t = Digest.repr repr t
+
 let compare { dir; predicate; only_generated_files } t =
-  let open Ordering.O in
-  let= () = Path.compare dir t.dir in
-  let= () = Predicate_lang.Glob.compare predicate t.predicate in
-  Bool.compare only_generated_files t.only_generated_files
+  match Path.compare dir t.dir with
+  | (Lt | Gt) as ordering -> ordering
+  | Eq ->
+    (match Predicate_lang.Glob.compare predicate t.predicate with
+     | (Lt | Gt) as ordering -> ordering
+     | Eq -> Bool.compare only_generated_files t.only_generated_files)
 ;;
 
 let of_predicate_lang ~dir ?(only_generated_files = false) predicate =
@@ -29,15 +35,7 @@ let of_predicate_lang ~dir ?(only_generated_files = false) predicate =
 ;;
 
 let of_glob ~dir glob = of_predicate_lang ~dir (Predicate_lang.Glob.of_glob glob)
-
-let to_dyn { dir; predicate; only_generated_files } =
-  Dyn.Record
-    [ "dir", Path.to_dyn dir
-    ; "predicate", Predicate_lang.Glob.to_dyn predicate
-    ; "only_generated_files", Bool only_generated_files
-    ]
-;;
-
+let to_dyn = Repr.to_dyn repr
 let equal x y = compare x y = Eq
 
 let hash { dir; predicate; only_generated_files } =
@@ -48,13 +46,9 @@ let hash { dir; predicate; only_generated_files } =
     (dir, predicate, only_generated_files)
 ;;
 
-let test t path =
+let test_basename t ~basename =
   Predicate_lang.Glob.test
     t.predicate
     ~standard:Predicate_lang.false_
-    (Path.basename path)
-;;
-
-let test_basename t ~basename =
-  Predicate_lang.Glob.test t.predicate ~standard:Predicate_lang.false_ basename
+    (Filename.to_string basename)
 ;;

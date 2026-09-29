@@ -1,40 +1,28 @@
+module M = Metrics
 open Stdune
+module Metrics = M
 module Process = Dune_engine.Process
+open Dune_scheduler
 
 module Console = struct
-  include Dune_console
+  include Console
 
   let printf fmt = printf ("[Bench] " ^^ fmt)
 end
 
-module Json = struct
-  include Chrome_trace.Json
-  include Dune_stats.Json
-end
-
 module Output = struct
-  type measurement =
-    [ `Int of int
-    | `Float of float
-    ]
-
   type bench =
     { name : string
-    ; metrics : (string * [ measurement | `List of measurement list ] * string) list
+    ; metrics : (string * Json.t * string) list
     }
 
   let json_of_bench { name; metrics } : Json.t =
     let metrics =
       List.map metrics ~f:(fun (name, value, units) ->
-        let value =
-          match value with
-          | `Int i -> `Int i
-          | `Float f -> `Float f
-          | `List xs -> `List (xs :> Json.t list)
-        in
-        `Assoc [ "name", `String name; "value", value; "units", `String units ])
+        Json.assoc
+          [ "name", Json.string name; "value", value; "units", Json.string units ])
     in
-    `Assoc [ "name", `String name; "metrics", `List metrics ]
+    Json.assoc [ "name", Json.string name; "metrics", Json.list metrics ]
   ;;
 
   type t =
@@ -44,20 +32,20 @@ module Output = struct
     }
 
   let to_json { config; version; results } : Json.t =
-    let assoc = [ "results", `List (List.map results ~f:json_of_bench) ] in
-    let assoc = ("version", `Int version) :: assoc in
+    let assoc = [ "results", Json.list (List.map results ~f:json_of_bench) ] in
+    let assoc = ("version", Json.int version) :: assoc in
     let assoc =
       match config with
       | [] -> assoc
-      | _ :: _ -> ("config", `Assoc config) :: assoc
+      | _ :: _ -> ("config", Json.assoc config) :: assoc
     in
-    `Assoc assoc
+    Json.assoc assoc
   ;;
 end
 
 let git =
   lazy
-    (let path = Env.get Env.initial "PATH" |> Option.value_exn |> Bin.parse_path in
+    (let path = Env.get Env.initial Env.Var._PATH |> Option.value_exn |> Bin.parse_path in
      Bin.which ~path "git" |> Option.value_exn)
 ;;
 
@@ -73,7 +61,6 @@ module Package = struct
     }
 
   let uri { org; name } = sprintf "https://github.com/%s/%s" org name
-  let make org name = { org; name }
 
   let clone t =
     let stdout_to = make_stdout () in
@@ -90,10 +77,7 @@ module Package = struct
   ;;
 end
 
-let duniverse =
-  let pkg = Package.make in
-  [ pkg "ocaml-dune" "dune-bench" ]
-;;
+let duniverse = [ { Package.org = "ocaml"; name = "dune" } ]
 
 let prepare_workspace () =
   Fiber.parallel_iter duniverse ~f:(fun (pkg : Package.t) ->
@@ -137,7 +121,7 @@ let dune_build ~name ~sandbox =
   Dune_lang.Parser.parse_string
     ~mode:Single
     ~fname:(Path.to_string gc_dump)
-    (Io.read_file gc_dump)
+    (Io.read_file_exn gc_dump)
   |> Dune_lang.Decoder.parse Dune_util.Gc.decode Univ_map.empty
   |> Metrics.make times
 ;;
@@ -165,13 +149,11 @@ type ('float, 'int) bench_results =
   }
 
 let tag_results { size; clean; zero } =
-  let tag data = Metrics.map ~f:(fun t -> `Float t) ~g:(fun t -> `Int t) data in
+  let tag data = Metrics.map ~f:Json.float ~g:Json.int data in
   let list_tag data =
-    List.map data ~f:tag
-    |> Metrics.unzip
-    |> Metrics.map ~f:(fun x -> `List x) ~g:(fun x -> `List x)
+    List.map data ~f:tag |> Metrics.unzip |> Metrics.map ~f:Json.list ~g:Json.list
   in
-  `Int size, tag clean, list_tag zero
+  Json.int size, tag clean, list_tag zero
 ;;
 
 (** Display all clean and null builds with a few exceptions:
@@ -237,26 +219,24 @@ let format_results bench_results =
 ;;
 
 let () =
-  Dune_util.Log.init ~file:No_log_file ();
+  Log.init No_log_file;
   let dir = Temp.create Dir ~prefix:"dune" ~suffix:"bench" in
   Sys.chdir (Path.to_string dir);
   Path.as_external dir |> Option.value_exn |> Path.set_root;
   Path.Build.set_build_dir (Path.Outside_build_dir.of_string "_build");
-  let module Scheduler = Dune_engine.Scheduler in
   let config =
-    Dune_engine.Clflags.display := Quiet;
+    Clflags.display := Quiet;
     { Scheduler.Config.concurrency = 10
-    ; stats = None
     ; print_ctrl_c_warning = false
     ; watch_exclusions = []
     }
   in
   let size =
-    let stat : Unix.stats = Path.stat_exn dune in
+    let stat : Unix.stats = Unix.stat (Path.to_string dune) in
     stat.st_size
   in
   let results =
-    Scheduler.Run.go config ~on_event:(fun _ _ -> ())
+    Scheduler.Run.go config
     @@ fun () ->
     let open Fiber.O in
     (* Prepare the workspace *)

@@ -6,7 +6,7 @@ let no_sandboxing = of_func Option.is_none
 
 let needs_sandboxing =
   of_func (function
-    | None | Some Patch_back_source_tree -> false
+    | None -> false
     | Some _ -> true)
 ;;
 
@@ -63,12 +63,14 @@ module Partial = struct
       | _ -> None)
   ;;
 
+  let patch_back_source_tree =
+    Sandbox_mode.Dict.of_func (function
+      | Some Patch_back_source_tree -> Some true
+      | _ -> Some false)
+  ;;
+
   let disallow (mode : Sandbox_mode.t) =
     Sandbox_mode.Dict.of_func (fun mode' ->
       if Sandbox_mode.equal mode mode' then Some false else None)
   ;;
 end
-
-let disallow (mode : Sandbox_mode.t) =
-  Sandbox_mode.Set.of_func (fun mode' -> not (Sandbox_mode.equal mode mode'))
-;;

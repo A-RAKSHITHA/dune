@@ -1,3 +1,5 @@
+open Stdune
+
 (** Type of display modes.
 
     - [status_line] indictates if a status line is shown.
@@ -5,9 +7,11 @@
 type t =
   | Simple of
       { status_line : bool
-      ; verbosity : Dune_engine.Display.t
+      ; verbosity : Display.t
       }
   | Tui
+
+val equal : t -> t -> bool
 
 (** All the supported display modes for setting from the command line. *)
 val all : (string * t) list
@@ -31,4 +35,4 @@ val short_no_status : t
 val to_dyn : t -> Dyn.t
 
 (** The console backend corresponding to the selected display mode *)
-val console_backend : t -> Dune_console.Backend.t
+val console_backend : t -> Stdune.Console.Backend.t

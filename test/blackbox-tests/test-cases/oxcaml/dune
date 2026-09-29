@@ -1,0 +1,21 @@
+(cram
+ (applies_to :whole_subtree)
+ (enabled_if %{oxcaml_supported}))
+
+(cram
+ (deps %{bin:node} %{bin:js_of_ocaml} %{bin:wasm_of_ocaml})
+ (applies_to parameterised-jsoo.t))
+
+(cram
+ (deps %{bin:tree})
+ (applies_to vendor-parameterised.t))
+
+(cram
+ (enabled_if %{bin-available:odoc})
+ (deps %{bin:odoc})
+ (applies_to parameterised-doc.t))
+
+(cram
+ (enabled_if %{bin-available:menhir})
+ (deps %{bin:menhir})
+ (applies_to menhir-inference.t))

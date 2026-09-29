@@ -9,6 +9,7 @@ module Repository : sig
   val equal : t -> t -> bool
   val upstream : t
   val overlay : t
+  val relocatable : t
   val binary_packages : t
   val decode : t Decoder.t
 
@@ -25,3 +26,5 @@ module Repository : sig
 
   val name : t -> Name.t
 end
+
+val dev_tool_path_to_source_dir : Path.External.t -> Path.Source.t

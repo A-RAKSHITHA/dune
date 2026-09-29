@@ -1,22 +1,27 @@
 open Import
 open Memo.O
 
-let alias mode ~dir =
-  match mode with
-  | `js mode -> Jsoo_rules.js_of_ocaml_runtest_alias ~dir ~mode
-  | `exe | `bc -> Memo.return Alias0.runtest
+let runtest_alias mode ~dir =
+  (match mode with
+   | `js mode -> Jsoo_rules.js_of_ocaml_runtest_alias ~dir ~mode
+   | `exe | `bc -> Memo.return Alias0.runtest)
+  >>| Alias.make ~dir
 ;;
 
-let test_kind dir_contents (loc, name, ext) =
+let test_kind ~dir dir_contents name ext =
+  (* let dir = Dir_contents.dir dir_contents in *)
   let files = Dir_contents.text_files dir_contents in
   let expected_basename = name ^ ".expected" in
-  if Filename.Set.mem files expected_basename
+  let expected_basename_fn = Filename.of_string_exn expected_basename in
+  if Filename.Array.Set.mem files expected_basename_fn
   then
     `Expect
-      { Diff.file1 = String_with_vars.make_text loc expected_basename
-      ; file2 = String_with_vars.make_text loc (name ^ ext ^ ".output")
+      { Action_types.Diff.file1 = Path.build (Path.Build.relative dir expected_basename)
+      ; file2 =
+          Path.Build.relative dir (name ^ Filename.Extension.to_string ext ^ ".output")
       ; optional = false
       ; mode = Text
+      ; directory_diffs = true
       }
   else `Regular
 ;;
@@ -24,8 +29,8 @@ let test_kind dir_contents (loc, name, ext) =
 let ext_of_mode runtest_mode =
   match runtest_mode with
   | `js mode -> Js_of_ocaml.Ext.exe ~mode
-  | `bc -> ".bc"
-  | `exe -> ".exe"
+  | `bc -> Filename.Extension.bc
+  | `exe -> Filename.Extension.exe
 ;;
 
 let custom_runner runtest_mode =
@@ -54,6 +59,7 @@ let runtest_modes modes jsoo_enabled_modes project =
 
 let rules (t : Tests.t) ~sctx ~dir ~scope ~expander ~dir_contents =
   let* () =
+    let project = Scope.project scope in
     let* runtest_modes =
       let+ jsoo_enabled_modes =
         Jsoo_rules.jsoo_enabled_modes
@@ -61,16 +67,15 @@ let rules (t : Tests.t) ~sctx ~dir ~scope ~expander ~dir_contents =
           ~dir
           ~in_context:(Js_of_ocaml.In_context.make ~dir t.exes.buildable.js_of_ocaml)
       in
-      runtest_modes t.exes.modes jsoo_enabled_modes (Scope.project scope)
+      runtest_modes t.exes.modes jsoo_enabled_modes project
     in
     Expander.eval_blang expander t.enabled_if
     >>= function
     | false ->
       let loc = Nonempty_list.hd t.exes.names |> fst in
       Memo.parallel_iter runtest_modes ~f:(fun mode ->
-        let* alias_name = alias mode ~dir in
-        let alias = Alias.make alias_name ~dir in
-        Simple_rules.Alias_rules.add_empty sctx ~loc ~alias)
+        let* alias = runtest_alias mode ~dir in
+        Simple_rules.Alias_rules.add_empty sctx ~loc ~aliases:[ alias ])
     | true ->
       Nonempty_list.to_list t.exes.names
       |> Memo.parallel_iter ~f:(fun (loc, s) ->
@@ -90,16 +95,19 @@ let rules (t : Tests.t) ~sctx ~dir ~scope ~expander ~dir_contents =
                    (String_with_vars.make_text loc runner)
                    [ String_with_vars.make_pform loc test_pform ])
           in
-          let test_exe = s ^ ext in
+          let test_exe = s ^ Filename.Extension.to_string ext in
           let extra_bindings =
-            let test_exe_path =
-              Expander.map_exe expander (Path.relative (Path.build dir) test_exe)
+            let test_exe_path, _, _ =
+              Expander.map_exe
+                ~force_host:false
+                expander
+                (Path.relative (Path.build dir) test_exe)
+                []
             in
             Pform.Map.singleton test_pform [ Value.Path test_exe_path ]
           in
-          let* runtest_alias = alias runtest_mode ~dir in
+          let* runtest_alias = runtest_alias runtest_mode ~dir in
           let deps =
-            (* is this useless? we are going to infer the dependency anyway *)
             match custom_runner with
             | None -> t.deps
             | Some _ ->
@@ -109,47 +117,77 @@ let rules (t : Tests.t) ~sctx ~dir ~scope ~expander ~dir_contents =
                | `js Wasm ->
                  Bindings.Unnamed
                    (Dep_conf.File
-                      (String_with_vars.make_text loc (s ^ Js_of_ocaml.Ext.wasm_dir)))
+                      (String_with_vars.make_text
+                         loc
+                         (s ^ Filename.Extension.to_string Js_of_ocaml.Ext.wasm_dir)))
                  :: t.deps
                | `js JS | `exe | `bc -> t.deps)
           in
-          let add_alias ~loc ~action =
-            (* CR rgrinberg: why are we going through the stanza api? *)
-            let alias =
-              { Alias_conf.name = runtest_alias
-              ; locks = t.locks
-              ; package = t.package
-              ; deps
-              ; action = Some (loc, action)
-              ; enabled_if = t.enabled_if
-              ; loc
-              }
-            in
-            Simple_rules.alias sctx ~extra_bindings ~dir ~expander alias
+          let alias =
+            [ Alias.Name.to_string (Alias.name runtest_alias); s ]
+            |> String.concat ~sep:"-"
+            |> Alias.Name.of_string
+            |> Alias.make ~dir
           in
-          match test_kind dir_contents (loc, s, ext) with
-          | `Regular -> add_alias ~loc ~action:run_action
-          | `Expect diff ->
-            let rule =
-              { Rule_conf.targets = Infer
-              ; deps
-              ; action =
-                  ( loc
-                  , Action_unexpanded.Redirect_out (Stdout, diff.file2, Normal, run_action)
-                  )
-              ; mode = Standard
-              ; locks = t.locks
-              ; loc
-              ; enabled_if = t.enabled_if
-              ; aliases = []
-              ; package = t.package
-              }
-            in
-            add_alias ~loc ~action:(Diff diff)
-            >>> let+ (_ignored_targets : Targets.Validated.t option) =
-                  Simple_rules.user_rule sctx rule ~extra_bindings ~dir ~expander
+          let expander = Expander.add_bindings expander ~bindings:extra_bindings in
+          let sandbox =
+            if Dune_project.dune_version project >= (3, 22)
+            then Sandbox_config.needs_sandboxing
+            else Sandbox_config.no_special_requirements
+          in
+          let* action =
+            match test_kind ~dir:(Expander.dir expander) dir_contents s ext with
+            | `Regular ->
+              let action =
+                let chdir = Expander.dir expander in
+                Action_unexpanded.expand_no_targets
+                  run_action
+                  sandbox
+                  ~loc
+                  ~expander
+                  ~chdir
+                  ~deps
+                  ~what:"aliases"
+              in
+              let action =
+                Simple_rules.interpret_and_add_locks ~expander t.locks action
+              in
+              Memo.return action
+            | `Expect diff ->
+              let* (_ignored_targets : Targets.Validated.t) =
+                let* mode =
+                  Rule_mode_expand.expand_path ~expander ~dir Rule_mode.Standard
                 in
-                ()))
+                (let+ action =
+                   Action_unexpanded.expand
+                     ~chdir:(Expander.dir expander)
+                     ~loc
+                     ~expander
+                     ~deps
+                     ~targets:Infer
+                     ~targets_dir:dir
+                     run_action
+                     sandbox
+                 in
+                 Action_builder.With_targets.add action ~file_targets:[ diff.file2 ]
+                 |> Action_builder.With_targets.map_build ~f:(fun action ->
+                   Action_builder.map
+                     action
+                     ~f:(Action.Full.map ~f:(Action.with_stdout_to diff.file2))
+                   |> Simple_rules.interpret_and_add_locks ~expander t.locks))
+                >>= Super_context.add_rule_get_targets sctx ~dir ~mode ~loc
+              in
+              let action =
+                let open Action_builder.O in
+                let+ () = Action_builder.paths [ diff.file1; Path.build diff.file2 ] in
+                Action.Full.make (Action.Diff diff)
+              in
+              Memo.return action
+          in
+          Simple_rules.Alias_rules.add sctx ~loc ~aliases:[ alias ] action
+          >>> (Dep.alias alias
+               |> Action_builder.dep
+               |> Rules.Produce.Alias.add_deps runtest_alias)))
   in
-  Exe_rules.rules t.exes ~sctx ~dir ~scope ~expander ~dir_contents
+  Exe_rules.rules t.exes ~sctx ~scope ~expander ~dir_contents
 ;;

@@ -21,9 +21,7 @@ re-export `bar`. The package `bar` consists of a bytecode library, `bar.cma`.
 
 We now define a Dune project that will consume `foo`.
 
-  $ cat >dune-project <<EOF
-  > (lang dune 3.0)
-  > EOF
+  $ make_dune_project 3.0
 
   $ cat >dune <<EOF
   > (executable
@@ -48,9 +46,9 @@ However, the compilation without `(implicit_transitive_deps)` fails:
   > EOF
 
   $ OCAMLPATH=$(pwd)/_install dune exec ./main.exe
-  File "main.ml", line 1, characters 19-24:
+  File "main.ml", line 1, characters 19-22:
   1 | let () = print_int Bar.x; print_newline ()
-                         ^^^^^
+                         ^^^
   Error: Unbound module Bar
   [1]
 
@@ -95,7 +93,7 @@ using `(re_export)`.
 First we try with dune version 3.16 (it should not generate the `exports` field):
 
   $ VERSION=3.16 sh dune-project.gen >dune-project
-  $ dune build && dune install --libdir $(pwd)/_local
+  $ dune build && dune install --libdir $(pwd)/_local --prefix $(pwd)
   $ cat _local/foo/META
   description = ""
   requires = "bar"
@@ -107,7 +105,7 @@ First we try with dune version 3.16 (it should not generate the `exports` field)
 Now with dune version 3.17 (it should generate the `exports` field):
 
   $ VERSION=3.17 sh dune-project.gen >dune-project
-  $ dune build && dune install --libdir $(pwd)/_local
+  $ dune build && dune install --libdir $(pwd)/_local --prefix $(pwd)
   $ cat _local/foo/META
   description = ""
   requires = "bar"

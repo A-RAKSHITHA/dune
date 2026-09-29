@@ -10,9 +10,7 @@ the cache.
   > (cache-storage-mode copy)
   > EOF
 
-  $ cat > dune-project << EOF
-  > (lang dune 3.7)
-  > EOF
+  $ make_dune_project 3.7
 
   $ cat > dune << EOF
   > (rule
@@ -25,7 +23,7 @@ the cache.
 
 We build a simple file with the contents of "Hello World!".
 
-  $ dune build target_a --display=short
+  $ dune build target_a
 
 Now we remove it so that we are checking the size of the file rather than the
 link Dune created.

@@ -5,21 +5,12 @@ type t
 val make : int * int * int -> t
 val of_ocaml_config : Ocaml_config.t -> t
 
-(** Does this support [-no-keep-locs]? *)
-val supports_no_keep_locs : t -> bool
-
 (** Does this support [-opaque] for [.mli] files? *)
 val supports_opaque_for_mli : t -> bool
 
 (** Does it read the [.cmi] file of module alias even when [-no-alias-deps] is
     passed? *)
 val always_reads_alias_cmi : t -> bool
-
-(** Does this support ['color'] in [OCAMLPARAM]? *)
-val supports_color_in_ocamlparam : t -> bool
-
-(** Does this support [OCAML_COLOR]? *)
-val supports_ocaml_color : t -> bool
 
 (** Does this this support [-args0]? *)
 val supports_response_file : t -> bool
@@ -39,15 +30,11 @@ val ooi_supports_no_code : t -> bool
 (** Whether the language supports custom let operators *)
 val supports_let_syntax : t -> bool
 
+(** Whether the language supports anonymous structure opens *)
+val supports_generalized_open : t -> bool
+
 (** Does this support [-output-complete-exe]? *)
 val supports_output_complete_exe : t -> bool
-
-(** Whether the compiler supports options for splitting compilation at emit:
-    [-stop-after scheduling] [-save-ir-after scheduling] [-start-from emit] *)
-val supports_split_at_emit : t -> bool
-
-(** Whether the compiler supports -function-sections *)
-val supports_function_sections : t -> bool
 
 (** [-custom] or [-output-complete-exe] depending on the version of OCaml *)
 val custom_or_output_complete_exe : t -> string
@@ -77,7 +64,13 @@ val has_META_files : t -> bool
 (** Whether the compiler supports occurrences indexation *)
 val supports_bin_annot_occurrences : t -> bool
 
-(** Whether the compiler supports the -H flag *)
+(** Whether the compiler supports the [-H] flag *)
 val supports_hidden_includes : t -> bool
 
 val add_std_cxx_flag : t -> bool
+
+(* Whether the compiler supports OxCaml *)
+val supports_oxcaml : string -> bool
+
+(** Whether the compiler supports the [-cmi-file] flag *)
+val supports_cmi_file : t -> bool

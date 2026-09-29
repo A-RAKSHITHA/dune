@@ -1,15 +1,39 @@
+(** [Proc.restore_cwd_and_execve prog args ~env] runs [prog] with [args] in [env].
+
+  - [prog] is the program being run. It should be a filename in the current working
+    directory.
+
+  - [args] is a list of arguments to the program. Unlike in the system call [execve], the
+    first argument is not the program name. The first argument is the first argument
+    to the program. The program name is set to [prog] without the caller needing to.
+
+  - [env] is the environment in which the program is run. *)
 val restore_cwd_and_execve : string -> string list -> env:Env.t -> _
 
+(* CR-soon rgrinberg: rename to rusage *)
 module Resource_usage : sig
   type t =
-    { user_cpu_time : float (** Same as the "user" time reported by the "time" command *)
-    ; system_cpu_time : float (** Same as the "sys" time reported by the "time" command *)
+    { user_cpu_time : Time.Span.t
+      (** Same as the "user" time reported by the "time" command *)
+    ; system_cpu_time : Time.Span.t
+      (** Same as the "sys" time reported by the "time" command *)
+    ; maxrss : int
+    ; minflt : int
+    ; majflt : int
+    ; inblock : int
+    ; oublock : int
+    ; nvcsw : int
+    ; nivcsw : int
     }
+
+  val zero : t
+  val get_self : unit -> t option
 end
 
 module Times : sig
   type t =
-    { elapsed_time : float (** Same as the "real" time reported by the "time" command *)
+    { elapsed_time : Time.Span.t
+      (** Same as the "real" time reported by the "time" command *)
     ; resource_usage : Resource_usage.t option
     }
 end
@@ -18,14 +42,33 @@ module Process_info : sig
   type t =
     { pid : Pid.t
     ; status : Unix.process_status
-    ; end_time : float (** Time at which the process finished. *)
+    ; end_time : Time.t (** Time at which the process finished. *)
     ; resource_usage : Resource_usage.t option
     }
+end
+
+module Linux : sig
+  val read_pid_max : unit -> int option
+
+  module Process_tree : sig
+    type error
+
+    val pp_error : error -> _ Pp.t
+
+    (** [children_of pid] returns the direct children of [pid] by reading
+        /proc/<pid>/task/<tid>/children. *)
+    val children_of : Pid.t -> (Pid.Set.t, error) Result.t
+  end
 end
 
 type wait =
   | Any
   | Pid of Pid.t
 
-(** This function is not implemented on Windows *)
-val wait : wait -> Unix.wait_flag list -> Process_info.t
+(** On Windows, [Any] is not supported and successful results have no resource usage.
+
+   Returns [None] if there are no children. If [WNOHANG] is passed, also
+   returns [None] if none of the processes are finished yet.
+   When successful, returns information about the reaped process.
+ *)
+val wait : wait -> Unix.wait_flag list -> Process_info.t option

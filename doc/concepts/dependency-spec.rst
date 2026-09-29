@@ -23,16 +23,35 @@ Dependencies in ``dune`` files can be specified using one of the following:
 - ``(glob_files_rec <glob>)`` is the recursive version of
   ``(glob_files <glob>)``. See the :ref:`glob <glob>` for details.
 - ``(source_tree <dir>)`` depends on all source files in the subtree with root
-  ``<dir>``.
+  ``<dir>``. A source file is a file that exists in the source tree rather than
+  a target produced by Dune. Source files may still be raw data: for example,
+  files in :doc:`/reference/dune/data_only_dirs` directories are source files,
+  even though Dune does not interpret ``dune`` files in those directories.
+
+  Dune does not traverse directories excluded by the
+  :doc:`/reference/dune/dirs` stanza. In addition, files and directories whose
+  names begin with ``.`` are
+  ignored by ``source_tree`` by default; see :ref:`source-tree-hidden-files`.
 - ``(universe)`` depends on everything in the universe. This is for
   cases where dependencies are too hard to specify. Note that Dune
   will not be able to cache the result of actions that depend on the
   universe. In any case, this is only for dependencies in the
   :term:`installed world`. You must still specify all dependencies that come
   from the workspace.
-- ``(package <pkg>)`` depends on all files installed by ``<package>``, as well
-  as on the transitive package dependencies of ``<package>``. This can be used
-  to test a command against the files that will be installed.
+- ``(package <pkg>)`` builds the files installed by ``<package>`` and adds
+  them to the action's environment: bin entries on ``PATH``, libraries on
+  ``OCAMLPATH``, stublibs on ``CAML_LD_LIBRARY_PATH``, and so on. For packages
+  built by Dune's package management, Dune tracks their build-tree installation
+  directories and those of their full lock-directory dependency closure.
+  This applies both to explicitly requested packages and to managed providers
+  reached through library dependencies.
+
+  For workspace packages and packages installed outside Dune's package
+  management, Dune also follows the transitive dependencies of their libraries
+  and includes the installed files from their owning packages. Unrelated
+  libraries in these additional packages do not become new roots for expansion.
+  This library-based expansion does not follow dependencies declared only in
+  package metadata.
 - ``(env_var <var>)`` depends on the value of the environment variable ``<var>``.
   If this variable becomes set, becomes unset, or changes value, the target
   will be rebuilt.

@@ -1,5 +1,4 @@
-open Dune_config
-module Display = Dune_engine.Display
+open Stdune
 
 type t =
   | Simple of
@@ -7,6 +6,15 @@ type t =
       ; verbosity : Display.t
       }
   | Tui
+
+let equal a b =
+  match a, b with
+  | ( Simple { status_line = a_status_line; verbosity = a_verbosity }
+    , Simple { status_line = b_status_line; verbosity = b_verbosity } ) ->
+    Bool.equal a_status_line b_status_line && Display.equal a_verbosity b_verbosity
+  | Tui, Tui -> true
+  | _, _ -> false
+;;
 
 let progress = Simple { status_line = true; verbosity = Quiet }
 let verbose = Simple { status_line = true; verbosity = Verbose }
@@ -21,29 +29,41 @@ let all =
   [ "progress", progress; "verbose", verbose; "short", short; "quiet", quiet; "tui", Tui ]
 ;;
 
-let to_dyn : t -> Dyn.t = function
-  | Simple { verbosity; status_line } ->
-    Variant
-      ( "Simple"
-      , [ Record
-            [ "verbosity", Display.to_dyn verbosity; "status_line", Dyn.Bool status_line ]
-        ] )
-  | Tui -> Variant ("Tui", [])
+let simple_repr =
+  Repr.record
+    "simple-display"
+    [ Repr.field "verbosity" (Repr.abstract Display.to_dyn) ~get:fst
+    ; Repr.field "status_line" Repr.bool ~get:snd
+    ]
 ;;
+
+let repr =
+  Repr.variant
+    "display"
+    [ Repr.case "Simple" simple_repr ~proj:(function
+        | Simple { verbosity; status_line } -> Some (verbosity, status_line)
+        | Tui -> None)
+    ; Repr.case0 "Tui" ~test:(function
+        | Tui -> true
+        | Simple _ -> false)
+    ]
+;;
+
+let to_dyn = Repr.to_dyn repr
 
 let console_backend = function
   | Tui -> Dune_tui.backend ()
   | Simple { status_line; _ } ->
     (match status_line with
      | false ->
-       Dune_util.Terminal_signals.unblock ();
-       Dune_console.Backend.dumb
+       Terminal_signals.unblock ();
+       Console.Backend.dumb
      | true ->
        (match Config.(get threaded_console) with
         | `Enabled ->
           Dune_threaded_console.progress
             ~frames_per_second:(Dune_util.frames_per_second ())
         | `Disabled ->
-          Dune_util.Terminal_signals.unblock ();
-          Dune_console.Backend.progress))
+          Terminal_signals.unblock ();
+          Console.Backend.progress))
 ;;

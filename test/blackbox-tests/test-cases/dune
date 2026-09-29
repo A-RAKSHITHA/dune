@@ -2,9 +2,18 @@
  (_
   (env-vars
    (DUNE_CONFIG__BACKGROUND_SANDBOXES disabled)
-   (DUNE_CONFIG__BACKGROUND_DIGESTS disabled))
+   (DUNE_CONFIG__BACKGROUND_DIGESTS disabled)
+   (DUNE_CONFIG__FILE_EVENT_DEBOUNCE 0)
+   (DUNE_JOBS 1)
+   ;; We set ocaml to always be colored since it changes the output of
+   ;; ocamlc error messages. See https://github.com/ocaml/ocaml/issues/14144
+   (OCAML_COLOR always)
+   ;; Cmdliner 2.0 uses colors which don't render in our tests.
+   ;; This option disables them in favour of quotes.
+   (NO_COLOR 1))
   (binaries
    ../utils/dune_cmd.exe
+   ../utils/action_trace.exe
    ../utils/dunepp.exe
    ../utils/melc_stdlib_prefix.exe
    ../utils/refmt.exe
@@ -13,164 +22,132 @@
    ../utils/ocaml_index.exe)))
 
 (cram
- (applies_to pp-cwd)
+ (applies_to pp-cwd.t)
  (deps %{bin:dunepp}))
 
 (cram
  (applies_to :whole_subtree)
+ (shell bash)
  (deps
+  (env_var OCAML_COLOR)
+  (env_var NO_COLOR)
+  (env_var DUNE_JOBS)
+  ../dune.jq
+  %{bin:jq}
   %{bin:dune_cmd}
-  (package dune)))
-
-(subdir
- jsoo
- (cram
-  (deps %{bin:node})
-  (alias runtest-js)))
+  %{bin:action_trace}
+  (package dune))
+ ;; We don't allow conflict markers in tests
+ (conflict_markers error)
+ (setup_scripts ../setup-script.sh)
+ ;; Tests shouldn't take longer than 60s
+ (timeout 60))
 
 (cram
- (applies_to windows-diff github6644)
+ (applies_to windows-diff.t staged-pps-with-sandboxing-gh6644.t)
  (alias runtest-windows))
 
-; DISABLED TESTS
+(cram
+ (applies_to empty-meta-version-gh9176.t)
+ (deps
+  (package dune-build-info)))
 
-(subdir
- env
- (cram
-  (applies_to envs-and-contexts)
-  (enabled_if false)))
+;; DISABLED TESTS
+
+;; This test copies a large file, which is too slow to be enabled all the time.
+;; The source file is actually sparse, but sendfile seems to do a full copy
+;; nevertheless.
 
 (cram
- (applies_to fdo)
+ (applies_to sendfile-large-file.t)
  (enabled_if false))
 
-; This test copies a large file, which is too slow to be enabled all the time.
-; The source file is actually sparse, but sendfile seems to do a full copy
-; nevertheless.
+;; This test is flaky
 
 (cram
- (applies_to sendfile-large-file)
+ (applies_to tests-locks.t)
  (enabled_if false))
 
-; This test is flaky
+;; The following test is flaky due to platform sensitivity
+;; see https://github.com/ocaml/dune/issues/3744
+
+;; CONDITIONALLY DISABLED TESTS
 
 (cram
- (applies_to tests-locks)
- (enabled_if false))
-
-; The following test is flaky due to platform sensitivity
-; see https://github.com/ocaml/dune/issues/3744
-
-(subdir
- cram
- (cram
-  (applies_to error)
-  (enabled_if false)))
-
-(cram
- (applies_to sandboxing)
- (deps %{bin:file}))
-
-; CONDITIONALLY DISABLED TESTS
-
-(cram
- (applies_to signal-exit-code)
+ (applies_to signal-exit-code.t)
  (enabled_if
   (and
    (<> %{env:CI=false} true) ;; in github action, CI=true
    (= %{system} macosx))))
 
 (cram
- (applies_to github764)
+ (applies_to symlink-scan-cycle-github764.t)
  (enabled_if
   (<> %{ocaml-config:system} win)))
 
 (cram
- (applies_to output-obj)
+ (applies_to rpc-batch-idle-client.t)
+ (enabled_if
+  (<> %{ocaml-config:system} win)))
+
+(cram
+ (applies_to output-obj.t)
  (enabled_if
   (and
    (<> %{ocaml-config:system} macosx)
    (<> %{ocaml-config:system} win))))
 
-(subdir
- cram
- ;  mac has a different sh error message
- (cram
-  (applies_to error)
-  (enabled_if
-   (<> "macosx" %{ocaml-config:system}))))
-
 (cram
- (applies_to github3766)
- (enabled_if
-  (>= %{ocaml_version} 4.12.0))
- (deps ./github3766.t/test.exe))
-
-(subdir
- github3766.t
- (executable
-  (libraries stdune spawn unix)
-  (name test)))
-
-(subdir
- cram
- (cram
-  (applies_to hg-access)
-  (enabled_if %{bin-available:hg})))
-
-(cram
- (applies_to patch-back-source-tree)
- (enabled_if
-  (<> %{system} macosx)))
-
-(cram
- (applies_to link-time-transitive-deps dune-build-info-subdir)
- (deps
-  (package dune-build-info)))
-
-(cram
- (applies_to version-corruption)
+ (applies_to version-corruption.t)
  (deps %{bin:git} %{bin:chmod})
  (enabled_if
-  ; code signing moves placeholders in the binary
+  ;; code signing moves placeholders in the binary
   (or
    (<> %{system} macosx)
    (<> %{architecture} arm64))))
 
 (cram
- (applies_to corrupt-persistent)
+ (applies_to corrupt-persistent.t)
  (deps %{bin:truncate}))
 
 (cram
- (applies_to github8041)
+ (applies_to repository-lint.t)
+ (enabled_if %{bin-available:rg})
+ (deps
+  %{bin:rg}
+  (source_tree %{project_root})))
+
+(cram
+ (applies_to sendfile-fallback-copy-gh8041.t)
  (enabled_if
   (= %{system} linux))
  (deps %{bin:strace} %{bin:head}))
 
 (cram
- (applies_to reason)
+ (applies_to reason.t)
  (deps %{bin:refmt}))
 
 (cram
- (applies_to github4194)
+ (applies_to oversize-action-output-gh4194.t)
  (enabled_if
   (not %{arch_sixtyfour}))
  (deps %{bin:ocaml}))
 
 (cram
- (applies_to interfere-sandbox-deletion)
- (deps %{bin:bash}))
-
-(cram
- (applies_to sandboxing-stale-directory-target)
- (deps %{bin:bash}))
-
-(cram
- (applies_to hidden-deps-supported)
+ (applies_to hidden-deps-supported.t)
  (enabled_if
   (>= %{ocaml_version} 5.2.0)))
 
 (cram
- (applies_to hidden-deps-unsupported)
+ (applies_to hidden-deps-unsupported.t)
  (enabled_if
   (< %{ocaml_version} 5.2.0)))
+
+;; Skip on macOS: dune hangs on SIGINT due to a known macOS sigwait issue
+;; (see signal_watcher.ml). The SIGTERM-before-SIGKILL logic is
+;; platform-independent; this test just cannot exercise it on macOS.
+
+(cram
+ (applies_to graceful-shutdown.t)
+ (enabled_if
+  (<> %{system} macosx)))

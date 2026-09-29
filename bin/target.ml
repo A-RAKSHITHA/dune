@@ -34,7 +34,6 @@ module All_targets = struct
     end)
 end
 
-module Source_tree = Dune_rules.Source_tree
 module Source_tree_map_reduce = Source_tree.Dir.Make_map_reduce (Memo) (All_targets)
 
 let all_direct_targets dir =
@@ -45,7 +44,7 @@ let all_direct_targets dir =
     | Some dir -> Source_tree.nearest_dir dir
   and* contexts = Memo.Lazy.force (Build_config.get ()).contexts in
   Context_name.Map.values contexts
-  |> List.filter_map ~f:(fun (ctx, (ctx_type : Build_config.Gen_rules.Context_type.t)) ->
+  |> List.filter_map ~f:(fun (ctx, (ctx_type : Build_config.Context_type.t)) ->
     match ctx_type with
     | Empty -> None
     | With_sources -> Some ctx)
@@ -111,9 +110,24 @@ let resolve_path path ~(setup : Dune_rules.Main.build_system)
   =
   let open Memo.O in
   let checked = Util.check_path setup.contexts path in
-  let can't_build path =
-    let+ hint = target_hint setup path in
-    Error hint
+  let can't_build ?src path =
+    let open Memo.O in
+    let+ target_hint = target_hint setup path
+    and+ excluded_hint =
+      match src with
+      | None -> Memo.return []
+      | Some src ->
+        Source_tree.find_excluded_ancestor src
+        >>| (function
+         | None -> []
+         | Some (excluded, loc) ->
+           [ Pp.textf
+               "directory %s exists on disk but is excluded by a (dirs ...) stanza at %s"
+               (Path.Source.to_string_maybe_quoted excluded)
+               (Loc.to_file_colon_line loc)
+           ])
+    in
+    Error (excluded_hint @ target_hint)
   in
   let as_source_dir src =
     Source_tree.find_dir src
@@ -150,7 +164,7 @@ let resolve_path path ~(setup : Dune_rules.Main.build_system)
        as_source_dir src
        >>= (function
         | Some res -> Memo.return (Ok res)
-        | None -> can't_build path)
+        | None -> can't_build ~src path)
      | l -> Memo.return (Ok l))
   | In_build_dir (_ctx, src) ->
     matching_target ()
@@ -160,7 +174,7 @@ let resolve_path path ~(setup : Dune_rules.Main.build_system)
        as_source_dir src
        >>= (function
         | Some res -> Memo.return (Ok res)
-        | None -> can't_build path))
+        | None -> can't_build ~src path))
   | In_private_context _ | In_install_dir _ ->
     matching_target ()
     >>= (function
@@ -221,34 +235,35 @@ let resolve_target root ~setup target =
   | dep -> Action_builder.return (Error (dep, []))
 ;;
 
-let resolve_targets
-      root
-      (config : Dune_config.t)
-      (setup : Dune_rules.Main.build_system)
-      user_targets
-  =
+let resolve_targets root (setup : Dune_rules.Main.build_system) user_targets =
   match user_targets with
   | [] -> Action_builder.return []
   | _ ->
     let+ targets = Action_builder.List.map user_targets ~f:(resolve_target root ~setup) in
-    (match config.display with
-     | Simple { verbosity = Verbose; _ } ->
-       Log.info
-         [ Pp.text "Actual targets:"
-         ; Pp.enumerate
-             (List.concat_map targets ~f:(function
-                | Ok targets -> targets
-                | Error _ -> []))
-             ~f:(function
-               | File p -> Pp.verbatim (Path.to_string_maybe_quoted p)
-               | Alias a -> Alias.pp a)
-         ]
-     | _ -> ());
+    Dune_trace.emit Build (fun () ->
+      let files, aliases =
+        List.concat_map targets ~f:(function
+          | Ok targets -> targets
+          | Error _ -> [])
+        |> List.partition_map ~f:(function
+          | Request.File p -> Left p
+          | Alias { name; recursive; dir; contexts } ->
+            Right
+              ({ name = Dune_engine.Alias.Name.to_string name
+               ; recursive
+               ; dir
+               ; contexts =
+                   List.map contexts ~f:(fun ctx ->
+                     Dune_rules.Context.name ctx |> Context_name.to_string)
+               }
+               : Dune_trace.Event.alias))
+      in
+      Dune_trace.Event.resolve_targets files aliases);
     targets
 ;;
 
-let resolve_targets_exn root config setup user_targets =
-  resolve_targets root config setup user_targets
+let resolve_targets_exn root setup user_targets =
+  resolve_targets root setup user_targets
   >>| List.concat_map ~f:(function
     | Error (dep, hints) ->
       User_error.raise
@@ -257,9 +272,9 @@ let resolve_targets_exn root config setup user_targets =
     | Ok targets -> targets)
 ;;
 
-let interpret_targets root config setup user_targets =
+let interpret_targets root setup user_targets =
   let* () = Action_builder.return () in
-  resolve_targets_exn root config setup user_targets >>= request
+  resolve_targets_exn root setup user_targets >>= request
 ;;
 
 type target_type = Target_type.t =

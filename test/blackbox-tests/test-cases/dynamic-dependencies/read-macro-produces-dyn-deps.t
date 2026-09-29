@@ -1,8 +1,6 @@
 Tests for dynamic dependencies computed from the `%{read:...}` family of macros
 
-  $ cat > dune-project <<EOF
-  > (lang dune 3.0)
-  > EOF
+  $ make_dune_project 3.0
 
 Define rules have dynamic file dependencies
 
@@ -37,14 +35,9 @@ Now we define a rule that reads `deps.d` to figure out what to build.
 
 Building `./output` should now produce a file with contents "depA depB"
 
-  $ dune build ./output --display=short
-            sh deps.d
-            sh depA
-            sh depB
-            sh output
+  $ dune build ./output
   contentsA
   contentsB
-            sh output
 
   $ cat ./_build/default/output
-  depA depB
+  ./depA ./depB

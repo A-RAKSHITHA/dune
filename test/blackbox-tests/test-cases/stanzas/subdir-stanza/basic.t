@@ -1,6 +1,6 @@
 (subdir ..) allows us to interpret stanzas in a sub directory
 
-  $ echo "(lang dune 2.5)" > dune-project
+  $ make_dune_project 2.5
   $ cat >dune <<EOF
   > (rule (with-stdout-to foo.txt (echo "bar")))
   > (subdir bar
@@ -38,14 +38,14 @@ dir.
   File "bar/dune", line 1, characters 16-19:
   1 | (data_only_dirs foo)
                       ^^^
-  Error: This stanza stanza was already specified at:
+  Error: This stanza was already specified at:
   dune:1
   [1]
 
 Overriding dune files in the sub directory is possible:
 
   $ mkdir override; cd override
-  $ echo "(lang dune 2.5)" > dune-project
+  $ make_dune_project 2.5
   $ cat >dune <<EOF
   > (data_only_dirs shadow)
   > (subdir shadow (rule (with-stdout-to bar (echo shadow))))
@@ -60,7 +60,7 @@ Overriding dune files in the sub directory is possible:
 In conjunction with dune generated files:
 
   $ mkdir dune-syntax; cd dune-syntax
-  $ echo "(lang dune 2.5)" > dune-project
+  $ make_dune_project 2.5
   $ cat >dune <<EOF
   > (subdir sub (rule (with-stdout-to fromparent (echo parent))))
   > EOF
@@ -76,9 +76,7 @@ In conjunction with dune generated files:
 subdir stanzas can also appear in included files
 
   $ mkdir -p include/subdir; cd include
-  $ cat >dune-project <<EOF
-  > (lang dune 2.5)
-  > EOF
+  $ make_dune_project 2.5
   $ cat >dune <<EOF
   > (include dune.inc)
   > EOF
@@ -96,9 +94,7 @@ subdir stanzas can also appear in included files
   since version 2.7 of the dune language. Please update your dune-project file
   to have (lang dune 2.7).
   [1]
-  $ cat >dune-project <<EOF
-  > (lang dune 2.7)
-  > EOF
+  $ make_dune_project 2.7
   $ dune build --root . subdir/hello.txt
   $ cat _build/default/subdir/hello.txt
   Hello from subdir
@@ -106,9 +102,7 @@ subdir stanzas can also appear in included files
 Include stanzas within subdir stanzas
 
   $ mkdir -p subdir-include/a; cd subdir-include
-  $ cat >dune-project <<EOF
-  > (lang dune 2.5)
-  > EOF
+  $ make_dune_project 2.5
   $ cat >dune <<EOF
   > (subdir a (include dune.inc))
   > EOF
@@ -120,7 +114,7 @@ Include stanzas within subdir stanzas
   Hello!
 
 
-  $ echo "(lang dune 2.5)" > dune-project
+  $ make_dune_project 2.5
   $ cat >dune <<EOF
   > (rule (with-stdout-to foo.txt (echo "bar")))
   > (subdir /absolute/path/to/bar

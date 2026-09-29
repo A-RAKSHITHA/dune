@@ -1,7 +1,20 @@
 include Stdune
 include Dune_vcs
-module Console = Dune_console
+include Dune_scheduler
+module Console = Console
 module Digest = Dune_digest
+
+include struct
+  open Source
+  module Source_dir_status = Source_dir_status
+  module Include_stanza = Include_stanza
+  module Source_tree = Source_tree
+  module Cram_test = Cram_test
+  module Only_packages = Only_packages
+  module Workspace = Workspace
+  module Opam_switch = Opam_switch
+  module Blang_expand = Blang_expand
+end
 
 include struct
   open Dune_findlib.Findlib
@@ -20,11 +33,9 @@ include struct
   module type Stringlike = Stringlike
 end
 
-include Dune_config
-include Dune_config_file
-
 include struct
   open Dune_engine
+  module Corrections = Corrections
   module Dir_set = Dir_set
   module Rule = Rule
   module Rules = Rules
@@ -39,16 +50,28 @@ include struct
   module Sandbox_config = Sandbox_config
   module Sandbox_mode = Sandbox_mode
   module Action = Action
-  module Compound_user_error = Compound_user_error
-  module Fs_cache = Fs_cache
+  module Action_ext = Action_ext
+  module Action_plugin = Action_plugin
   module Process = Process
   module Execution_parameters = Execution_parameters
   module Build_context = Build_context
-  module Targets = Targets
   module Utils = Utils
   module Load_rules = Load_rules
   module Response_file = Response_file
   module Subdir_set = Subdir_set
+  module Fs = Fs
+end
+
+module Compound_user_error = struct
+  include Dune_rpc.Private.Compound_user_error
+
+  let duplicate ~main_loc ~previous_loc main_message =
+    let main = User_message.make ~loc:main_loc [ main_message ] in
+    let related =
+      [ User_message.make ~loc:previous_loc [ Pp.text "Already defined here" ] ]
+    in
+    [ make ~main ~related ]
+  ;;
 end
 
 include struct
@@ -60,7 +83,6 @@ include struct
   module Version = Version
 end
 
-module Re = Dune_re
 module Syntax = Dune_sexp.Syntax
 
 include struct
@@ -101,7 +123,28 @@ include struct
   module Package_constraint = Package_constraint
   module Dune_project_name = Dune_project_name
   module Package = Package
+  module Compilation_mode = Compilation_mode
   module Dialect = Dialect
+  module Lib_mode = Lib_mode
+  module Module_name = Module_name
+  module Module_reference = Module_reference
+  module Preprocess = Preprocess
+  module Dune_project = Dune_project
+  module File_binding = File_binding
+  module Foreign_language = Foreign_language
+  module Rocq_env = Rocq_env
+  module Menhir_env = Menhir_env
+  module Dune_env = Dune_env
+  module Js_of_ocaml = Js_of_ocaml
+  module Copy_files = Copy_files
+  module Enabled_if = Enabled_if
+  module Rule_mode = Rule_mode
+  module Rule_mode_decoder = Rule_mode_decoder
+  module Alias_conf = Alias_conf
+  module Stanza_pkg = Stanza_pkg
+  module Include_subdirs = Include_subdirs
+  module Mode_conf = Mode_conf
+  module Modules_settings = Modules_settings
 end
 
 include Dune_engine.No_io
@@ -119,6 +162,12 @@ module Build_config = struct
       =
       let rules = { Rules.build_dir_only_sub_dirs; directory_targets; rules } in
       Gen_rules_result.rules_here rules
+    ;;
+
+    let make_empty ~dir subdirs =
+      make
+        ~build_dir_only_sub_dirs:(Build_only_sub_dirs.singleton ~dir subdirs)
+        (Memo.return Dune_engine.Rules.empty)
     ;;
 
     include Gen_rules_result

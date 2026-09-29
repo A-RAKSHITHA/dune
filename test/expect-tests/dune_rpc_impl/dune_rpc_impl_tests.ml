@@ -1,6 +1,5 @@
 open Stdune
-module Dune_rpc = Dune_rpc_private
-module Re = Dune_re
+module Dune_rpc = Dune_rpc.Private
 
 let () =
   Stdune.Path.set_root (Stdune.Path.External.of_filename_relative_to_initial_cwd ".");
@@ -8,19 +7,17 @@ let () =
 ;;
 
 let test ~dir ~f main =
-  let description =
-    `Diagnostic (Dune_engine.Compound_user_error.make ~main ~related:[])
-  in
-  Dune_console.printf "---- Original ----";
+  let description = `Diagnostic (Dune_rpc.Compound_user_error.make ~main ~related:[]) in
+  Console.printf "---- Original ----";
   f main;
-  Dune_console.printf "------- RPC ------";
+  Console.printf "------- RPC ------";
   Dune_engine.Build_system_error.For_tests.make ~description ~dir ~promotion:None ()
   |> Dune_rpc_impl.Diagnostics.For_tests.diagnostic_of_error
-  |> Dune_rpc_private.Diagnostic.to_user_message
+  |> Dune_rpc.Diagnostic.to_user_message
   |> f
 ;;
 
-let test_plain ~dir main = test main ~dir ~f:Dune_console.print_user_message
+let test_plain ~dir main = test main ~dir ~f:Console.print_user_message
 
 let test_dyn ~dir main =
   test main ~dir ~f:(fun x ->
@@ -57,7 +54,7 @@ let%expect_test "serialize and deserialize error message" =
             (0,
              Concat
                (Break (("", 1, ""), ("", 0, "")),
-                [ Seq (Tag (Error, Verbatim "Error"), Char :)
+                [ Seq (Tag (Error, Verbatim "Error"), Char ':')
                 ; Verbatim "Oh no!"
                 ])),
           Break (("", 0, ""), ("", 0, ""))))
@@ -73,10 +70,11 @@ let%expect_test "serialize and deserialize error message" =
                   (0,
                    Concat
                      (Break (("", 1, ""), ("", 0, "")),
-                      [ Seq (Tag (Error, Verbatim "Error"), Char :)
+                      [ Seq (Tag (Error, Verbatim "Error"), Char ':')
                       ; Verbatim "Oh no!"
                       ])))),
-          Break (("", 0, ""), ("", 0, "")))) |}]
+          Break (("", 0, ""), ("", 0, ""))))
+    |}]
 ;;
 
 let%expect_test "serialize and deserialize error message with location" =
@@ -106,7 +104,7 @@ let%expect_test "serialize and deserialize error message with location" =
                  (0,
                   Concat
                     (Break (("", 1, ""), ("", 0, "")),
-                     [ Seq (Tag (Error, Verbatim "Error"), Char :)
+                     [ Seq (Tag (Error, Verbatim "Error"), Char ':')
                      ; Verbatim "An error with location!"
                      ])),
                Break (("", 0, ""), ("", 0, "")))
@@ -129,15 +127,16 @@ let%expect_test "serialize and deserialize error message with location" =
                        (0,
                         Concat
                           (Break (("", 1, ""), ("", 0, "")),
-                           [ Seq (Tag (Error, Verbatim "Error"), Char :)
+                           [ Seq (Tag (Error, Verbatim "Error"), Char ':')
                            ; Verbatim "An error with location!"
                            ])))),
                Break (("", 0, ""), ("", 0, "")))
-          ])) |}]
+          ]))
+    |}]
 ;;
 
 let%expect_test "serialize and deserialize error with location excerpt and hint" =
-  Io.String_path.write_file "foo.ml" "let x = 1\nlet y = 2\nlet z = 3\n";
+  Io.String_path.write_file_exn "foo.ml" "let x = 1\nlet y = 2\nlet z = 3\n";
   let loc = Stdune.Loc.of_pos ("foo.ml", 1, 2, 3) in
   let dir = Some (Stdune.Path.of_string ".") in
   let hints = [ Pp.verbatim "Hint 1"; Pp.verbatim "Hint 2" ] in
@@ -175,7 +174,7 @@ let%expect_test "serialize and deserialize error with location excerpt and hint"
                  (0,
                   Concat
                     (Break (("", 1, ""), ("", 0, "")),
-                     [ Seq (Tag (Error, Verbatim "Error"), Char :)
+                     [ Seq (Tag (Error, Verbatim "Error"), Char ':')
                      ; Verbatim "An error with location!"
                      ])),
                Break (("", 0, ""), ("", 0, "")))
@@ -222,7 +221,7 @@ let%expect_test "serialize and deserialize error with location excerpt and hint"
                             (0,
                              Concat
                                (Break (("", 1, ""), ("", 0, "")),
-                                [ Seq (Tag (Error, Verbatim "Error"), Char :)
+                                [ Seq (Tag (Error, Verbatim "Error"), Char ':')
                                 ; Verbatim "An error with location!"
                                 ]))
                         ; Box
@@ -241,5 +240,6 @@ let%expect_test "serialize and deserialize error with location excerpt and hint"
                                 Verbatim "Hint 2"))
                         ]))),
                Break (("", 0, ""), ("", 0, "")))
-          ])) |}]
+          ]))
+    |}]
 ;;

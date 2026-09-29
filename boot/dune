@@ -1,15 +1,46 @@
 (rule
- (mode promote)
+ (targets libs.ml.gen)
+ (deps
+  ../bin/main.exe
+  ../dune-file
+  ../dune-project
+  (source_tree ../bin)
+  (source_tree ../src)
+  (source_tree ../otherlibs)
+  (source_tree ../vendor))
  (action
-  (copy ../bin/bootstrap-info libs.ml)))
+  (with-stdout-to
+   libs.ml.gen
+   (chdir
+    %{project_root}
+    (progn
+     ;; ugly renaming needed to prevent the inner dune being confused
+     ;; that it's already built
+     (bash "mv bin/main.exe bin/foo.exe")
+     (no-infer
+      (run
+       ./bin/foo.exe
+       internal
+       bootstrap-info
+       --no-print-directory
+       --root
+       .
+       --profile
+       dev)))))))
 
 (alias
  (name runtest)
- (deps libs.ml))
+ (deps
+  (alias check)))
 
-(alias
- (name check)
- (deps libs.ml))
+(rule
+ (alias check)
+ (action
+  (diff libs.ml libs.ml.gen)))
+
+(ocamllex
+ (modules pps)
+ (flags -ml))
 
 (executable
  (name duneboot)
@@ -26,9 +57,3 @@
 (executable
  (name bootstrap)
  (modules bootstrap))
-
-;; For unused value warnings. We don't write a plain empty
-;; duneboot.mli to simplify ../bootstrap.ml
-
-(rule
- (with-stdout-to duneboot.mli (progn)))

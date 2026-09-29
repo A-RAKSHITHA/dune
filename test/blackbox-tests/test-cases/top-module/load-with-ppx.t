@@ -1,8 +1,6 @@
 Load a module that requires ppx
 
-  $ cat >dune-project <<EOF
-  > (lang dune 3.3)
-  > EOF
+  $ make_dune_project 3.3
 
   $ cat >dune <<EOF
   > (library
@@ -25,9 +23,9 @@ Load a module that requires ppx
   $ cat >foo.ml <<EOF
   > let () = ()
   > EOF
-  $ dune ocaml top-module foo.ml
-  #directory "$TESTCASE_ROOT/_build/default/.topmod/foo.ml";;
-  #load "$TESTCASE_ROOT/_build/default/.topmod/foo.ml/foo.cmo";;
-  #ppx "$TESTCASE_ROOT/_build/default/.ppx/d464a1bb671660981248d354c1722d5f/ppx.exe --as-ppx --cookie 'library-name=\"foo\"'";;
+  $ dune ocaml top-module foo.ml | censor
+  #directory "$PWD/_build/default/.topmod/foo.ml";;
+  #load "$PWD/_build/default/.topmod/foo.ml/foo.cmo";;
+  #ppx "$PWD/_build/default/.ppx/$DIGEST/ppx.exe --as-ppx --cookie 'library-name=\"foo\"'";;
   $ basename $(ls _build/default/.ppx/*/*.exe)
   ppx.exe

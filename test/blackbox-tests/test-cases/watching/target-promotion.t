@@ -1,19 +1,9 @@
 Test target promotion in file-watching mode.
 
-  $ . ./helpers.sh
+  $ export DUNE_TRACE="cache"
 
   $ echo '(lang dune 3.0)' > dune-project
-  $ cat > dune <<EOF
-  > (rule
-  >  (mode promote)
-  >  (deps original)
-  >  (target promoted)
-  >  (action (copy %{deps} %{target})))
-  > (rule
-  >  (deps promoted)
-  >  (target result)
-  >  (action (system "cat promoted promoted > result")))
-  > EOF
+  $ write_target_promotion_rules promote
   $ echo hi > original
 
   $ start_dune
@@ -60,22 +50,19 @@ Now try replacing its content.
   bye
 
 Now switch the mode to standard. Dune reports an error about multiple rules for
-[_build/default/promoted], as expected (see the error at the end of the test).
+[_build/default/promoted], as expected.
 
-  $ cat > dune <<EOF
-  > (rule
-  >  (mode standard)
-  >  (deps original)
-  >  (target promoted)
-  >  (action (copy %{deps} %{target})))
-  > (rule
-  >  (deps promoted)
-  >  (target result)
-  >  (action (system "cat promoted promoted > result")))
-  > EOF
+  $ write_target_promotion_rules standard
 
   $ build result
   Failure
+  [1]
+  $ wait_for_line_with_timeout .#dune-output "Hint: rm -f promoted" 200
+  $ grep -A3 "Error: Multiple rules generated for _build/default/promoted:" .#dune-output
+  Error: Multiple rules generated for _build/default/promoted:
+  - dune:1
+  - file present in source tree
+  Hint: rm -f promoted
 
 We use the hint and it starts to work.
 
@@ -93,17 +80,7 @@ We use the hint and it starts to work.
 
 Now use [fallback] to override the rule that generates [promoted].
 
-  $ cat > dune <<EOF
-  > (rule
-  >  (mode fallback)
-  >  (deps original)
-  >  (target promoted)
-  >  (action (copy %{deps} %{target})))
-  > (rule
-  >  (deps promoted)
-  >  (target result)
-  >  (action (system "cat promoted promoted > result")))
-  > EOF
+  $ write_target_promotion_rules fallback
 
 At first, we don't have the source, so the rule is used.
 
@@ -133,50 +110,40 @@ Now we create the source file and it overrides the rule.
 
 We're done.
 
-  $ stop_dune
-  Success, waiting for filesystem changes...
-  Success, waiting for filesystem changes...
-  Success, waiting for filesystem changes...
-  Success, waiting for filesystem changes...
-  Error: Multiple rules generated for _build/default/promoted:
-  - dune:1
-  - file present in source tree
-  Hint: rm -f promoted
-  Had 1 error, waiting for filesystem changes...
-  Success, waiting for filesystem changes...
-  Success, waiting for filesystem changes...
-  Success, waiting for filesystem changes...
+  $ stop_dune_quiet
 
 Now test file-system events generated during target promotion.
 
-  $ cat > dune <<EOF
-  > (rule
-  >  (mode promote)
-  >  (deps original)
-  >  (target promoted)
-  >  (action (copy %{deps} %{target})))
-  > (rule
-  >  (deps promoted)
-  >  (target result)
-  >  (action (system "cat promoted promoted > result")))
-  > EOF
+  $ write_target_promotion_rules promote
 
   $ cat promoted
   hi
-  $ start_dune --debug-cache=fs
+  $ start_dune
   $ build result
   Success
   $ cat promoted
   bye
 
-  $ stop_dune > .#debug-output
+  $ stop_dune > /dev/null
 
 Show that Dune ignores the initial "dune-workspace" events (injected by Dune).
 
-  $ cat .#debug-output | grep dune-workspace
-  Updating dir_contents cache for "dune-workspace": Skipped
-  Updating file_digest cache for "dune-workspace": Skipped
-  Updating path_stat cache for "dune-workspace": Updated { changed = false }
+  $ dune trace cat | jq_dune 'fsUpdateWithPath("dune-workspace")'
+  {
+    "cache_type": "dir_contents",
+    "path": "dune-workspace",
+    "result": "skipped"
+  }
+  {
+    "cache_type": "file_digest",
+    "path": "dune-workspace",
+    "result": "skipped"
+  }
+  {
+    "cache_type": "path_stat",
+    "path": "dune-workspace",
+    "result": "unchanged"
+  }
 
 Show that Dune ignores "promoted" events. Events for ".#promoted.dune-temp" are
 filtered out by Dune's file watcher and don't show up here. The [path_digest]
@@ -184,17 +151,41 @@ event for [promoted] is more interesting: the file's content did change from "hi
 to "bye" but Dune subscribed to it *after* making the promotion, precisely to
 avoid unnecessarily restarting after receiving the event that it caused itself.
 
-  $ cat .#debug-output | grep promoted
-  Updating dir_contents cache for "promoted": Skipped
-  Updating file_digest cache for "promoted": Updated { changed = false }
-  Updating path_stat cache for "promoted": Skipped
+  $ dune trace cat | jq_dune 'fsUpdateWithPath("promoted")'
+  {
+    "cache_type": "dir_contents",
+    "path": "promoted",
+    "result": "skipped"
+  }
+  {
+    "cache_type": "file_digest",
+    "path": "promoted",
+    "result": "unchanged"
+  }
+  {
+    "cache_type": "path_stat",
+    "path": "promoted",
+    "result": "skipped"
+  }
 
 Show that Dune ignores events for the . directory: [dir_contents] didn't change
 because [promoted] existed before running the build. Also, the subset of fields
 of [path_stat] that matter to Dune didn't change either (the [mtime] field did
 change but [fs_memo] does not provide a way to subscribe to it).
 
-  $ cat .#debug-output | grep '"."'
-  Updating dir_contents cache for ".": Updated { changed = false }
-  Updating file_digest cache for ".": Skipped
-  Updating path_stat cache for ".": Updated { changed = false }
+  $ dune trace cat | jq_dune 'fsUpdateWithPath(".")'
+  {
+    "cache_type": "dir_contents",
+    "path": ".",
+    "result": "unchanged"
+  }
+  {
+    "cache_type": "file_digest",
+    "path": ".",
+    "result": "skipped"
+  }
+  {
+    "cache_type": "path_stat",
+    "path": ".",
+    "result": "unchanged"
+  }

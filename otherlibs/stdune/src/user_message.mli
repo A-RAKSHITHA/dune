@@ -26,27 +26,21 @@ module Style : sig
   val compare : t -> t -> Ordering.t
 end
 
-module Annots : sig
-  module Key : sig
-    type 'a t
-
-    val create : name:string -> ('a -> Dyn.t) -> 'a t
-  end
-
-  type t
+(** Annotation for diff-based file promotion. Used to track which files need
+    to be promoted from build directory to source tree. *)
+module Diff_annot : sig
+  type t =
+    { in_source : Path0.Source.t
+    ; in_build : Path0.Build.t
+    }
 
   val to_dyn : t -> Dyn.t
-  val find : t -> 'a Key.t -> 'a option
-  val set : t -> 'a Key.t -> 'a -> t
-  val empty : t
-  val is_empty : t -> bool
-  val singleton : 'a Key.t -> 'a -> t
+end
 
-  (** The message has a location embed in the text. *)
-  val has_embedded_location : unit Key.t
-
-  (** The message needs a stack trace for clarity. *)
-  val needs_stack_trace : unit Key.t
+module Severity : sig
+  type t =
+    | Error
+    | Warning
 end
 
 (** A user message.contents composed of an optional file location and a list of
@@ -59,20 +53,30 @@ end
     with "Hint:". Hints should give indication to the user for how to fix the
     issue.
 
-    The [annots] field is intended to carry extra context for other,
+    The [compound] field is intended to carry extra context for other,
     non-user-facing purposes (such as data for the RPC). *)
 type t =
   { loc : Loc0.t option
   ; paragraphs : Style.t Pp.t list
   ; hints : Style.t Pp.t list
-  ; annots : Annots.t
+  ; compound : compound list
   ; context : string option
   ; dir : string option
+  ; has_embedded_location : bool
+  ; needs_stack_trace : bool
+  ; promotion : Diff_annot.t option
+  }
+
+and compound =
+  { main : t
+  ; related : t list
+  ; severity : Severity.t
   }
 
 val compare : t -> t -> Ordering.t
 val equal : t -> t -> bool
 val pp : t -> Style.t Pp.t
+val to_dyn : t -> Dyn.t
 
 module Print_config : sig
   (** Associate ANSI terminal styles to symbolic styles *)
@@ -88,12 +92,15 @@ end
     should not end with a space as a space is automatically inserted by [make]
     if necessary. *)
 val make
-  :  ?loc:Loc0.t
+  :  ?has_embedded_location:bool
+  -> ?needs_stack_trace:bool
+  -> ?loc:Loc0.t
   -> ?prefix:Style.t Pp.t
   -> ?hints:Style.t Pp.t list
-  -> ?annots:Annots.t
+  -> ?compound:compound list
   -> ?context:string
   -> ?dir:string
+  -> ?promotion:Diff_annot.t
   -> Style.t Pp.t list
   -> t
 
@@ -107,7 +114,7 @@ val prerr : ?config:Print_config.t -> t -> unit
 val did_you_mean : string -> candidates:string list -> Style.t Pp.t list
 
 (** Produces a plain text representation of the error message, without the
-    "Error: " prefix. *)
+    "Error:" prefix. *)
 val to_string : t -> string
 
 (** Returns [true] if the message has an explicit location or one embedded in
@@ -129,3 +136,13 @@ val command : string -> Style.t Pp.t
     space. The left component is padded to 12 characters so that the space
     separating the left and right side of all messages are aligned. *)
 val aligned_message : left:Style.t * string -> right:Style.t Pp.t -> Style.t Pp.t
+
+module Compound : sig
+  type nonrec t = compound =
+    { main : t
+    ; related : t list
+    ; severity : Severity.t
+    }
+
+  val to_dyn : t Dyn.builder
+end

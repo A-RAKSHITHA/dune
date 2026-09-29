@@ -45,6 +45,12 @@ let value_exn = function
   | None -> Code_error.raise "Option.value_exn" []
 ;;
 
+let value_exn' t ~message =
+  match t with
+  | Some x -> x
+  | None -> Code_error.raise "Option.value_exn'" [ "message", Dyn.string message ]
+;;
+
 let some x = Some x
 let some_if cond x = if cond then Some x else None
 
@@ -74,6 +80,18 @@ let to_list = function
   | Some x -> [ x ]
 ;;
 
+let repr repr =
+  Repr.variant
+    "option"
+    [ Repr.case0 "None" ~test:(function
+        | None -> true
+        | Some _ -> false)
+    ; Repr.case "Some" repr ~proj:(function
+        | None -> None
+        | Some value -> Some value)
+    ]
+;;
+
 let equal eq x y =
   match x, y with
   | None, None -> true
@@ -97,6 +115,8 @@ let try_with f =
 ;;
 
 module List = struct
+  open O
+
   let all =
     let rec loop acc = function
       | [] -> Some (List.rev acc)
@@ -116,11 +136,19 @@ module List = struct
     in
     loop [] xs
   ;;
+
+  let concat_map =
+    let rec loop f acc = function
+      | [] -> Some (List.rev acc)
+      | x :: xs -> f x >>= fun ys -> loop f (List.rev_append ys acc) xs
+    in
+    fun xs ~f -> loop f [] xs
+  ;;
 end
 
 let hash f = function
-  | None -> Stdlib.Hashtbl.hash None
-  | Some s -> Stdlib.Hashtbl.hash (f s)
+  | None -> 0
+  | Some s -> (f s * 31) + 1
 ;;
 
 let merge x y ~f =
@@ -159,11 +187,14 @@ module Unboxed = struct
     Obj.obj t
   ;;
 
-  let to_option t = if is_none t then None else Some (value_exn t)
-  let iter t ~f = if is_none t then () else f (value_exn t)
-  let match_ t ~none ~some = if is_none t then none () else some (value_exn t)
+  let to_option t = if is_none t then None else Some (Obj.obj t)
+  let iter t ~f = if is_none t then () else f (Obj.obj t)
+
+  let[@inline always] match_ t ~none ~some =
+    if is_none t then none () else some (Obj.obj t)
+  ;;
 
   let to_dyn f x =
-    if is_none x then Dyn.variant "None" [] else Dyn.variant "Some" [ f (value_exn x) ]
+    if is_none x then Dyn.variant "None" [] else Dyn.variant "Some" [ f (Obj.obj x) ]
   ;;
 end

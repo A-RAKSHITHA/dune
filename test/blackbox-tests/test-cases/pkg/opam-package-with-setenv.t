@@ -1,10 +1,10 @@
 Testing the translation of the setenv field of an opam file into the dune lock dir.
 
-  $ . ./helpers.sh
   $ mkrepo
 
-Make a package with a setenv. We also test all the kinds of env updates here expcept for
+Make a package with a setenv. We also test all the kinds of env updates here except for
 =+= which isn't used at all in the wild. 
+
   $ mkpkg with-setenv <<EOF
   > setenv: [
   >  [EXPORTED_ENV_VAR = "Hello from the other package!"]
@@ -26,13 +26,13 @@ Make another package that depends on that and outputs the exported env vars
   >  [ "sh" "-c" "echo $append_with_leading_sep" ]
   > ]
   > EOF
-  > solve deps-on-with-setenv
+  $ solve deps-on-with-setenv
   Solution for dune.lock:
   - deps-on-with-setenv.0.0.1
   - with-setenv.0.0.1
 The exported env from the first package should be in the lock dir.
 
-  $ cat dune.lock/with-setenv.pkg
+  $ cat ${default_lock_dir}/with-setenv.0.0.1.pkg
   (version 0.0.1)
   
   (exported_env
@@ -41,18 +41,21 @@ The exported env from the first package should be in the lock dir.
    (+= prepend_without_trailing_sep "Prepended without trailing sep")
    (=+ append_without_leading_sep "Appended without leading sep")
    (=: append_with_leading_sep "Appended with leading sep"))
-  $ cat dune.lock/deps-on-with-setenv.pkg
+  $ cat ${default_lock_dir}/deps-on-with-setenv.0.0.1.pkg
   (version 0.0.1)
   
   (build
-   (progn
-    (run sh -c "echo $EXPORTED_ENV_VAR")
-    (run sh -c "echo $prepend_without_trailing_sep")
-    (run sh -c "echo $prepend_with_trailing_sep")
-    (run sh -c "echo $append_without_leading_sep")
-    (run sh -c "echo $append_with_leading_sep")))
+   (all_platforms
+    ((action
+      (progn
+       (run sh -c "echo $EXPORTED_ENV_VAR")
+       (run sh -c "echo $prepend_without_trailing_sep")
+       (run sh -c "echo $prepend_with_trailing_sep")
+       (run sh -c "echo $append_without_leading_sep")
+       (run sh -c "echo $append_with_leading_sep"))))))
   
-  (depends with-setenv)
+  (depends
+   (all_platforms (with-setenv)))
 
 When building the second package the exported env vars from the first package should be
 available and all the env updates should be applied correctly.
@@ -73,9 +76,9 @@ Appended without leading sep
   > build_pkg deps-on-with-setenv 
   Hello from the other package!
   Prepended without trailing sep
-  Prepended with trailing sep
+  Prepended with trailing sep:
   Appended without leading sep
-  Appended with leading sep
+  :Appended with leading sep
 
 We now make a third package that updates the env in a similar way, in order to see the
 difference between a propagated export_env versus the initial env.
@@ -90,7 +93,7 @@ difference between a propagated export_env versus the initial env.
   >  [append_with_leading_sep =: "Appended 2nd time with leading sep"]
   > ]
   > EOF
-  > mkpkg deps-on-with-setenv-2 <<'EOF'
+  $ mkpkg deps-on-with-setenv-2 <<'EOF'
   > depends: [ "with-setenv-2" ]
   > build: [
   >  [ "sh" "-c" "echo $EXPORTED_ENV_VAR" ]
@@ -100,7 +103,7 @@ difference between a propagated export_env versus the initial env.
   >  [ "sh" "-c" "echo $append_with_leading_sep" ]
   > ]
   > EOF
-  > solve deps-on-with-setenv-2
+  $ solve deps-on-with-setenv-2
   Solution for dune.lock:
   - deps-on-with-setenv-2.0.0.1
   - with-setenv.0.0.1
@@ -128,8 +131,7 @@ Appended 2nd time without leading sep:Appended without leading sep
   > build_pkg deps-on-with-setenv-2
   Hello from the second package!
   Prepended 2nd time without trailing sep:Prepended without trailing sep
-  Prepended 2nd time with sep:Prepended with trailing sep
+  Prepended 2nd time with sep:Prepended with trailing sep:
   Appended without leading sep:Appended 2nd time without leading sep
-  Appended with leading sep:Appended 2nd time with leading sep
-
+  :Appended with leading sep:Appended 2nd time with leading sep
 

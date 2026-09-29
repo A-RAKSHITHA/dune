@@ -1,8 +1,13 @@
 dune-workspace
 ==============
 
+A ``dune-workspace`` file (if present) marks the root of the current Dune
+workspace (see :doc:`/explanation/scopes`). It can be used to define compilation contexts
+(see :doc:`/reference/dune-workspace/context`) and specify settings common to
+all Dune projects contained within the workspace.
+
 By default, a workspace has only one build context named ``default`` which
-corresponds to the environment, in which ``dune`` is run. You can define more
+corresponds to the environment in which ``dune`` is run. You can define more
 contexts by writing a ``dune-workspace`` file.
 
 You can point Dune to an explicit ``dune-workspace`` file with the
@@ -39,11 +44,12 @@ This allows you to use an empty ``dune-workspace`` file to mark the root of your
 project.
 
 .. toctree::
-   
+
   config
   context
   env
   lock_dir
   pin
+  pkg
   profile
   repository

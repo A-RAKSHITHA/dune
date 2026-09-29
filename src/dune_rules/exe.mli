@@ -22,7 +22,7 @@ module Linkage : sig
   val native : t
 
   (** like [custom] but allows for a custom extension *)
-  val custom_with_ext : ext:string -> Ocaml.Version.t -> t
+  val custom_with_ext : ext:Filename.Extension.t -> Ocaml.Version.t -> t
 
   (** Byte compilation with stubs statically linked in, extension [.exe] *)
   val custom : Ocaml.Version.t -> t
@@ -61,9 +61,10 @@ val link_many
   -> ?o_files:Path.t Mode.Map.Multi.t
   -> ?embed_in_plugin_libraries:(Loc.t * Lib_name.t) list
   -> ?sandbox:Sandbox_config.t
+  -> env:Env.t Action_builder.t
   -> programs:Program.t list
   -> linkages:Linkage.t list
-  -> promote:Rule.Promote.t option
+  -> promote:Rule_mode.Promote.t option
   -> Compilation_context.t
   -> dep_graphs Memo.t
 
@@ -72,9 +73,10 @@ val build_and_link
   -> ?o_files:Path.t Mode.Map.Multi.t
   -> ?embed_in_plugin_libraries:(Loc.t * Lib_name.t) list
   -> ?sandbox:Sandbox_config.t
+  -> env:Env.t Action_builder.t
   -> program:Program.t
   -> linkages:Linkage.t list
-  -> promote:Rule.Promote.t option
+  -> promote:Rule_mode.Promote.t option
   -> Compilation_context.t
   -> dep_graphs Memo.t
 
@@ -83,9 +85,10 @@ val build_and_link_many
   -> ?o_files:Path.t Mode.Map.Multi.t
   -> ?embed_in_plugin_libraries:(Loc.t * Lib_name.t) list
   -> ?sandbox:Sandbox_config.t
+  -> env:Env.t Action_builder.t
   -> programs:Program.t list
   -> linkages:Linkage.t list
-  -> promote:Rule.Promote.t option
+  -> promote:Rule_mode.Promote.t option
   -> Compilation_context.t
   -> dep_graphs Memo.t
 

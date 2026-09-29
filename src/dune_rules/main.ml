@@ -25,34 +25,52 @@ let implicit_default_alias dir =
        Some (Action_builder.ignore (Alias_rec.dep_on_alias_rec default_alias dir)))
 ;;
 
-let execution_parameters =
-  let f path =
-    match Path.Build.drop_build_context path with
-    | None -> Dune_engine.Execution_parameters.default
-    | Some path ->
-      let open Memo.O in
-      let+ dir = Source_tree.nearest_dir path
-      and+ ep = Execution_parameters.default in
-      Dune_project.update_execution_parameters (Source_tree.Dir.project dir) ep
+let execution_parameters ~sandbox_actions =
+  let source_backed_dir path =
+    match Dpath.Target_dir.of_target path with
+    | Regular (With_context (context, source))
+    | Anonymous_action (With_context (context, source)) ->
+      (match Install.Context.analyze_path context source with
+       | Normal (_, source) -> Some source
+       | Install _ | Invalid -> None)
+    | Regular Root | Anonymous_action Root | Invalid _ -> None
+  in
+  let f context path =
+    let open Memo.O in
+    let* ep = Execution_parameters.default in
+    let ep =
+      if sandbox_actions then Execution_parameters.set_sandbox_actions true ep else ep
+    in
+    if
+      Context_name.equal context Private_context.t.name
+      || Context_name.equal context Fetch_rules.context.name
+    then Memo.return ep
+    else (
+      match source_backed_dir path with
+      | None -> Memo.return ep
+      | Some path ->
+        let+ dir = Source_tree.nearest_dir path in
+        Dune_project.update_execution_parameters (Source_tree.Dir.project dir) ep)
   in
   let memo =
+    let module Input = struct
+      type t = Context_name.t * Path.Build.t
+
+      let hash = Tuple.T2.hash Context_name.hash Path.Build.hash
+      let equal = Tuple.T2.equal Context_name.equal Path.Build.equal
+      let to_dyn = Tuple.T2.to_dyn Context_name.to_dyn Path.Build.to_dyn
+    end
+    in
     Memo.create
       "execution-parameters-of-dir"
-      ~input:(module Path.Build)
+      ~input:(module Input)
       ~cutoff:Execution_parameters.equal
-      f
+      (fun (ctx, path) -> f ctx path)
   in
-  fun ~dir -> Memo.exec memo dir
+  fun context ~dir -> Memo.exec memo (context, dir)
 ;;
 
-let init
-      ~stats
-      ~sandboxing_preference
-      ~cache_config
-      ~(cache_debug_flags : Dune_engine.Cache_debug_flags.t)
-      ()
-  : unit
-  =
+let init ~sandbox_actions ~sandboxing_preference () : unit =
   let promote_source ~chmod ~delete_dst_if_it_is_a_directory ~src ~dst =
     let open Fiber.O in
     let* ctx = Path.Build.parent_exn src |> Context.DB.by_dir |> Memo.run in
@@ -67,35 +85,22 @@ let init
       ~conf
       ()
   in
-  let module Shared_cache =
-    Dune_cache.Shared.Make (struct
-      let debug_shared_cache = cache_debug_flags.shared_cache
-      let config = cache_config
-      let upload ~rule_digest:_ = Fiber.return ()
-      let download ~rule_digest:_ = Fiber.return ()
-    end)
-  in
   Build_config.set
-    ~stats
     ~sandboxing_preference
     ~promote_source
     ~contexts:
-      (Memo.lazy_ (fun () ->
+      (Memo.lazy_ ~name:"build-context-types" (fun () ->
          let open Memo.O in
          let+ contexts = Workspace.workspace () >>| Workspace.build_contexts in
-         let open Dune_engine.Build_config.Gen_rules.Context_type in
+         let open Dune_engine.Build_config.Context_type in
          (Private_context.t, Empty)
          :: (Install.Context.install_context, Empty)
          :: (Fetch_rules.context, Empty)
          :: List.map contexts ~f:(fun ctx -> ctx, With_sources)))
-    ~cache_config
-    ~cache_debug_flags
     ~rule_generator:(module Gen_rules)
     ~implicit_default_alias
-    ~execution_parameters
+    ~execution_parameters:(execution_parameters ~sandbox_actions)
     ~source_tree:(module Source_tree)
-    ~shared_cache:(module Shared_cache)
-    ~write_error_summary:(fun _ -> Fiber.return ())
 ;;
 
 let get () =

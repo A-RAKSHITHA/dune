@@ -7,7 +7,7 @@ module Init_context : sig
   open Dune_config_file
 
   type t =
-    { dir : Path.t
+    { dir : Path.Source.t
     ; project : Dune_project.t
     ; defaults : Dune_config.Project_defaults.t
     }
@@ -22,6 +22,8 @@ module Public_name : sig
   val of_string_user_error : Loc.t * string -> (t, User_message.t) result
   val of_name_exn : Dune_lang.Atom.t -> t
 end
+
+val check_module_name : Dune_lang.Atom.t -> unit
 
 (** A [Component.t] is a set of files that can be built or included as part of a
     build. *)
@@ -90,14 +92,13 @@ module Component : sig
       }
   end
 
-  (** All the the supported types of components *)
-  type 'options t =
-    | Executable : Options.Executable.t Options.t -> Options.Executable.t t
-    | Library : Options.Library.t Options.t -> Options.Library.t t
-    | Project : Options.Project.t Options.t -> Options.Project.t t
-    | Test : Options.Test.t Options.t -> Options.Test.t t
+  (** All the supported types of components *)
+  type t =
+    | Executable of Options.Executable.t Options.t
+    | Library of Options.Library.t Options.t
+    | Project of Options.Project.t Options.t
+    | Test of Options.Test.t Options.t
 
-  (** Create or update the component specified by the ['options t], where
-      ['options] is *)
-  val init : 'options t -> unit
+  (** Create or update the given component *)
+  val init : t -> unit
 end

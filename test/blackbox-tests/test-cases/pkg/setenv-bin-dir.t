@@ -1,8 +1,6 @@
 We set the PATH with (exported_env ..) and this should be reflected when
 looking up binaries in the workspace.
 
-  $ . ./helpers.sh
-
   $ make_lockdir
 
   $ bin=foobarbin
@@ -14,15 +12,13 @@ looking up binaries in the workspace.
   > EOF
   $ chmod +x _bin/$bin
 
-  $ make_lockpkg <<EOF
+  $ make_lockpkg foo <<EOF
   > (version 1.0.0)
   > (exported_env
   >  (:= PATH $PWD/_bin))
   > EOF
 
-  $ cat >dune-project <<EOF
-  > (lang dune 3.13)
-  > EOF
+  $ make_dune_project 3.13
 
   $ cat >dune <<EOF
   > (rule

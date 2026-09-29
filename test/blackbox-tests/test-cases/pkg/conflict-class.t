@@ -1,8 +1,6 @@
 This test demonstrates a local package that's in the same conflict-class of a
 dependency.
 
-  $ . ./helpers.sh
-
   $ mkrepo
   $ add_mock_repo_if_needed
 
@@ -25,15 +23,14 @@ Local conflict class defined in a local package:
   > depends: "foo"
   > EOF
 
-  $ cat >dune-project <<EOF
-  > (lang dune 3.11)
-  > EOF
+  $ make_dune_project 3.11
 
-  $ dune pkg lock
-  Error: Unable to solve dependencies for the following lock directories:
-  Lock directory dune.lock:
+  $ dune_pkg_lock_normalized
+  Error:
+  Unable to solve dependencies while generating lock directory: dune.lock
+  
   Couldn't solve the package dependency formula.
-  Selected candidates: foo.dev x.dev foo&x
+  Selected candidates: foo.dev x.dev
   - bar -> (problem)
       Rejected candidates:
         bar.0.0.1: In same conflict class (ccc) as foo
@@ -48,9 +45,10 @@ Now the conflict class comes from the opam repository
 
   $ rm foo.opam
 
-  $ dune pkg lock
-  Error: Unable to solve dependencies for the following lock directories:
-  Lock directory dune.lock:
+  $ dune_pkg_lock_normalized
+  Error:
+  Unable to solve dependencies while generating lock directory: dune.lock
+  
   Couldn't solve the package dependency formula.
   Selected candidates: foo.0.0.1 x.dev
   - bar -> (problem)

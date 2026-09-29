@@ -1,0 +1,3 @@
+(library
+ (name targets)
+ (libraries stdune fiber dyn dune_digest unix))

@@ -1,18 +1,22 @@
 Jsoo and build-info
 
-  $ echo "(lang dune 3.0)" > dune-project
-  $ dune build
-  Warning: '--source-map' is enabled but the bytecode program was compiled with no debugging information.
-  Warning: Consider passing '-g' option to ocamlc.
-  $ node _build/default/src/main.bc.js
+  $ make_dune_project 3.0
+  $ js=src/main.bc.js
+  $ built_js=_build/default/$js
+  $ installed_js=_install/bin/main.bc.js
+  $ dune build "$js" @install
+  Warning [missing-debug-event]: '--source-map' is enabled but the bytecode program was compiled with no debugging information.
+  Consider passing '-g' option to ocamlc.
+  $ node "$built_js"
   unknown
-  $ dune install --prefix _install --display short
-  Installing _install/lib/main/META
-  Installing _install/lib/main/dune-package
-  Installing _install/lib/main/opam
-  Installing _install/bin/main
-  Installing _install/bin/main.bc.js
-  $ node _install/bin/main.bc.js
+  $ dune install --prefix _install
+  $ find _install -type f | sort
+  _install/bin/main
+  _install/bin/main.bc.js
+  _install/lib/main/META
+  _install/lib/main/dune-package
+  _install/lib/main/opam
+  $ node "$installed_js"
   unknown
   $ git init -q
   $ touch README
@@ -21,44 +25,35 @@ Jsoo and build-info
   $ git tag v1 -am "V1"
   $ git commit -m "empty2" --allow-empty -q
   $ echo "HELLO" > README
-  $ dune build
-  Warning: '--source-map' is enabled but the bytecode program was compiled with no debugging information.
-  Warning: Consider passing '-g' option to ocamlc.
-  $ node _build/default/src/main.bc.js
+  $ dune build "$js" @install
+  Warning [missing-debug-event]: '--source-map' is enabled but the bytecode program was compiled with no debugging information.
+  Consider passing '-g' option to ocamlc.
+  $ node "$built_js"
   unknown
-  $ dune install --prefix _install --display short
-  Deleting _install/lib/main/META
-  Installing _install/lib/main/META
-  Deleting _install/lib/main/dune-package
-  Installing _install/lib/main/dune-package
-  Deleting _install/lib/main/opam
-  Installing _install/lib/main/opam
-  Deleting _install/bin/main
-  Installing _install/bin/main
-  Deleting _install/bin/main.bc.js
-  Installing _install/bin/main.bc.js
-  Installing _install/doc/main/README
-  $ node _install/bin/main.bc.js
+  $ dune install --prefix _install
+  $ find _install -type f | sort
+  _install/bin/main
+  _install/bin/main.bc.js
+  _install/doc/main/README
+  _install/lib/main/META
+  _install/lib/main/dune-package
+  _install/lib/main/opam
+  $ node "$installed_js"
   v1-1-xxxxx-dirty
   $ echo "(name main)" >> dune-project
   $ echo "(version 0.2.0)" >> dune-project
-  $ dune build
-  Warning: '--source-map' is enabled but the bytecode program was compiled with no debugging information.
-  Warning: Consider passing '-g' option to ocamlc.
-  $ node _build/default/src/main.bc.js
+  $ dune build "$js" @install
+  Warning [missing-debug-event]: '--source-map' is enabled but the bytecode program was compiled with no debugging information.
+  Consider passing '-g' option to ocamlc.
+  $ node "$built_js"
   0.2.0
-  $ dune install --prefix _install --display short
-  Deleting _install/lib/main/META
-  Installing _install/lib/main/META
-  Deleting _install/lib/main/dune-package
-  Installing _install/lib/main/dune-package
-  Deleting _install/lib/main/opam
-  Installing _install/lib/main/opam
-  Deleting _install/bin/main
-  Installing _install/bin/main
-  Deleting _install/bin/main.bc.js
-  Installing _install/bin/main.bc.js
-  Deleting _install/doc/main/README
-  Installing _install/doc/main/README
-  $ node _build/default/src/main.bc.js
+  $ dune install --prefix _install
+  $ find _install -type f | sort
+  _install/bin/main
+  _install/bin/main.bc.js
+  _install/doc/main/README
+  _install/lib/main/META
+  _install/lib/main/dune-package
+  _install/lib/main/opam
+  $ node "$built_js"
   0.2.0

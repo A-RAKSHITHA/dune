@@ -1,6 +1,5 @@
-open! Stdune
-open Dune_sexp
-include Dune_glob.V1
+open Import
+include Dune_rpc.Private.Glob
 
 let to_dyn t = Dyn.variant "Glob" [ Dyn.string (to_string t) ]
 let compare x y = String.compare (to_string x) (to_string y)
@@ -18,4 +17,3 @@ let decode =
 ;;
 
 let filter t = List.filter ~f:(test t)
-let to_predicate t = Predicate.create (test t)

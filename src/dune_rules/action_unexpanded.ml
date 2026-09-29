@@ -71,6 +71,10 @@ module Action_expander : sig
        <dep_if_exists> ...)] *)
     val dep_if_exists : String_with_vars.t -> Path.t t
 
+    (** Record a source-tree dependency if this expands to a source directory in
+        the current build context. *)
+    val source_tree_if_directory : String_with_vars.t -> unit t
+
     (* Evaluate a path that is neither in a position of target or dependency,
        such as in [(chdir <path> ...)] *)
     val path : String_with_vars.t -> Path.t t
@@ -78,7 +82,11 @@ module Action_expander : sig
     (* Evaluate a path that "consumes" a target, such as in [(diff? ...
        <file>)] *)
     val consume_file : String_with_vars.t -> Path.Build.t t
-    val prog_and_args : String_with_vars.t -> (Action.Prog.t * string list) t
+
+    val prog_and_args
+      :  force_host:bool
+      -> String_with_vars.t
+      -> (Action.Prog.t * string list) t
 
     module At_rule_eval_stage : sig
       (* Expansion that happens at the time the rule is constructed rather than
@@ -204,7 +212,10 @@ end = struct
     let*! value, acc = value env acc in
     let value = Action_builder.memoize ~cutoff:String.equal "env var" value in
     let env =
-      { env with expander = Expander.set_local_env_var env.expander ~var ~value }
+      { env with
+        expander =
+          Expander.set_local_env_var env.expander ~var:(Env.Var.of_string var) ~value
+      }
     in
     let+! f, acc = t env acc in
     let b =
@@ -274,6 +285,7 @@ end = struct
         Value.L.to_strings v ~dir:(Path.build env.dir)
       ;;
 
+      let project = Expander.project
       let artifacts = Expander.artifacts
       let map_exe = Expander.map_exe
 
@@ -356,6 +368,23 @@ end = struct
              } )))
     ;;
 
+    let source_tree_if_directory sw env acc =
+      let build =
+        let open Action_builder.O in
+        let* path = Expander.expand_path env sw in
+        match Path.extract_build_context_dir path with
+        | None -> Action_builder.return ()
+        | Some _ ->
+          let deps =
+            let open Memo.O in
+            let+ deps, _files = Source_deps.files path in
+            deps, ()
+          in
+          Action_builder.dyn_memo_deps deps
+      in
+      Memo.return (build, acc)
+    ;;
+
     let add_or_remove_target ~what ~f sw env acc =
       if not env.infer
       then
@@ -376,7 +405,7 @@ end = struct
 
     let target = add_or_remove_target ~what:"Target" ~f:Path.Build.Map.set
 
-    let prog_and_args sw env acc =
+    let prog_args_and_deps ~force_host sw env acc =
       let b =
         let dir = Path.build env.dir in
         let loc = loc sw in
@@ -396,30 +425,42 @@ end = struct
              | Relative_to_current_dir | Absolute ->
                Action_builder.return (Ok (Path.relative dir s))
              | In_path ->
+               let dir = env.dir in
+               let where =
+                 if Dune_project.dune_version (Expander.project env.expander) >= (3, 14)
+                 then Artifacts.Original_path
+                 else Install_dir
+               in
                Action_builder.of_memo
                @@
                let open Memo.O in
-               let* where =
-                 let+ project = Dune_load.find_project ~dir:env.dir in
-                 if Dune_project.dune_version project >= (3, 14)
-                 then Artifacts.Original_path
-                 else Install_dir
-               and* artifacts = Expander.artifacts env.expander in
+               let* artifacts = Expander.artifacts env.expander in
                let hint =
                  match s with
                  | "refmt" -> Some "opam install reason"
                  | "rescript_syntax" -> Some "opam install rescript-syntax"
                  | _ -> None
                in
-               Artifacts.binary ?hint ~loc:(Some loc) ~where artifacts s)
+               Artifacts.binary ?hint ~loc:(Some loc) ~where ~dir artifacts s)
         in
-        let prog = Result.map prog ~f:(Expander.map_exe env.expander) in
         let args = Value.L.to_strings ~dir args in
-        prog, args
+        match prog with
+        | Ok prog ->
+          let dep, prog, args = Expander.map_exe ~force_host env.expander prog args in
+          Ok prog, args, [ dep ]
+        | Error _ as v -> v, args, []
       in
-      register_deps b env acc ~f:(function
-        | Ok p, _ -> [ p ]
-        | Error _, _ -> [])
+      register_deps b env acc ~f:(function _, _, deps -> deps)
+    ;;
+
+    let prog_and_args ~force_host sw env acc =
+      Memo.map
+        ~f:(fun (x, v) ->
+          ( Action_builder.bind
+              ~f:(fun (prog, args, _) -> Action_builder.return (prog, args))
+              x
+          , v ))
+        (prog_args_and_deps ~force_host sw env acc)
     ;;
   end
 end
@@ -429,32 +470,39 @@ let rec expand (t : Dune_lang.Action.t) : Action.t Action_expander.t =
   let module E = Action_expander.E in
   let open Action_expander.O in
   let module O (* [O] for "outcome" *) = Action in
-  let expand_run prog args =
+  let expand_run ~force_host prog args =
     let+ args = A.all (List.map args ~f:E.strings)
-    and+ prog, more_args = E.prog_and_args prog in
+    and+ prog, more_args = E.prog_and_args ~force_host prog in
     let args = List.concat args in
     prog, more_args @ args
   in
-  match t with
-  | Run args ->
+  let expand_run_action ~force_host ~action_name args =
     let string_args =
       List.filter_map args ~f:(function
         | Slang.Literal sw -> Some sw
         | _ -> None)
     in
     if List.length string_args < List.length args
-    then User_error.raise [ Pp.text "All arguments to \"run\" action must be strings" ];
-    (match string_args with
-     | prog :: args ->
-       let+ prog, args = expand_run prog args in
-       O.Run (prog, Array.Immutable.of_list args)
-     | [] -> User_error.raise [ Pp.text "\"run\" action must have at least one argument" ])
+    then
+      User_error.raise
+        [ Pp.textf "All arguments to \"%s\" action must be strings" action_name ];
+    match string_args with
+    | prog :: args ->
+      let+ prog, args = expand_run ~force_host prog args in
+      O.Run { prog; args = Appendable_list.of_list args; can_run_in_action_runner = true }
+    | [] ->
+      User_error.raise
+        [ Pp.textf "\"%s\" action must have at least one argument" action_name ]
+  in
+  match t with
+  | Run args -> expand_run_action ~force_host:false ~action_name:"run" args
+  | Runexec args -> expand_run_action ~force_host:true ~action_name:"runexec" args
   | With_accepted_exit_codes (pred, t) ->
     let+ t = expand t in
     O.With_accepted_exit_codes (pred, t)
   | Dynamic_run (prog, args) ->
-    let+ prog, args = expand_run prog args in
-    O.Dynamic_run (prog, args)
+    let+ prog, args = expand_run ~force_host:false prog args in
+    Action_plugin.action ~prog ~args
   | Chdir (fn, t) ->
     E.At_rule_eval_stage.path fn ~f:(fun dir ->
       A.chdir
@@ -491,19 +539,16 @@ let rec expand (t : Dune_lang.Action.t) : Action.t Action_expander.t =
     O.Echo l
   | Cat xs ->
     A.with_expander (fun expander ->
-      let open Memo.O in
-      let+ version =
-        let dir = Expander.dir expander in
-        Dune_load.find_project ~dir >>| Dune_project.dune_version
-      in
+      let version = Expander.project expander |> Dune_project.dune_version in
       let open Action_expander.O in
-      if version >= (3, 10)
-      then
-        let+ xs = A.all (List.map xs ~f:E.deps) in
-        O.Cat (List.concat xs)
-      else
-        let+ xs = A.all (List.map xs ~f:E.dep) in
-        O.Cat xs)
+      Memo.return
+        (if version >= (3, 10)
+         then
+           let+ xs = A.all (List.map xs ~f:E.deps) in
+           O.Cat (List.concat xs)
+         else
+           let+ xs = A.all (List.map xs ~f:E.dep) in
+           O.Cat xs))
   | Copy (x, y) ->
     let+ x = E.dep x
     and+ y = E.target y in
@@ -522,10 +567,10 @@ let rec expand (t : Dune_lang.Action.t) : Action.t Action_expander.t =
         Copy_line_directive.action context ~src:x ~dst:y))
   | System x ->
     let+ x = E.string x in
-    System.action x
+    O.System x
   | Bash x ->
-    let+ x = E.string x in
-    O.Bash x
+    let+ script = E.string x in
+    O.Bash { script; can_run_in_action_runner = true }
   | Write_file (fn, perm, s) ->
     let+ fn = E.target fn
     and+ s = E.string s in
@@ -549,8 +594,9 @@ let rec expand (t : Dune_lang.Action.t) : Action.t Action_expander.t =
                    ; Dune_sexp.atom_or_quoted_string (Path.to_string path)
                    ]))
          ])
-  | Diff { optional; file1; file2; mode } ->
+  | Diff { optional; file1; file2; mode; directory_diffs } ->
     let+ file1 = E.dep_if_exists file1
+    and+ () = E.source_tree_if_directory file1
     and+ file2 =
       if optional
       then E.consume_file file2
@@ -558,7 +604,7 @@ let rec expand (t : Dune_lang.Action.t) : Action.t Action_expander.t =
         let+ p = E.dep file2 in
         Expander0.as_in_build_dir p ~loc:(String_with_vars.loc file2) ~what:"File"
     in
-    Promote.Diff_action.diff ~optional ~mode file1 file2
+    Action.diff ~optional ~mode ~directory_diffs file1 file2
   | No_infer t -> A.no_infer (expand t)
   | Pipe (outputs, l) ->
     let+ l = A.all (List.map l ~f:expand) in
@@ -568,29 +614,26 @@ let rec expand (t : Dune_lang.Action.t) : Action.t Action_expander.t =
     Cram_exec.action script
   | Format_dune_file (src, dst) ->
     A.with_expander (fun expander ->
-      let open Memo.O in
-      let+ version =
-        let dir = Expander.dir expander in
-        Dune_load.find_project ~dir >>| Dune_project.dune_version
-      in
+      let version = Expander.project expander |> Dune_project.dune_version in
       let open Action_expander.O in
-      let+ src = E.dep src
-      and+ dst = E.target dst in
-      Format_dune_file.action ~version src dst)
+      Memo.return
+        (let+ src = E.dep src
+         and+ dst = E.target dst in
+         Format_dune_file.action ~version src dst))
   | Withenv _ | Substitute _ | Patch _ | When _ ->
     (* these can only be provided by the package language which isn't expanded here *)
     assert false
 ;;
 
-let expand_no_targets t ~loc ~chdir ~deps:deps_written_by_user ~expander ~what =
+let expand_no_targets t sandbox ~loc ~chdir ~deps:deps_written_by_user ~expander ~what =
   let open Action_builder.O in
-  let deps_builder, expander, sandbox =
-    Dep_conf_eval.named ~expander deps_written_by_user
+  let env, expander, sandbox =
+    Dep_conf_eval.named ~expander sandbox deps_written_by_user
   in
   let expander =
     Expander.set_expanding_what expander (User_action_without_targets { what })
   in
-  let* { Action_builder.With_targets.build; targets } =
+  let* { Action_builder.With_targets.build = action; targets } =
     expand t
     |> Action_expander.run ~chdir ~targets_dir:None ~expander
     |> Action_builder.of_memo
@@ -605,14 +648,16 @@ let expand_no_targets t ~loc ~chdir ~deps:deps_written_by_user ~expander ~what =
           (String.capitalize what)
       ; pp_targets targets
       ];
-  let+ () = deps_builder
-  and+ action = build in
+  let+ sandbox
+  and+ env
+  and+ action in
   let action = Action.Chdir (Path.build chdir, action) in
-  Action.Full.make action ~sandbox
+  Action.Full.make action ~sandbox |> Action.Full.add_env env
 ;;
 
 let expand
       t
+      sandbox
       ~loc
       ~chdir
       ~deps:deps_written_by_user
@@ -621,8 +666,8 @@ let expand
       ~expander
   =
   let open Action_builder.O in
-  let deps_builder, expander, sandbox =
-    Dep_conf_eval.named ~expander deps_written_by_user
+  let env, expander, sandbox =
+    Dep_conf_eval.named sandbox ~expander deps_written_by_user
   in
   let expander =
     let expander =
@@ -645,7 +690,7 @@ let expand
     in
     Expander.set_expanding_what expander (User_action targets_written_by_user)
   in
-  let+! { Action_builder.With_targets.build; targets } =
+  let+! { Action_builder.With_targets.build = action; targets } =
     expand t |> Action_expander.run ~chdir ~targets_dir:(Some targets_dir) ~expander
   in
   let targets =
@@ -664,9 +709,12 @@ let expand
       Targets.combine targets (Targets.create ~files ~dirs)
   in
   let build =
-    let+ () = deps_builder
-    and+ action = build in
-    Action.Full.make (Action.Chdir (Path.build chdir, action)) ~sandbox
+    let+ sandbox
+    and+ env
+    and+ action in
+    Action.Chdir (Path.build chdir, action)
+    |> Action.Full.make ~sandbox
+    |> Action.Full.add_env env
   in
   Action_builder.with_targets ~targets build
 ;;

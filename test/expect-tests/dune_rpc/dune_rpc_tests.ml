@@ -1,100 +1,33 @@
-open! Stdune
-open! Fiber.O
-module Dune_rpc = Dune_rpc_private
+open Stdune
+open Fiber.O
+module Dune_rpc = Dune_rpc.Private
 open Dune_rpc
-open Dune_rpc_server
-module Scheduler = Test_scheduler
-
-let () = Printexc.record_backtrace false
-let () = Dune_util.Log.init_disabled ()
-let print pp = Format.printf "%a@." Pp.to_fmt pp
-let print_dyn dyn = print (Dyn.pp dyn)
-
-module Chan = struct
-  module Mvar = Fiber.Mvar
-
-  type t =
-    { (* Read end. Populated by writing by [snd] *)
-      in_ : Sexp.t Fiber.Stream.In.t * Sexp.t Fiber.Stream.Out.t
-    ; (* Write end. Can be read via [fst] *)
-      out : Sexp.t Fiber.Stream.In.t * Sexp.t Fiber.Stream.Out.t
-    }
-
-  let create () = { in_ = Fiber.Stream.pipe (); out = Fiber.Stream.pipe () }
-  let close t = Fiber.Stream.Out.write (snd t.out) None
-
-  let write t s =
-    let+ () =
-      Fiber.sequential_iter s ~f:(fun s -> Fiber.Stream.Out.write (snd t.out) (Some s))
-    in
-    Ok ()
-  ;;
-
-  let read t = Fiber.Stream.In.read (fst t.in_)
-
-  let connect c1 c2 =
-    Fiber.fork_and_join_unit
-      (fun () -> Fiber.Stream.connect (fst c1.out) (snd c2.in_))
-      (fun () -> Fiber.Stream.connect (fst c2.out) (snd c1.in_))
-  ;;
-
-  let name _ = "unnamed"
-end
-
-module Drpc = struct
-  module Client =
-    Dune_rpc.Client.Make
-      (Dune_rpc_client.Private.Fiber)
-      (struct
-        include Chan
-
-        let write t = function
-          | None -> close t
-          | Some packets -> write t packets >>| Result.ok_exn
-        ;;
-      end)
-
-  module Server = Dune_rpc_server.Make (Chan)
-end
-
+open Rpc.Server
+open Common
 open Drpc
 
-let on_init _ _ = Fiber.return ()
-
-let setup_client_server () =
-  let client_chan = Chan.create () in
-  let server_chan = Chan.create () in
-  let sessions = Fiber.Stream.In.of_list [ server_chan ] in
-  let connect () = Chan.connect client_chan server_chan in
-  client_chan, sessions, connect
-;;
-
-let test ?(private_menu = []) ?(real_methods = true) ~client ~handler ~init () =
-  if real_methods
-  then
-    Handler.implement_notification handler Procedures.Public.shutdown (fun _ _ ->
-      failwith "shutdown called");
-  let run =
-    let client_chan, sessions, connect = setup_client_server () in
-    let client () =
-      Drpc.Client.connect_with_menu client_chan init ~private_menu ~f:(fun c ->
-        let* () = client c in
-        Chan.close client_chan)
-    in
-    let server () =
-      let+ () = Drpc.Server.serve sessions None (Dune_rpc_server.make handler) in
-      printfn "server: finished."
-    in
-    Fiber.parallel_iter [ connect; client; server ] ~f:(fun f -> f ())
-  in
-  Scheduler.run (Scheduler.create ()) run
-;;
+let () = Printexc.record_backtrace false
+let () = Log.init No_log_file
 
 let init ?(id = Id.make (Csexp.Atom "test-client")) ?(version = 1, 1) () =
   { Initialize.Request.dune_version = version
   ; protocol_version = Protocol.latest_version
   ; id
   }
+;;
+
+let%expect_test "connection error includes rpc endpoint" =
+  let where : Dune_rpc.Where.t = `Ip (`Host "invalid host", `Port 8587) in
+  let result =
+    Scheduler.run (Scheduler.create ()) (Rpc.Client.Connection.connect where)
+  in
+  (match result with
+   | Ok _ -> assert false
+   | Error message ->
+     (match Stdune.User_message.to_string message |> String.split_lines with
+      | [] -> ()
+      | line :: _ -> print_endline line));
+  [%expect {| failed to connect to RPC server tcp:host=invalid%20host,port=8587 |}]
 ;;
 
 let%expect_test "initialize scheduler with rpc" =
@@ -121,35 +54,11 @@ let%expect_test "no methods in common" =
 [@@expect.uncaught_exn
   {|
   ( "Server_aborted\
-   \n  [ [ \"message\"; \"Server and client have no method versions in common\" ] ]")
-  Trailing output
-  ---------------
-  server: finished. |}]
-;;
-
-let simple_request
-      (type a b)
-      ?(version = 1)
-      ~method_
-      (req : (a, Conv.values) Conv.t)
-      (resp : (b, Conv.values) Conv.t)
-  =
-  let v = Decl.Request.make_current_gen ~req ~resp ~version in
-  Decl.Request.make ~method_ ~generations:[ v ]
-;;
-
-let request_exn client witness n =
-  let* staged = Client.Versioned.prepare_request client witness in
-  let staged =
-    match staged with
-    | Ok s -> s
-    | Error e -> raise (Dune_rpc.Version_error.E e)
-  in
-  Client.request client staged n
+   \n  [ [ \"message\"; \"Server and client have no method versions in common\" ] ]") |}]
 ;;
 
 let%expect_test "call method with matching versions" =
-  let decl = simple_request ~method_:"double" Conv.int Conv.int in
+  let decl = simple_request ~method_:(Method.Name.of_string "double") Conv.int Conv.int in
   let handler =
     let rpc = Handler.create ~on_init ~version:(1, 1) () in
     let () =
@@ -196,7 +105,7 @@ let%expect_test "call method with matching versions" =
 ;;
 
 let%expect_test "call method with no matching versions" =
-  let decl = simple_request ~method_:"double" Conv.int Conv.int in
+  let decl = simple_request ~method_:(Method.Name.of_string "double") Conv.int Conv.int in
   let handler =
     let rpc = Handler.create ~on_init ~version:(2, 0) () in
     let () =
@@ -219,7 +128,9 @@ let%expect_test "call method with no matching versions" =
     ; id = Id.make (Atom "test-client")
     }
   in
-  let decl' = simple_request ~method_:"double" ~version:2 Conv.int Conv.int in
+  let decl' =
+    simple_request ~method_:(Method.Name.of_string "double") ~version:2 Conv.int Conv.int
+  in
   test ~init ~client ~handler ~private_menu:[ Request decl' ] ();
   [%expect
     {|
@@ -241,11 +152,6 @@ module Add = struct
         { xy : int
         ; all : int
         }
-
-  module V1_only = struct
-    let req = Conv.pair Conv.int Conv.int
-    let resp = Conv.int
-  end
 
   let v1_only =
     Decl.Request.make_current_gen
@@ -275,16 +181,12 @@ module Add = struct
   let v2 =
     let req =
       let open Conv in
-      let parse =
-        record
-          (three
-             (field "x" (required int))
-             (field "y" (required int))
-             (field "others" (required (list int))))
-      in
-      let to_ (x, y, others) = { x; y; others } in
-      let from { x; y; others } = x, y, others in
-      iso parse to_ from
+      record
+        (Record.make (fun x y others -> { x; y; others })
+         |> Record.field "x" (required int) ~get:(fun { x; _ } -> x)
+         |> Record.field "y" (required int) ~get:(fun { y; _ } -> y)
+         |> Record.field "others" (required (list int)) ~get:(fun { others; _ } -> others)
+         |> Record.finish)
     in
     let resp =
       let open Conv in
@@ -302,8 +204,13 @@ module Add = struct
   ;;
 end
 
-let add_v1_only = Decl.Request.make ~method_:"add" ~generations:[ Add.v1_only ]
-let add_v1_v2 = Decl.Request.make ~method_:"add" ~generations:[ Add.v1; Add.v2 ]
+let add_v1_only =
+  Decl.Request.make ~method_:(Method.Name.of_string "add") ~generations:[ Add.v1_only ]
+;;
+
+let add_v1_v2 =
+  Decl.Request.make ~method_:(Method.Name.of_string "add") ~generations:[ Add.v1; Add.v2 ]
+;;
 
 let%expect_test "client is newer than server" =
   let handler =
@@ -375,202 +282,8 @@ let%expect_test "client is older than server" =
     server: finished. |}]
 ;;
 
-let%test_module "long polling" =
-  (module struct
-    let v1 =
-      Decl.Request.make_current_gen ~req:Id.sexp ~resp:(Conv.option Conv.int) ~version:1
-    ;;
-
-    let sub_proc =
-      Dune_rpc.Procedures.Poll.make (Dune_rpc.Procedures.Poll.Name.make "pulse") [ v1 ]
-    ;;
-
-    let sub_decl = Sub.of_procedure sub_proc
-    let version = 3, 0
-    let init = init ~version ()
-    let rpc () = Handler.create ~on_init ~version ()
-
-    let server f =
-      let rpc = rpc () in
-      let () =
-        let on_poll _session = f () in
-        let on_cancel _session =
-          printfn "server: polling cancelled";
-          Fiber.return ()
-        in
-        Handler.For_tests.implement_poll rpc sub_proc ~on_poll ~on_cancel
-      in
-      rpc
-    ;;
-
-    let server_long_poll svar =
-      let rpc = rpc () in
-      let () =
-        Handler.implement_long_poll
-          rpc
-          sub_proc
-          svar
-          ~equal:Int.equal
-          ~diff:(fun ~last ~now ->
-            match last with
-            | None -> now
-            | Some last -> now - last)
-      in
-      rpc
-    ;;
-
-    let%expect_test "long polling - client side termination" =
-      let client client =
-        let* poller = Client.poll client sub_decl in
-        let poller =
-          match poller with
-          | Ok p -> p
-          | Error e -> raise (Version_error.E e)
-        in
-        let req () =
-          let+ res = Client.Stream.next poller in
-          match res with
-          | None -> printfn "client: no more values"
-          | Some a -> printfn "client: received %d" a
-        in
-        let* () = req () in
-        let* () = req () in
-        Client.Stream.cancel poller
-      in
-      let handler =
-        let state = ref 0 in
-        server (fun () ->
-          incr state;
-          Fiber.return (Some !state))
-      in
-      test ~init ~client ~handler ~private_menu:[ Poll sub_proc ] ();
-      [%expect
-        {|
-    client: received 1
-    client: received 2
-    server: polling cancelled
-    server: finished. |}]
-    ;;
-
-    let%expect_test "long polling - server side termination" =
-      let client client =
-        printfn "client: long polling";
-        let* poller = Client.poll client sub_decl in
-        let poller =
-          match poller with
-          | Ok p -> p
-          | Error e -> raise (Version_error.E e)
-        in
-        let+ () =
-          Fiber.repeat_while ~init:() ~f:(fun () ->
-            let+ res = Client.Stream.next poller in
-            match res with
-            | None -> None
-            | Some a ->
-              printfn "client: received %d" a;
-              Some ())
-        in
-        printfn "client: subscription terminated"
-      in
-      let handler =
-        let state = ref 0 in
-        server (fun _poller ->
-          incr state;
-          Fiber.return (if !state = 3 then None else Some !state))
-      in
-      test ~init ~client ~handler ~private_menu:[ Poll sub_proc ] ();
-      [%expect
-        {|
-    client: long polling
-    client: received 1
-    client: received 2
-    client: subscription terminated
-    server: finished. |}]
-    ;;
-
-    let%expect_test "long polling - client cancels while request is in-flight" =
-      let ready_to_cancel : unit Fiber.Ivar.t = Fiber.Ivar.create () in
-      let svar = Fiber.Svar.create 0 in
-      let handler = server_long_poll svar in
-      let client client =
-        let* poller =
-          let+ poller = Client.poll client sub_decl in
-          match poller with
-          | Ok p -> p
-          | Error e -> raise (Version_error.E e)
-        in
-        let req () =
-          let+ res = Client.Stream.next poller in
-          match res with
-          | None -> printfn "client: no more values"
-          | Some a -> printfn "client: received %d" a
-        in
-        let* () = Fiber.Svar.write svar 1 in
-        let* () = req () in
-        Fiber.fork_and_join_unit
-          (fun () ->
-             let* () = Fiber.Ivar.read ready_to_cancel in
-             printfn "client: cancelling";
-             Client.Stream.cancel poller)
-          (fun () ->
-             printfn "client: waiting for second value (that will never come)";
-             let+ () = Fiber.fork_and_join_unit req (Fiber.Ivar.fill ready_to_cancel) in
-             printfn "client: finishing session")
-      in
-      test ~init ~client ~handler ~private_menu:[ Poll sub_proc ] ();
-      [%expect.unreachable]
-    [@@expect.uncaught_exn
-      {|
-      (Test_scheduler.Never)
-      Trailing output
-      ---------------
-      client: received 1
-      client: waiting for second value (that will never come)
-      client: cancelling
-      client: no more values
-      client: finishing session |}]
-    ;;
-
-    let%expect_test "long polling - server side termination" =
-      let client client =
-        printfn "client: long polling";
-        let* poller = Client.poll client sub_decl in
-        let poller =
-          match poller with
-          | Ok p -> p
-          | Error e -> raise (Version_error.E e)
-        in
-        let+ () =
-          Fiber.repeat_while ~init:() ~f:(fun () ->
-            let+ res = Client.Stream.next poller in
-            match res with
-            | None -> None
-            | Some a ->
-              printfn "client: received %d" a;
-              Some ())
-        in
-        printfn "client: subscription terminated"
-      in
-      let handler =
-        let state = ref 0 in
-        server (fun _poller ->
-          incr state;
-          Fiber.return (if !state = 3 then None else Some !state))
-      in
-      test ~init ~client ~handler ~private_menu:[ Poll sub_proc ] ();
-      [%expect
-        {|
-    client: long polling
-    client: received 1
-    client: received 2
-    client: subscription terminated
-    server: finished. |}]
-    ;;
-  end)
-;;
-
 let%expect_test "server to client request" =
-  let decl = simple_request ~method_:"double" Conv.int Conv.int in
+  let decl = simple_request ~method_:(Method.Name.of_string "double") Conv.int Conv.int in
   let client_finish = Fiber.Ivar.create () in
   let pool = Fiber.Pool.create () in
   let on_upgrade session _menu =
@@ -621,327 +334,276 @@ let%expect_test "server to client request" =
     server: finished. |}]
 ;;
 
-let%test_module "finalization" =
-  (module struct
-    let decl = simple_request ~method_:"double" Conv.unit Conv.unit
-    let witness = Decl.Request.witness decl
-
-    type callback =
-      | Print
-      | Fail
-
-    let dyn_of_callback =
-      let open Dyn in
-      function
-      | Print -> variant "Print" []
-      | Fail -> variant "Fail" []
-    ;;
-
-    type callbacks =
-      { on_init : callback
-      ; on_terminate : callback
-      ; on_upgrade : callback
-      }
-
-    let dyn_of_callback { on_init; on_terminate; on_upgrade } =
-      Dyn.record
-        [ "on_init", dyn_of_callback on_init
-        ; "on_terminate", dyn_of_callback on_terminate
-        ; "on_upgrade", dyn_of_callback on_upgrade
-        ]
-    ;;
-
-    let handler { on_init; on_terminate; on_upgrade } =
-      let f name what =
-        printfn "server: %s" name;
-        match what with
-        | Print -> Fiber.return ()
-        | Fail -> raise Dune_util.Report_error.Already_reported
-      in
-      let on_init _ _ = f "init" on_init in
-      let on_terminate _ = f "terminate" on_terminate in
-      let on_upgrade _ _ = f "upgrade" on_upgrade in
-      Handler.create ~on_terminate ~on_init ~on_upgrade ~version:(1, 1) ()
-    ;;
-
-    let test callback =
-      let handler =
-        let rpc = handler callback in
-        let () =
-          let cb _ () = failwith "never works" in
-          Handler.implement_request rpc decl cb
-        in
-        rpc
-      in
-      let client client =
-        printfn "client: sending request";
-        let+ resp = request_exn client witness () in
-        match resp with
-        | Error error -> print_dyn @@ Response.Error.to_dyn error
-        | Ok _ -> assert false
-      in
-      let init =
-        { Initialize.Request.dune_version = 1, 1
-        ; protocol_version = Protocol.latest_version
-        ; id = Id.make (Atom "test-client")
-        }
-      in
-      test ~init ~client ~handler ~private_menu:[ Request decl ] ()
-    ;;
-
-    let%expect_test "termination is always called" =
-      let kind = [ Print; Fail ] in
-      let callbacks =
-        List.concat_map kind ~f:(fun on_init ->
-          List.concat_map kind ~f:(fun on_terminate ->
-            List.concat_map kind ~f:(fun on_upgrade ->
-              [ { on_init; on_terminate; on_upgrade } ])))
-      in
-      List.iter callbacks ~f:(fun callback ->
-        dyn_of_callback callback |> print_dyn;
-        (try test callback with
-         | exn ->
-           let exn = Exn_with_backtrace.capture exn in
-           Format.printf "%a@.@." Exn_with_backtrace.pp_uncaught exn);
-        print_endline "---------------");
-      [%expect
-        {|
-        { on_init = Print; on_terminate = Print; on_upgrade = Print }
-        server: init
-        server: upgrade
-        client: sending request
-        { payload =
-            Some [ [ [ "exn"; "Failure(\"never works\")" ]; [ "backtrace"; "" ] ] ]
-        ; message = "server error"
-        ; kind = Code_error
-        }
-        server: terminate
-        server: finished.
-        ---------------
-        { on_init = Print; on_terminate = Print; on_upgrade = Fail }
-        server: init
-        server: upgrade
-        server: terminate
-        server: finished.
-        client: sending request
-        { payload =
-            Some
-              [ [ "id"; [ "auto"; "0" ] ]
-              ; [ "req"; [ [ "method"; "double" ]; [ "params"; [] ] ] ]
-              ]
-        ; message = "request sent while connection is dead"
-        ; kind = Connection_dead
-        }
-        ---------------
-        { on_init = Print; on_terminate = Fail; on_upgrade = Print }
-        server: init
-        server: upgrade
-        client: sending request
-        { payload =
-            Some [ [ [ "exn"; "Failure(\"never works\")" ]; [ "backtrace"; "" ] ] ]
-        ; message = "server error"
-        ; kind = Code_error
-        }
-        server: terminate
-        server: finished.
-        ---------------
-        { on_init = Print; on_terminate = Fail; on_upgrade = Fail }
-        server: init
-        server: upgrade
-        server: terminate
-        /-----------------------------------------------------------------------
-        | Internal error: Uncaught exception.
-        | Dune_util__Report_error.Already_reported
-        \-----------------------------------------------------------------------
-
-
-        ---------------
-        { on_init = Fail; on_terminate = Print; on_upgrade = Print }
-        server: init
-        server: terminate
-        server: finished.
-        /-----------------------------------------------------------------------
-        | Internal error: Uncaught exception.
-        | Response.E
-        |   { payload = Some [ [ "id"; [ "initialize" ] ] ]
-        |   ; message =
-        |       "connection terminated. this request will never receive a response"
-        |   ; kind = Connection_dead
-        |   }
-        \-----------------------------------------------------------------------
-
-
-        ---------------
-        { on_init = Fail; on_terminate = Print; on_upgrade = Fail }
-        server: init
-        server: terminate
-        server: finished.
-        /-----------------------------------------------------------------------
-        | Internal error: Uncaught exception.
-        | Response.E
-        |   { payload = Some [ [ "id"; [ "initialize" ] ] ]
-        |   ; message =
-        |       "connection terminated. this request will never receive a response"
-        |   ; kind = Connection_dead
-        |   }
-        \-----------------------------------------------------------------------
-
-
-        ---------------
-        { on_init = Fail; on_terminate = Fail; on_upgrade = Print }
-        server: init
-        server: terminate
-        /-----------------------------------------------------------------------
-        | Internal error: Uncaught exception.
-        | Dune_util__Report_error.Already_reported
-        \-----------------------------------------------------------------------
-
-
-        ---------------
-        { on_init = Fail; on_terminate = Fail; on_upgrade = Fail }
-        server: init
-        server: terminate
-        /-----------------------------------------------------------------------
-        | Internal error: Uncaught exception.
-        | Dune_util__Report_error.Already_reported
-        \-----------------------------------------------------------------------
-
-
-        --------------- |}]
-    ;;
-  end)
+let check_wire_compatibility legacy current values =
+  let encode = Conv.to_sexp in
+  let decode conv sexp =
+    Conv.of_sexp conv ~version:(3, 0) sexp |> Result.map ~f:(encode legacy)
+  in
+  let all f = List.for_all values ~f in
+  printfn
+    "same bytes: %b; old -> new: %b; new -> old: %b"
+    (all (fun value ->
+       String.equal
+         (Csexp.to_string (encode legacy value))
+         (Csexp.to_string (encode current value))))
+    (all (fun value ->
+       let sexp = encode legacy value in
+       Poly.equal (decode current sexp) (Ok sexp)))
+    (all (fun value ->
+       Poly.equal (decode legacy (encode current value)) (Ok (encode legacy value))))
 ;;
 
-let%expect_test "sexp_for_digest" =
-  let open Dune_rpc_private in
-  let print_sexp_for_digest conv =
-    Pp.to_fmt Format.std_formatter (Sexp.pp (Conv.sexp_for_digest conv))
+let%expect_test "call fields preserve the flattened wire format" =
+  let legacy =
+    let open Conv in
+    iso
+      (both (field "method" (required Method.Name.sexp)) (field "params" (required sexp)))
+      (fun (method_, params) -> { Call.method_; params })
+      (fun { Call.method_; params } -> method_, params)
   in
-  print_sexp_for_digest
-    (Conv.five
-       (Conv.field "a" (Conv.required Conv.string))
-       (Conv.field "b" (Conv.optional Conv.int))
-       (Conv.field "c" (Conv.required Conv.float))
-       (Conv.field "d" (Conv.required Conv.unit))
-       (Conv.field "e" (Conv.optional Conv.char)));
-  [%expect
-    {|
-      (Iso
-       (Both
-        (Both (Field a (Required String)) (Field b (Optional Int)))
-        (Iso
-         (Both
-          (Field c (Required Float))
-          (Both (Field d (Required Unit)) (Field e (Optional Char))))))) |}];
-  print_sexp_for_digest (Conv.iso Conv.sexp (fun x -> x) (fun x -> x));
-  [%expect {| (Iso Sexp) |}];
-  let id_iso = Conv.iso Conv.sexp (fun x -> x) (fun x -> x) in
-  print_sexp_for_digest
-    (Conv.pair
-       (Conv.version ~until:(1, 2) ~since:(2, 3) id_iso)
-       (Conv.version ~since:(1, 2) id_iso));
-  [%expect
-    {|
-    (Pair
-     (Version (Iso Sexp) (since 2 3) (until 1 2))
-     (Version (Iso Sexp) (since 1 2))) |}];
-  let list_conv inner =
-    Conv.fixpoint (fun conv ->
-      let nil = Conv.constr "nil" Conv.unit (fun () -> []) in
-      let cons = Conv.constr "cons" (Conv.pair inner conv) (fun (x, xs) -> x :: xs) in
-      Conv.sum
-        [ Conv.econstr nil; Conv.econstr cons ]
-        (function
-          | [] -> Conv.case () nil
-          | x :: xs -> Conv.case (x, xs) cons))
+  let call =
+    Call.create ~method_:(Method.Name.of_string "build") ~params:(Atom "target") ()
   in
-  print_sexp_for_digest (list_conv Conv.int);
-  [%expect {| (Fixpoint (Sum (nil Unit) (cons (Pair Int (Recurse 0))))) |}];
-  print_sexp_for_digest (list_conv (list_conv Conv.int));
-  (* Recursion uses De Bruijn indices because we want equal structures to
-     produce the same digest. *)
+  let with_id fields = Conv.(record (both (field "id" (required int)) fields)) in
+  check_wire_compatibility (with_id legacy) (with_id Call.fields) [ 42, call ];
+  Conv.to_sexp (with_id Call.fields) (42, call) |> Sexp.to_string |> print_endline;
   [%expect
     {|
-    (Fixpoint
-     (Sum
-      (nil Unit)
-      (cons
-       (Pair
-        (Fixpoint (Sum (nil Unit) (cons (Pair Int (Recurse 0)))))
-        (Recurse 0))))) |}]
+    same bytes: true; old -> new: true; new -> old: true
+    ((id 42) (method build) (params target)) |}]
 ;;
 
-let%expect_test "print digests for all public RPCs" =
-  let open Dune_rpc_private in
-  Decl.Request.print_generations Procedures.Public.ping;
+let%expect_test "diagnostic record wire compatibility" =
+  let legacy =
+    let open Conv in
+    iso
+      (record
+         (eight
+            (field "targets" (required (list Target.sexp)))
+            (field "message" (required (Pp.sexp User_message.Style.sexp)))
+            (field "loc" (optional Loc.sexp))
+            (field
+               "severity"
+               (optional (enum [ "error", Diagnostic.Error; "warning", Warning ])))
+            (field "promotion" (required (list Diagnostic.Promotion.sexp)))
+            (field "directory" (optional string))
+            (field "id" (required Diagnostic.Id.sexp))
+            (field "related" (required (list Diagnostic.Related.sexp)))))
+      (fun (targets, message, loc, severity, promotion, directory, id, related) ->
+         { Diagnostic.targets; message; loc; severity; promotion; directory; id; related })
+      (fun { Diagnostic.targets
+           ; message
+           ; loc
+           ; severity
+           ; promotion
+           ; directory
+           ; id
+           ; related
+           } -> targets, message, loc, severity, promotion, directory, id, related)
+  in
+  let start =
+    { Lexing.pos_fname = "source.ml"; pos_lnum = 2; pos_bol = 10; pos_cnum = 12 }
+  in
+  let loc = { Loc.start; stop = { start with pos_cnum = 18 } } in
+  let message = Pp.tag User_message.Style.Error (Pp.verbatim "a styled message") in
+  let values =
+    List.concat_map [ None; Some loc ] ~f:(fun location ->
+      List.concat_map [ None; Some Diagnostic.Error; Some Warning ] ~f:(fun severity ->
+        List.map [ None; Some "directory" ] ~f:(fun directory ->
+          { Diagnostic.targets = [ Target.Path "target"; Alias "all" ]
+          ; message
+          ; loc = location
+          ; severity
+          ; promotion =
+              [ { Diagnostic.Promotion.in_build = "build"; in_source = "source" } ]
+          ; directory
+          ; id = Diagnostic.Id.create 42
+          ; related = [ { Diagnostic.Related.loc; message } ]
+          })))
+  in
+  check_wire_compatibility legacy Diagnostic.sexp values;
+  [%expect {| same bytes: true; old -> new: true; new -> old: true |}]
+;;
+
+let%expect_test "exported record wire formats" =
+  let check conv value =
+    let sexp = Conv.to_sexp conv value in
+    print_endline (Sexp.to_string sexp);
+    printfn
+      "round trip: %b"
+      (Poly.equal (Conv.of_sexp conv ~version:(3, 0) sexp) (Ok value))
+  in
+  let start = { Lexing.pos_fname = "a.ml"; pos_lnum = 2; pos_bol = 10; pos_cnum = 12 } in
+  let loc =
+    { Loc.start
+    ; stop = { Lexing.pos_fname = "b.ml"; pos_lnum = 3; pos_bol = 20; pos_cnum = 25 }
+    }
+  in
+  check Loc.sexp loc;
   [%expect
     {|
-    Version 1:
-      Request: Unit
-      Response: Unit
-    |}];
-  Decl.Request.print_generations Procedures.Public.diagnostics;
+    ((start ((pos_bol 10) (pos_cnum 12) (pos_fname a.ml) (pos_lnum 2))) (stop ((pos_bol 20) (pos_cnum 25) (pos_fname b.ml) (pos_lnum 3))))
+    round trip: true |}];
+  check
+    Diagnostic.Promotion.sexp
+    { Diagnostic.Promotion.in_build = "_build/a"; in_source = "a" };
   [%expect
     {|
-    Version 1:
-      Request: Unit
-      Response: ffd3de9652c685594aacfc51d28f2533
-    Version 2:
-      Request: Unit
-      Response: 0d4442e0c36d6727a9acf9aabce6a6ad
-    |}];
-  Decl.Notification.print_generations Procedures.Public.shutdown;
-  [%expect {| Version 1: Unit |}];
-  Decl.Request.print_generations Procedures.Public.format_dune_file;
+    ((in_build _build/a) (in_source a))
+    round trip: true |}];
+  check
+    Diagnostic.Related.sexp
+    { Diagnostic.Related.loc
+    ; message = Pp.tag User_message.Style.Hint (Pp.verbatim "hint")
+    };
   [%expect
     {|
-    Version 1:
-      Request: 15eae4b546faf05a0fc3b6d03aed0c63
-      Response: String
-    |}];
-  Decl.Request.print_generations Procedures.Public.promote;
+    ((loc ((start ((pos_bol 10) (pos_cnum 12) (pos_fname a.ml) (pos_lnum 2))) (stop ((pos_bol 20) (pos_cnum 25) (pos_fname b.ml) (pos_lnum 3))))) (message (Tag ((Hint ()) (Verbatim hint)))))
+    round trip: true |}];
+  List.iter [ None; Some (Sexp.Atom "payload") ] ~f:(fun payload ->
+    check Message.sexp { Message.payload; message = "message" });
   [%expect
     {|
-    Version 1:
-      Request: String
-      Response: Unit
-    |}];
-  Decl.Request.print_generations Procedures.Public.build_dir;
+    ((message message))
+    round trip: true
+    ((message message) (payload payload))
+    round trip: true |}];
+  let id = Job.Id.create 42 in
+  check
+    Job.Event.sexp
+    (Job.Event.Start
+       { Job.id
+       ; pid = 123
+       ; description = Pp.tag () (Pp.verbatim "job")
+       ; started_at = 1.5
+       });
+  check Job.Event.sexp (Job.Event.Stop id);
   [%expect
     {|
-    Version 1:
-      Request: Unit
-      Response: String
-    |}];
-  Decl.Notification.print_generations Procedures.Server_side.abort;
-  [%expect {| Version 1: 0e9dfd1099101769896cf0bb06f891c6 |}];
-  Decl.Notification.print_generations Procedures.Server_side.log;
-  [%expect {| Version 1: 0e9dfd1099101769896cf0bb06f891c6 |}];
-  Decl.Request.print_generations (Procedures.Poll.poll Procedures.Poll.progress);
+    (Start ((description (Tag (Verbatim job))) (id 42) (pid 123) (started_at 1.5)))
+    round trip: true
+    (Stop 42)
+    round trip: true |}];
+  List.iter
+    [ Files_to_promote.All; These [ Stdune.Path.Source.of_string "a" ] ]
+    ~f:(fun files ->
+      List.iter [ Promote_targets.Matching.Exact; Prefix ] ~f:(fun matching ->
+        check Promote_targets.sexp { Promote_targets.files; matching }));
   [%expect
     {|
-    Version 1:
-      Request: Sexp
-      Response: 889aa68f4ad3fc68ef5dfffbb7282c18
-    Version 2:
-      Request: Sexp
-      Response: 929074caab98360dc7116b6f27c2b9ad
-    |}];
-  Decl.Request.print_generations (Procedures.Poll.poll Procedures.Poll.diagnostic);
+    ((files ()) (matching exact))
+    round trip: true
+    ((files ()) (matching prefix))
+    round trip: true
+    ((files (a)) (matching exact))
+    round trip: true
+    ((files (a)) (matching prefix))
+    round trip: true |}]
+;;
+
+let%expect_test "RPC protocol record wire formats" =
+  let check conv value =
+    let sexp = Conv.to_sexp conv value in
+    print_endline (Sexp.to_string sexp);
+    printfn
+      "round trip: %b"
+      (Poly.equal (Conv.of_sexp conv ~version:(3, 0) sexp) (Ok value))
+  in
+  let response = Conv.record Response.fields in
+  let id = Id.make (Atom "request") in
+  List.iter [ Response.Error.Invalid_request; Code_error ] ~f:(fun kind ->
+    List.iter [ None; Some (Sexp.Atom "payload") ] ~f:(fun payload ->
+      check response (id, Error { Response.Error.kind; payload; message = "message" })));
   [%expect
     {|
-    Version 1:
-      Request: Sexp
-      Response: 443627a52ab5595206164d020ff01c56
-    Version 2:
-      Request: Sexp
-      Response: 12995aa06697c01ef35c0339bd2fa29e
-    |}];
-  Decl.Request.print_generations (Procedures.Poll.poll Procedures.Poll.running_jobs);
+    ((id request) (result (error ((kind Invalid_request) (message message)))))
+    round trip: true
+    ((id request) (result (error ((kind Invalid_request) (message message) (payload payload)))))
+    round trip: true
+    ((id request) (result (error ((kind Code_error) (message message)))))
+    round trip: true
+    ((id request) (result (error ((kind Code_error) (message message) (payload payload)))))
+    round trip: true |}];
+  let request = { Initialize.Request.dune_version = 3, 0; protocol_version = 0; id } in
+  let call = Initialize.Request.to_call request in
+  Conv.to_sexp (Conv.record Call.fields) call |> Sexp.to_string |> print_endline;
+  printfn
+    "round trip: %b"
+    (Poly.equal (Initialize.Request.of_call call ~version:(3, 0)) (Ok request));
   [%expect
     {|
-    Version 1:
-      Request: Sexp
-      Response: 33528f248084297d123a6ebd4c3ddee0
-    |}]
+    ((method initialize) (params ((dune_version (3 0)) (id request) (protocol_version 0))))
+    round trip: true |}];
+  let module Initialize_response = Procedures.Public.Action_plugin.Initialize_response in
+  check Initialize_response.conv { Initialize_response.root = "/sandbox/default" };
+  [%expect
+    {|
+    ((root /sandbox/default))
+    round trip: true |}]
+;;
+
+let%expect_test "format and add request wire formats" =
+  let check (_, Decl.Generation.T { req; upgrade_req; downgrade_req; _ }) value =
+    let sexp = Conv.to_sexp req (downgrade_req value) in
+    print_endline (Sexp.to_string sexp);
+    let decoded = Conv.of_sexp req ~version:(3, 0) sexp |> Result.map ~f:upgrade_req in
+    printfn "round trip: %b" (Poly.equal decoded (Ok value))
+  in
+  List.iter Procedures.Public.format_dune_file.generations ~f:(fun gen ->
+    check gen ("dune", `Contents "contents"));
+  [%expect
+    {|
+    ((contents contents) (path dune))
+    round trip: true |}];
+  check Add.v2 { Add.x = 2; y = 7; others = [ -1; 3 ] };
+  [%expect
+    {|
+    ((others (-1 3)) (x 2) (y 7))
+    round trip: true |}]
+;;
+
+let%expect_test "V1 diagnostic record wire format" =
+  let start = { Lexing.pos_fname = "a.ml"; pos_lnum = 2; pos_bol = 10; pos_cnum = 12 } in
+  let loc = { Loc.start; stop = { start with pos_cnum = 18 } } in
+  let message = Pp.tag User_message.Style.Details (Pp.verbatim "message") in
+  let minimal =
+    { Diagnostic.id = Diagnostic.Id.create 7
+    ; message
+    ; targets = []
+    ; loc = None
+    ; severity = None
+    ; promotion = []
+    ; directory = None
+    ; related = []
+    }
+  in
+  let full =
+    { minimal with
+      targets = [ Target.Alias "all" ]
+    ; loc = Some loc
+    ; severity = Some Warning
+    ; promotion = [ { Diagnostic.Promotion.in_build = "build"; in_source = "source" } ]
+    ; directory = Some "dir"
+    ; related = [ { Diagnostic.Related.loc; message } ]
+    }
+  in
+  List.iter
+    Procedures.Public.diagnostics.generations
+    ~f:(fun (version, Decl.Generation.T { resp; upgrade_resp; downgrade_resp; _ }) ->
+      if version = 1
+      then
+        List.iter [ minimal; full ] ~f:(fun diagnostic ->
+          let value = [ diagnostic ] in
+          let sexp = Conv.to_sexp resp (downgrade_resp value) in
+          print_endline (Sexp.to_string sexp);
+          let decoded =
+            Conv.of_sexp resp ~version:(3, 0) sexp |> Result.map ~f:upgrade_resp
+          in
+          printfn "round trip: %b" (Poly.equal decoded (Ok value))));
+  [%expect
+    {|
+    (((id 7) (message (Tag (Verbatim message))) (promotion ()) (related ()) (targets ())))
+    round trip: true
+    (((directory dir) (id 7) (loc ((start ((pos_bol 10) (pos_cnum 12) (pos_fname a.ml) (pos_lnum 2))) (stop ((pos_bol 10) (pos_cnum 18) (pos_fname a.ml) (pos_lnum 2))))) (message (Tag (Verbatim message))) (promotion (((in_build build) (in_source source)))) (related (((loc ((start ((pos_bol 10) (pos_cnum 12) (pos_fname a.ml) (pos_lnum 2))) (stop ((pos_bol 10) (pos_cnum 18) (pos_fname a.ml) (pos_lnum 2))))) (message (Tag (Verbatim message)))))) (severity warning) (targets ((Alias all)))))
+    round trip: true |}]
 ;;

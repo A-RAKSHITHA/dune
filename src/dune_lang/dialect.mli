@@ -1,5 +1,4 @@
-open Stdune
-open Dune_sexp
+open Import
 open Ocaml
 
 (** Dialects
@@ -39,7 +38,7 @@ val print_ast : t -> Ml_kind.t -> (Loc.t * Action.t) option
 val ocaml : t
 val reason : t
 val rescript : t
-val ml_suffix : t -> Ml_kind.t -> string option
+val ml_suffix : t -> Ml_kind.t -> Filename.Extension.t option
 
 module DB : sig
   type dialect := t
@@ -47,7 +46,6 @@ module DB : sig
 
   val empty : t
   val add : t -> loc:Loc.t -> dialect -> t
-  val find_by_name : t -> string -> dialect option
   val find_by_extension : t -> Filename.Extension.t -> (dialect * Ml_kind.t) option
   val fold : t -> init:'a -> f:(dialect -> 'a -> 'a) -> 'a
   val to_dyn : t -> Dyn.t
@@ -56,8 +54,8 @@ module DB : sig
 
   type for_merlin =
     { extensions : string option Ml_kind.Dict.t list
-    ; readers : Filename.Extension.t list String.Map.t
+    ; readers : string Nonempty_list.t String.Map.t
     }
 
-  val for_merlin : t -> for_merlin
+  val for_merlin : t -> for_:Compilation_mode.t -> for_merlin
 end

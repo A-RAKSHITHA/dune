@@ -1,0 +1,24 @@
+(cram
+ (alias runtest-action-runner)
+ (applies_to
+  basic.t
+  cancel-disconnect.t
+  disconnect.t
+  failure.t
+  pool.t
+  runtest.t
+  trace.t))
+
+(cram
+ (alias runtest-action-runner)
+ (applies_to fd-leak.t)
+ (enabled_if
+  (= %{system} linux)))
+
+;; Disabled until stop-on-first-error cancellation through action runners exits
+;; promptly instead of relying on the test harness timeout.
+
+(cram
+ (enabled_if false)
+ (alias runtest-action-runner)
+ (applies_to stop-on-first-error.t watch-stop-on-first-error.t))

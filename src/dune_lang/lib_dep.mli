@@ -1,16 +1,16 @@
-open Stdune
+open Import
 
 module Select : sig
   module Choice : sig
     type t =
       { required : Lib_name.Set.t
       ; forbidden : Lib_name.Set.t
-      ; file : string
+      ; file : Path.Local.t
       }
   end
 
   type t =
-    { result_fn : string
+    { result_fn : Path.Local.t
     ; choices : Choice.t list
     ; loc : Loc.t
     }
@@ -22,21 +22,25 @@ type t =
   | Direct of (Loc.t * Lib_name.t)
   | Re_export of (Loc.t * Lib_name.t)
   | Select of Select.t
+  | Instantiate of
+      { loc : Loc.t
+      ; lib : Lib_name.t
+      ; arguments : (Loc.t * Lib_name.t) list
+      ; new_name : Module_name.t option
+      }
 
+val repr : t Repr.t
 val equal : t -> t -> bool
 val to_dyn : t -> Dyn.t
 val direct : Loc.t * Lib_name.t -> t
 val re_export : Loc.t * Lib_name.t -> t
-val decode : allow_re_export:bool -> t Dune_sexp.Decoder.t
+val decode : allow_re_export:bool -> t Decoder.t
+val encode : t Encoder.t
 
 module L : sig
   type nonrec t = t list
 
-  val field_encode : t -> name:string -> Dune_sexp.Encoder.field
-
-  val decode
-    :  allow_re_export:bool
-    -> (t, Dune_sexp.Decoder.values) Dune_sexp.Decoder.parser
-
+  val field_encode : t -> name:string -> Encoder.field
+  val decode : allow_re_export:bool -> (t, Decoder.values) Decoder.parser
   val of_pps : Lib_name.t list -> t
 end

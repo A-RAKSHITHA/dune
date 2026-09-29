@@ -1,4 +1,4 @@
-open! Import
+open Import
 
 type t =
   { modules_before_stdlib : Module_name.Set.t
@@ -10,7 +10,7 @@ type t =
 let syntax =
   let syntax =
     Dune_lang.Syntax.create
-      ~name:"experimental_building_ocaml_compiler_with_dune"
+      ~name:(Syntax.Name.parse "experimental_building_ocaml_compiler_with_dune")
       ~experimental:true
       ~desc:"experimental feature for building the compiler with dune"
       [ (0, 1), `Since (1, 3) ]

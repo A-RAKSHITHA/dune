@@ -1,8 +1,6 @@
 Run inline tests using Node.js
 
-  $ cat >dune-project <<EOF
-  > (lang dune 3.17)
-  > EOF
+  $ make_dune_project 3.17
 
   $ dune runtest
   inline tests (Byte)
@@ -18,7 +16,7 @@ Run inline tests using Node.js
   inline tests (Wasm)
   inline tests (Wasm)
 
-  $ dune build wasm/.inline_tests_wasm.inline-tests/inline_test_runner_inline_tests_wasm.bc --display short
+  $ dune build wasm/.inline_tests_wasm.inline-tests/inline_test_runner_inline_tests_wasm.bc
   Error: Don't know how to build
   wasm/.inline_tests_wasm.inline-tests/inline_test_runner_inline_tests_wasm.bc
   [1]

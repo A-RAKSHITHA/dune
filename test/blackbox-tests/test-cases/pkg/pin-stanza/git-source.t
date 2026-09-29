@@ -1,7 +1,5 @@
 Package sources can be set to git:
 
-  $ . ../helpers.sh
-
   $ mkrepo
   $ add_mock_repo_if_needed
 
@@ -10,10 +8,7 @@ We create a repo with a fixed name for the default branch.
   $ mkdir _repo
   $ cd _repo
   $ git init --initial-branch=duplicated --quiet
-  $ cat >dune-project <<EOF
-  > (lang dune 3.13)
-  > (package (name foo))
-  > EOF
+  $ make_dune_project_with_package 3.13 foo
   $ git add -A
   $ git commit -qm "initial commit"
   $ cd ..
@@ -28,7 +23,7 @@ We create a repo with a fixed name for the default branch.
   >  (depends foo))
   > EOF
 
-  $ dune pkg lock
+  $ dune_pkg_lock_normalized
   Solution for dune.lock:
   - foo.dev
 
@@ -39,7 +34,7 @@ fix the name of the branch eariler):
 
 This should work without issue, as we never reference the ambiguous reference:
 
-  $ dune pkg lock
+  $ dune_pkg_lock_normalized
   Solution for dune.lock:
   - foo.dev
 
@@ -58,7 +53,7 @@ If we use the duplicate reference in the config
 This will work as both references point at the same revision, thus aren't
 ambiguous:
 
-  $ dune pkg lock
+  $ dune_pkg_lock_normalized
   Solution for dune.lock:
   - foo.dev
 
@@ -69,12 +64,13 @@ than the tag is pointing to (still the initial commit):
 
 In this case Dune can't determine which reference to use and will error out:
 
-  $ dune pkg lock 2>&1 | sed "s|$PWD|\$PWD|"
+  $ dune_pkg_lock_normalized 2>&1 | dune_cmd subst "$PWD" '$PWD'
   Error: Reference "duplicated" in remote
   "file://$PWD/_repo"
   is ambiguous
   Hint: If you want to specify a tag use refs/tags/duplicated
   Hint: If you want to specify a branch use refs/branches/duplicated
+  [1]
 
 Git also has unambibuous namespaces tags and branches, for tags it is `refs/tags/`.
 
@@ -90,7 +86,7 @@ Git also has unambibuous namespaces tags and branches, for tags it is `refs/tags
 
 Locking should work, as there are no ambiguous references.
 
-  $ dune pkg lock
+  $ dune_pkg_lock_normalized
   Solution for dune.lock:
   - foo.dev
 
@@ -108,6 +104,6 @@ For branches the namespace is `refs/heads/`:
 
 Likewise locking a branch this way should work as well:
 
-  $ dune pkg lock
+  $ dune_pkg_lock_normalized
   Solution for dune.lock:
   - foo.dev

@@ -62,6 +62,7 @@ type t =
   ; install_c_headers : (Loc.t * string) list
   ; public_headers : Loc.t * Dep_conf.t list
   ; ppx_runtime_libraries : (Loc.t * Lib_name.t) list
+  ; melange_ppx_runtime_libraries : (Loc.t * Lib_name.t) list option
   ; modes : Mode_conf.Lib.Set.t
   ; kind : Lib_kind.t
   ; library_flags : Ordered_set_lang.Unexpanded.t
@@ -76,6 +77,7 @@ type t =
   ; dune_version : Dune_lang.Syntax.Version.t
   ; virtual_modules : Ordered_set_lang.Unexpanded.t option
   ; implements : (Loc.t * Lib_name.t) option
+  ; parameters : (Loc.t * Lib_name.t) list
   ; default_implementation : (Loc.t * Lib_name.t) option
   ; private_modules : Ordered_set_lang.Unexpanded.t option
   ; stdlib : Ocaml_stdlib.t option
@@ -109,6 +111,11 @@ let decode =
          ~default:(stanza_loc, [])
      and+ ppx_runtime_libraries =
        field "ppx_runtime_libraries" (repeat (located Lib_name.decode)) ~default:[]
+     and+ melange_ppx_runtime_libraries =
+       field_o
+         "melange.ppx_runtime_libraries"
+         (Dune_lang.Syntax.since Stanza.syntax (3, 24)
+          >>> repeat (located Lib_name.decode))
      and+ library_flags = Ordered_set_lang.Unexpanded.field "library_flags"
      and+ c_library_flags = Ordered_set_lang.Unexpanded.field "c_library_flags"
      and+ virtual_deps =
@@ -118,7 +125,37 @@ let decode =
          "modes"
          (Modes.decode ~stanza_loc ~dune_version project)
          ~default:(Mode_conf.Lib.Set.default stanza_loc)
-     and+ kind = field "kind" Lib_kind.decode ~default:Lib_kind.Normal
+     and+ virtual_modules, kind =
+       let* virtual_modules =
+         Ordered_set_lang.Unexpanded.field_o
+           ~check:(Dune_lang.Syntax.since Stanza.syntax (1, 7))
+           ~since_expanded:Modules_settings.since_expanded
+           "virtual_modules"
+       in
+       let+ dune_file_kind =
+         field "kind" Lib_kind.Dune_file.decode ~default:Lib_kind.Dune_file.Normal
+       in
+       let kind : Lib_kind.t =
+         match virtual_modules with
+         | None -> Dune_file dune_file_kind
+         | Some _ ->
+           (match dune_file_kind with
+            | Normal ->
+              (* Libraries are virtual just in case [virtual_modules] are specified
+                 and they do not have a *non-normal* kind specified. *)
+              Virtual
+            | (Ppx_deriver _ | Ppx_rewriter _) as incompatable_kind ->
+              User_error.raise
+                ~loc:stanza_loc
+                ~hints:[ Pp.text "Remove either the 'kind' or 'virtual_modules' fields" ]
+                [ Pp.text "Only virtual libraries can have 'virtual_modules'"
+                ; Pp.textf
+                    "but this library has 'virtual_modules' and is specified as kind \
+                     '%s'."
+                    (Lib_kind.Dune_file.cstr_name incompatable_kind)
+                ])
+       in
+       virtual_modules, kind
      and+ optional = field_b "optional"
      and+ no_dynlink = field_b "no_dynlink"
      and+ () =
@@ -136,15 +173,16 @@ let decode =
        let+ _ = field_b "no_keep_locs" ~check in
        ()
      and+ sub_systems = Sub_system_info.record_parser
-     and+ virtual_modules =
-       Ordered_set_lang.Unexpanded.field_o
-         ~check:(Dune_lang.Syntax.since Stanza.syntax (1, 7))
-         ~since_expanded:Stanza_common.Modules_settings.since_expanded
-         "virtual_modules"
      and+ implements =
        field_o
          "implements"
          (Dune_lang.Syntax.since Stanza.syntax (1, 7) >>> located Lib_name.decode)
+     and+ parameters =
+       field
+         "parameters"
+         (Dune_lang.Syntax.since Dune_lang.Oxcaml.syntax (0, 1)
+          >>> repeat (located Lib_name.decode))
+         ~default:[]
      and+ default_implementation =
        field_o
          "default_implementation"
@@ -152,7 +190,7 @@ let decode =
      and+ private_modules =
        Ordered_set_lang.Unexpanded.field_o
          ~check:(Dune_lang.Syntax.since Stanza.syntax (1, 2))
-         ~since_expanded:Stanza_common.Modules_settings.since_expanded
+         ~since_expanded:Modules_settings.since_expanded
          "private_modules"
      and+ stdlib =
        field_o
@@ -181,13 +219,11 @@ let decode =
          (Dune_lang.Syntax.since Stanza.syntax (2, 7)
           >>> fields (field "ppx" (located Lib_name.decode)))
      and+ package =
-       field_o
-         "package"
-         (Dune_lang.Syntax.since Stanza.syntax (2, 8) >>> located Stanza_common.Pkg.decode)
+       Stanza_pkg.field_opt ~check:(Dune_lang.Syntax.since Stanza.syntax (2, 8)) ()
      and+ melange_runtime_deps =
        field
          "melange.runtime_deps"
-         (Dune_lang.Syntax.since Melange_stanzas.syntax (0, 1)
+         (Dune_lang.Syntax.since Dune_lang.Melange.syntax (0, 1)
           >>> located (repeat Dep_conf.decode))
          ~default:(stanza_loc, [])
      in
@@ -259,6 +295,7 @@ let decode =
      ; install_c_headers
      ; public_headers
      ; ppx_runtime_libraries
+     ; melange_ppx_runtime_libraries
      ; modes
      ; kind
      ; library_flags
@@ -273,6 +310,7 @@ let decode =
      ; dune_version
      ; virtual_modules
      ; implements
+     ; parameters
      ; default_implementation
      ; private_modules
      ; stdlib
@@ -360,7 +398,10 @@ let foreign_dll_files t ~dir ~ext_dll =
   | None -> foreign_archives
 ;;
 
-let archive_basename t ~ext = Lib_name.Local.to_string (snd t.name) ^ ext
+let archive_basename t ~ext =
+  Lib_name.Local.to_string (snd t.name) ^ Filename.Extension.to_string ext
+;;
+
 let archive t ~dir ~ext = Path.Build.relative dir (archive_basename t ~ext)
 
 let best_name t =
@@ -369,7 +410,13 @@ let best_name t =
   | Public p -> snd p.name
 ;;
 
-let is_virtual t = Option.is_some t.virtual_modules
+let public_name t =
+  match t.visibility with
+  | Private _ -> None
+  | Public p -> Some (snd p.name)
+;;
+
+let is_virtual t = t.kind = Virtual
 let is_impl t = Option.is_some t.implements
 
 let obj_dir ~dir t =
@@ -384,11 +431,22 @@ let obj_dir ~dir t =
       ((* TODO instead of this fragile approximation, we should be looking at
           [Modules.t] and deciding. Unfortunately, [Obj_dir.t] is currently
           used in some places where [Modules.t] is not yet constructed. *)
-       t.private_modules <> None
-       || t.buildable.modules.root_module <> None)
+       t.private_modules
+       <> None
+          (* CR-someday rgrinberg: The following check used to be here:
+
+            {[
+              || t.buildable.modules.root_module <> None
+            ]}
+
+            but it doesn't work correctly. We need to always pass the
+            root_module with [ -H ] at least *)
+      )
     ~private_lib
     (snd t.name)
 ;;
+
+let local_main_module_name t = Some (Module_name.of_local_lib_name t.name)
 
 let main_module_name t : Lib_info.Main_module_name.t =
   match t.implements, t.wrapped with
@@ -408,6 +466,25 @@ let to_lib_id ~src_dir t =
   Lib_id.Local.make ~loc ~src_dir (Lib_name.of_local t.name)
 ;;
 
+let library_deps ~modes (buildable : Buildable.t) =
+  let ocaml, melange =
+    let { Lib_mode.Map.ocaml = { byte; native }; melange } = modes in
+    let ocaml_libraries = if byte || native then buildable.libraries else [] in
+    let melange_libraries =
+      match melange, buildable.melange_libraries with
+      | true, Some melange_libraries -> melange_libraries
+      | true, None -> buildable.libraries
+      | false, None -> []
+      | false, Some _ ->
+        User_error.raise
+          ~loc:buildable.loc
+          [ Pp.text "Cannot specify `melange.libraries' without `melange' mode" ]
+    in
+    ocaml_libraries, melange_libraries
+  in
+  { Compilation_mode.Per_mode.ocaml; melange }
+;;
+
 let to_lib_info
       conf
       ~expander
@@ -421,7 +498,12 @@ let to_lib_info
   let archive ?(dir = dir) ext = archive conf ~dir ~ext in
   let modes = Mode_conf.Lib.Set.eval ~has_native conf.modes in
   let archive_for_mode ~f_ext ~mode =
-    if Mode.Dict.get modes.ocaml mode then Some (archive (f_ext mode)) else None
+    if Mode.Dict.get modes.ocaml mode
+    then (
+      match conf.kind with
+      | Parameter -> None
+      | Virtual | Dune_file _ -> Some (archive (f_ext mode)))
+    else None
   in
   let archives_for_mode ~f_ext =
     Mode.Dict.of_func (fun ~mode -> archive_for_mode ~f_ext ~mode |> Option.to_list)
@@ -440,7 +522,7 @@ let to_lib_info
     | Private pkg -> Lib_info.Status.Private (conf.project, pkg)
     | Public p -> Public (conf.project, p.package)
   in
-  let virtual_library = is_virtual conf in
+  let virtual_ = is_virtual conf in
   let foreign_archives =
     let init =
       Mode.Map.Multi.create_for_all_modes
@@ -456,7 +538,7 @@ let to_lib_info
   in
   let native_archives =
     let archive = archive ext_lib in
-    if virtual_library || not modes.ocaml.native
+    if virtual_ || not modes.ocaml.native
     then Lib_info.Files []
     else if
       Option.is_some conf.implements
@@ -467,10 +549,9 @@ let to_lib_info
   in
   let foreign_dll_files = foreign_dll_files conf ~dir ~ext_dll in
   let exit_module = Option.bind conf.stdlib ~f:(fun x -> x.exit_module) in
-  let virtual_ = Option.map conf.virtual_modules ~f:(fun _ -> Lib_info.Source.Local) in
   let foreign_objects = Lib_info.Source.Local in
   let archives, plugins =
-    if virtual_library
+    if virtual_
     then Mode.Dict.make_both [], Mode.Dict.make_both []
     else (
       let plugins =
@@ -486,6 +567,7 @@ let to_lib_info
       in
       archives_for_mode ~f_ext:Mode.compiled_lib_ext, plugins)
   in
+  let local_main_module_name = local_main_module_name conf in
   let main_module_name = main_module_name conf in
   let name = best_name conf in
   let lib_id =
@@ -504,10 +586,12 @@ let to_lib_info
             match pform with
             | Var Context_name ->
               let context, _ = Path.Build.extract_build_context_exn dir in
-              Memo.return context
+              Memo.return (Filename.to_string context)
             | Var Profile ->
               let context, _ = Path.Build.extract_build_context_exn dir in
-              let+ profile = Per_context.profile (Context_name.of_string context) in
+              let+ profile =
+                Per_context.profile (Context_name.of_string (Filename.to_string context))
+              in
               Profile.to_string profile
             | _ -> Memo.return @@ Lib_config.get_for_enabled_if lib_config pform
           in
@@ -522,17 +606,28 @@ let to_lib_info
   let version =
     match status with
     | Public (_, pkg) -> Package.version pkg
-    | Installed_private | Installed | Private _ -> None
+    | Installed_private _ | Installed _ | Private _ -> None
   in
-  let requires = conf.buildable.libraries in
   let loc = conf.buildable.loc in
+  let requires = library_deps ~modes conf.buildable in
+  let parameters = conf.parameters in
+  let allow_unused_libraries = conf.buildable.allow_unused_libraries in
   let kind = conf.kind in
   let src_dir = dir in
   let orig_src_dir = None in
   let synopsis = conf.synopsis in
   let sub_systems = conf.sub_systems in
-  let ppx_runtime_deps = conf.ppx_runtime_libraries in
-  let preprocess = conf.buildable.preprocess in
+  let ppx_runtime_deps =
+    let melange =
+      Option.value conf.melange_ppx_runtime_libraries ~default:conf.ppx_runtime_libraries
+    in
+    { Compilation_mode.Per_mode.ocaml = conf.ppx_runtime_libraries; melange }
+  in
+  let preprocess =
+    { Compilation_mode.Per_mode.ocaml = conf.buildable.preprocess.config
+    ; melange = conf.buildable.melange_preprocess.config
+    }
+  in
   let virtual_deps = conf.virtual_deps in
   let dune_version = Some conf.dune_version in
   let implements = conf.implements in
@@ -562,13 +657,16 @@ let to_lib_info
     ~version
     ~synopsis
     ~main_module_name
+    ~local_main_module_name
     ~sub_systems
     ~requires
+    ~parameters
     ~foreign_objects
     ~public_headers
     ~plugins
     ~archives
     ~ppx_runtime_deps
+    ~allow_unused_libraries
     ~foreign_archives
     ~native_archives
     ~foreign_dll_files
@@ -578,7 +676,6 @@ let to_lib_info
     ~enabled
     ~virtual_deps
     ~dune_version
-    ~virtual_
     ~entry_modules
     ~implements
     ~default_implementation
@@ -589,6 +686,7 @@ let to_lib_info
     ~exit_module
     ~instrumentation_backend
     ~melange_runtime_deps
+    ~root_module:(Option.map conf.buildable.modules.root_module ~f:snd)
 ;;
 
 include Stanza.Make (struct

@@ -12,6 +12,36 @@ val to_dyn : t -> Dyn.t
 val name : t -> Lib_name.t
 
 val implements : t -> t Resolve.Memo.t option
+val parameters : t -> t list Resolve.Memo.t
+
+module Parameterised : sig
+  type status =
+    | Not_parameterised
+    | Partial
+    | Complete
+
+  val status : t -> status
+  val arguments : t -> t list
+  val applied_modules : t -> Module_name.t Parameterised_name.t list Resolve.t
+  val applied_name : t -> Module_name.t Parameterised_name.t Resolve.t
+  val requires : t -> for_:Compilation_mode.t -> t list Resolve.t
+
+  val for_instance
+    :  build_dir:Path.Build.t
+    -> ext_lib:Filename.Extension.t option
+    -> t
+    -> t
+
+  val dir : build_dir:Path.Build.t -> t -> Path.Build.t
+
+  val instantiate
+    :  loc:Loc.t
+    -> from:[ `depends | `inline_tests ]
+    -> t
+    -> (Loc.t * t Resolve.t) list
+    -> parent_parameters:(Loc.t * t) list
+    -> t Resolve.t
+end
 
 (** [is_local t] returns [true] whenever [t] is defined in the local workspace *)
 val is_local : t -> bool
@@ -21,11 +51,11 @@ val main_module_name : t -> Module_name.t option Resolve.Memo.t
 val wrapped : t -> Wrapped.t option Resolve.Memo.t
 
 (** Direct library dependencies of this library *)
-val requires : t -> t list Resolve.Memo.t
+val requires : t -> for_:Compilation_mode.t -> t list Resolve.Memo.t
 
-val re_exports : t -> t list Resolve.Memo.t
-val ppx_runtime_deps : t -> t list Resolve.Memo.t
-val pps : t -> t list Resolve.Memo.t
+val re_exports : t -> for_:Compilation_mode.t -> t list Resolve.Memo.t
+val ppx_runtime_deps : t -> for_:Compilation_mode.t -> t list Resolve.Memo.t
+val pps : t -> for_:Compilation_mode.t -> t list Resolve.Memo.t
 
 include Comparable_intf.S with type key := t
 
@@ -41,6 +71,8 @@ module L : sig
     -> key:('a -> t)
     -> deps:('a -> 'a list Resolve.Memo.t)
     -> ('a list, 'a list) Result.t Resolve.Memo.t
+
+  val project_root : t list -> Path.Source.t option
 end
 
 (** {1 Compilation contexts} *)
@@ -58,23 +90,40 @@ module Compile : sig
   val for_lib : allow_overlaps:bool -> db -> lib -> t
 
   (** Return the list of dependencies needed for linking this library/exe *)
-  val requires_link : t -> lib list Resolve.t Memo.Lazy.t
+  val requires_link : t -> for_:Compilation_mode.t -> lib list Resolve.t Memo.Lazy.t
+
+  val user_written_requires
+    :  t
+    -> for_:Compilation_mode.t
+    -> (Loc.t * lib) list Resolve.Memo.t
+
+  val user_written_requires_no_loc
+    :  t
+    -> for_:Compilation_mode.t
+    -> lib list Resolve.Memo.t
 
   (** Dependencies listed by the user + runtime dependencies from ppx *)
-  val direct_requires : t -> lib list Resolve.Memo.t
+  val direct_requires : t -> for_:Compilation_mode.t -> lib list Resolve.Memo.t
 
   module Resolved_select : sig
     type t =
-      { src_fn : Filename.t Resolve.t
-      ; dst_fn : Filename.t
+      { src_fn : Path.Local.t Resolve.t
+      ; dst_fn : Path.Local.t
+      ; loc : Loc.t
       }
   end
 
   (** Resolved select forms *)
-  val resolved_selects : t -> Resolved_select.t list Resolve.Memo.t
+  val resolved_selects
+    :  t
+    -> for_:Compilation_mode.t
+    -> Resolved_select.t list Resolve.Memo.t
 
   (** Transitive closure of all used ppx rewriters *)
-  val pps : t -> lib list Resolve.Memo.t
+  val pps : t -> for_:Compilation_mode.t -> lib list Resolve.Memo.t
+
+  (** Libraries allowed to be unused *)
+  val allow_unused_libraries : t -> lib list Resolve.Memo.t
 
   (** Sub-systems used in this compilation context *)
   val sub_systems : t -> sub_system list Memo.t
@@ -88,6 +137,13 @@ module DB : sig
 
   (** A database allow to resolve library names *)
   type t = db
+
+  val with_parent : t -> parent:t option -> t
+
+  (** Create a library database from a specified list of library paths. A
+      library path is a path to a "lib" directory such as those found in the
+      OCAMLPATH variable or the "path" field of findlib.conf. *)
+  val of_paths : Context.t -> paths:Path.t list -> t Memo.t
 
   val installed : Context.t -> t Memo.t
 
@@ -143,10 +199,11 @@ module DB : sig
       This function is for executables or melange.emit stanzas. *)
   val resolve_user_written_deps
     :  t
-    -> [ `Exe of (Loc.t * string) Nonempty_list.t | `Melange_emit of string ]
+    -> Exe_target.t
     -> allow_overlaps:bool
     -> forbidden_libraries:(Loc.t * Lib_name.t) list
     -> Lib_dep.t list
+    -> allow_unused_libraries:(Loc.t * Lib_name.t) list
     -> pps:(Loc.t * Lib_name.t) list
     -> dune_version:Dune_lang.Syntax.Version.t
     -> Compile.t
@@ -161,11 +218,16 @@ module DB : sig
     :  t
     -> Loc.t * Lib_name.t
     -> Preprocess.Without_instrumentation.t option Resolve.Memo.t
+
+  val pps_for_preprocessing
+    :  t
+    -> Preprocess.With_instrumentation.t Preprocess.Per_module.t
+    -> (Loc.t * Lib_name.t) list Memo.t
 end
 
 (** {1 Transitive closure} *)
 
-val closure : t list -> linking:bool -> t list Resolve.Memo.t
+val closure : t list -> linking:bool -> for_:Compilation_mode.t -> t list Resolve.Memo.t
 
 (** [descriptive_closure ~with_pps libs] computes the smallest set of libraries
     that contains the libraries in the list [libs], and that is transitively
@@ -176,7 +238,11 @@ val closure : t list -> linking:bool -> t list Resolve.Memo.t
     sorted. The difference with [closure libs] is that the latter may raise an
     error when overlapping implementations of virtual libraries are detected.
     [descriptive_closure libs] makes no such check. *)
-val descriptive_closure : t list -> with_pps:bool -> t list Memo.t
+val descriptive_closure
+  :  t list
+  -> with_pps:bool
+  -> for_:Compilation_mode.t
+  -> t list Memo.t
 
 (** {1 Sub-systems} *)
 
@@ -208,7 +274,8 @@ end
 
 val to_dune_lib
   :  t
-  -> modules:Modules.With_vlib.t
+  -> modes:Lib_mode.Map.Set.t
+  -> modules:Modules.With_vlib.t option Compilation_mode.Per_mode.t
   -> foreign_objects:Path.t list
   -> melange_runtime_deps:Path.t list
   -> public_headers:Path.t list

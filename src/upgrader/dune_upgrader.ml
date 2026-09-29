@@ -1,11 +1,10 @@
-open! Stdune
+open Stdune
 
 include struct
-  open Dune_rules
-  module Dune_project = Dune_project
+  open Source
   module Source_tree = Source_tree
   module Source_dir_status = Source_dir_status
-  module Dune_file0 = Dune_file0
+  module Dune_file = Dune_file
 end
 
 include struct
@@ -19,9 +18,10 @@ end
 include struct
   open Dune_lang
   module Dune_project_name = Dune_project_name
+  module Dune_project = Dune_project
 end
 
-module Console = Dune_console
+module Console = Console
 
 type rename_and_edit =
   { original_file : Path.Source.t
@@ -113,7 +113,7 @@ module Common = struct
         ->
         let dir = Path.Source.parent_exn path in
         let included_file = Path.Source.relative dir fn in
-        if not (Path.exists (Path.source included_file))
+        if not (Fpath.exists (Path.Source.to_string included_file))
         then
           User_error.raise
             ~loc
@@ -162,7 +162,7 @@ module Common = struct
     | Some _ -> ()
     | None ->
       let fn =
-        Path.Source.relative (Dune_project.root project) Dune_project.filename
+        Path.Source.relative_fname (Dune_project.root project) Dune_project.filename
         |> Path.source
       in
       Console.print [ Pp.textf "Creating %s..." (Path.to_string_maybe_quoted fn) ];
@@ -274,10 +274,10 @@ module V2 = struct
   ;;
 
   let upgrade_dune_files todo dir =
-    if String.Set.mem (Source_tree.Dir.filenames dir) Dune_file0.fname
+    if Filename.Array.Set.mem (Source_tree.Dir.filenames dir) Dune_file.fname
     then (
       let path = Source_tree.Dir.path dir in
-      let fn = Path.Source.relative path Dune_file0.fname in
+      let fn = Path.Source.relative_fname path Dune_file.fname in
       if Io.with_lexbuf_from_file (Path.source fn) ~f:Dune_lang.Dune_file_script.is_script
       then
         User_warning.emit
@@ -332,9 +332,9 @@ language. Use the (foreign_archives ...) field instead.|}
 end
 
 let detect_project_version project dir =
-  let in_tree = String.Set.mem (Source_tree.Dir.filenames dir) in
+  let in_tree = Filename.Array.Set.mem (Source_tree.Dir.filenames dir) in
   Dune_project.default_dune_language_version := 0, 1;
-  if in_tree "jbuild"
+  if in_tree Filename.jbuild
   then (
     let fn = Path.relative (Path.source (Source_tree.Dir.path dir)) "jbuild" in
     User_warning.emit
@@ -351,7 +351,7 @@ let detect_project_version project dir =
     then Dune2_project
     else if project_dune_version >= (1, 0)
     then Dune1_project
-    else if in_tree Dune_file0.fname
+    else if in_tree Dune_file.fname
     then Dune1_project
     else Unknown)
 ;;
@@ -369,13 +369,13 @@ let upgrade () =
                   type t = Source_tree.Dir.t * project_version
                 end))
          in
-        M.map_reduce
-          ~traverse:Source_dir_status.Set.normal_only
-          ~trace_event_name:"Upgrader"
-          ~f:(fun dir ->
-            let project = Source_tree.Dir.project dir in
-            let detected_version = detect_project_version project dir in
-            Memo.return (Appendable_list.singleton (dir, detected_version))))
+         M.map_reduce
+           ~traverse:Source_dir_status.Set.normal_only
+           ~trace_event_name:"Upgrader"
+           ~f:(fun dir ->
+             let project = Source_tree.Dir.project dir in
+             let detected_version = detect_project_version project dir in
+             Memo.return (Appendable_list.singleton (dir, detected_version))))
       >>| Appendable_list.to_list
     in
     let v1_updates = ref false in
@@ -394,7 +394,7 @@ let upgrade () =
       | Dune2_project -> ());
     List.iter todo.to_edit ~f:(fun (fn, s) ->
       Console.print [ Pp.textf "Upgrading %s..." (Path.Source.to_string_maybe_quoted fn) ];
-      Io.write_file (Path.source fn) s ~binary:true);
+      Io.write_file_exn (Path.source fn) s ~binary:true);
     List.iter todo.to_rename_and_edit ~f:(fun x ->
       let { original_file; new_file; extra_files_to_delete; contents } = x in
       Console.print
@@ -407,15 +407,15 @@ let upgrade () =
             (Path.Source.to_string_maybe_quoted new_file)
         ];
       List.iter (original_file :: extra_files_to_delete) ~f:(fun p ->
-        Path.unlink_exn (Path.source p));
-      Io.write_file (Path.source new_file) contents ~binary:true);
+        Fpath.unlink_exn (Path.Source.to_string p));
+      Io.write_file_exn (Path.source new_file) contents ~binary:true);
     if !v1_updates && not last
     then (
       (* Run the upgrader again to update new v1 projects to v2 No more than one
          additional upgrade should be needed *)
       (* We reset memoization tables as a simple way to refresh the
          Source_tree *)
-      Memo.reset (Memo.Invalidation.clear_caches ~reason:Upgrade);
+      Memo.reset (Memo.Invalidation.invalidate_caches ~reason:Upgrade);
       aux true)
     else if !v2_updates
     then (

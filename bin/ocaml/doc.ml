@@ -1,5 +1,4 @@
 open Import
-module Main = Import.Main
 
 let doc = "Build and view the documentation of an OCaml project"
 
@@ -16,13 +15,13 @@ let info = Cmd.info "doc" ~doc ~man
 let lock_odoc_if_dev_tool_enabled () =
   match Lazy.force Lock_dev_tool.is_enabled with
   | false -> Action_builder.return ()
-  | true -> Action_builder.of_memo (Lock_dev_tool.lock_odoc ())
+  | true -> Action_builder.of_memo (Lock_dev_tool.lock_dev_tool Odoc)
 ;;
 
 let term =
   let+ builder = Common.Builder.term in
-  let common, config = Common.init builder in
-  let request (setup : Main.build_system) =
+  let common, config = Common.init_build builder in
+  let request (setup : Dune_rules.Main.build_system) =
     let dir = Path.(relative root) (Common.prefix_target common ".") in
     let open Action_builder.O in
     let* () = lock_odoc_if_dev_tool_enabled () in
@@ -45,16 +44,15 @@ let term =
       let* cmd_name, args =
         match Platform.OS.value with
         | Darwin -> Some ("open", [])
-        | Other | FreeBSD | NetBSD | OpenBSD | Haiku | Linux -> Some ("xdg-open", [])
+        | Other | FreeBSD | NetBSD | OpenBSD | DragonFly | Haiku | Linux ->
+          Some ("xdg-open", [])
         | Windows -> None
       in
       let+ open_command =
         let path = Env_path.path Env.initial in
         Bin.which ~path cmd_name
       in
-      ( open_command
-      , (* First element of argv is the name of the command. *)
-        (cmd_name :: args) @ [ relative_toplevel_index_path ] )
+      open_command, args @ [ relative_toplevel_index_path ]
     with
     | Some (cmd, args) ->
       Proc.restore_cwd_and_execve (Path.to_absolute_filename cmd) args ~env:Env.initial
@@ -64,7 +62,7 @@ let term =
             "No browser could be found, you will have to open the documentation yourself."
         ]
   in
-  Build_cmd.run_build_command ~common ~config ~request
+  Build.run_build_command ~common ~config ~request
 ;;
 
 let cmd = Cmd.v info term

@@ -2,14 +2,32 @@ open Import
 open Memo.O
 
 module Alias_rules = struct
-  let add sctx ~alias ~loc build =
-    let dir = Alias.dir alias in
-    Super_context.add_alias_action sctx alias ~dir ~loc build
+  let check_empty ~loc ~dir alias =
+    match Alias.Name.compare (Alias.name alias) Alias0.empty with
+    | Lt | Gt -> Memo.return ()
+    | Eq ->
+      let* project = Dune_load.find_project ~dir in
+      if Dune_project.dune_version project >= (3, 20)
+      then
+        User_error.raise
+          ~loc
+          [ Pp.text "User-defined rules cannot be added to the 'empty' alias" ]
+      else Memo.return ()
   ;;
 
-  let add_empty sctx ~loc ~alias =
+  let add sctx ~aliases ~loc build =
+    match aliases with
+    | [] -> Code_error.raise "Alias_rules.add: empty list of aliases" []
+    | representative :: _ ->
+      let dir = Alias.dir representative in
+      Memo.parallel_iter aliases ~f:(fun alias ->
+        check_empty ~loc ~dir:(Alias.dir alias) alias)
+      >>> Super_context.add_alias_action sctx aliases ~dir ~loc build
+  ;;
+
+  let add_empty sctx ~loc ~aliases =
     let action = Action_builder.return (Action.Full.make Action.empty) in
-    add sctx ~loc ~alias action
+    add sctx ~loc ~aliases action
   ;;
 end
 
@@ -70,17 +88,61 @@ let add_user_rule
     let build = interpret_and_add_locks ~expander rule.locks action.build in
     { action with Action_builder.With_targets.build }
   in
-  Super_context.add_rule_get_targets sctx ~dir ~mode:rule.mode ~loc:rule.loc action
+  let* mode = Rule_mode_expand.expand_path ~expander ~dir rule.mode in
+  Super_context.add_rule_get_targets sctx ~dir ~mode ~loc:rule.loc action
 ;;
 
-let user_rule sctx ?extra_bindings ~dir ~expander (rule : Rule_conf.t) =
+let dep_uses_patch_back_source_tree (d : Dep_conf.t) =
+  match d with
+  | Sandbox_config config ->
+    Dep_conf.Sandbox_config.fold config ~init:false ~f:(fun mode acc ->
+      acc || Poly.equal mode `Patch_back_source_tree)
+  | _ -> false
+;;
+
+let rule_uses_patch_back_source_tree (rule : Rule_conf.t) =
+  (* CR-someday rgrinberg: early exit from fold *)
+  Bindings.fold rule.deps ~init:false ~f:(fun one acc ->
+    acc
+    ||
+    match one with
+    | Unnamed dep -> dep_uses_patch_back_source_tree dep
+    | Named (_, deps) -> List.exists deps ~f:dep_uses_patch_back_source_tree)
+;;
+
+let validate_corrections ~(rule : Rule_conf.t) =
+  match rule.corrections with
+  | None -> ()
+  | Some Ignore -> ()
+  | Some Produce ->
+    if rule_uses_patch_back_source_tree rule
+    then
+      User_error.raise
+        ~loc:rule.loc
+        [ Pp.text
+            "Only (corrections ignore) is allowed on rules using patch-back-source-tree \
+             sandboxing."
+        ]
+;;
+
+let add_corrections ~(rule : Rule_conf.t) action =
+  match rule.corrections with
+  | None -> action
+  | Some Ignore -> Action.Full.add_corrections Ignore action
+  | Some Produce ->
+    action
+    |> Action.Full.add_sandbox Sandbox_config.needs_sandboxing
+    |> Action.Full.add_corrections Produce
+;;
+
+let user_rule sctx ~dir ~expander (rule : Rule_conf.t) =
   Expander.eval_blang expander rule.enabled_if
   >>= function
   | false ->
     let+ () =
       Memo.parallel_iter rule.aliases ~f:(fun alias ->
         let alias = Alias.make ~dir alias in
-        Alias_rules.add_empty sctx ~loc:rule.loc ~alias)
+        Alias_rules.add_empty sctx ~loc:rule.loc ~aliases:[ alias ])
     in
     None
   | true ->
@@ -100,15 +162,19 @@ let user_rule sctx ?extra_bindings ~dir ~expander (rule : Rule_conf.t) =
         in
         Targets_spec.Static { multiplicity; targets }
     in
-    let expander =
-      match extra_bindings with
-      | None -> expander
-      | Some bindings -> Expander.add_bindings expander ~bindings
+    let sandbox =
+      if
+        rule_uses_patch_back_source_tree rule
+        || Dune_project.dune_version (Expander.project expander) >= (3, 23)
+      then Sandbox_config.needs_sandboxing
+      else Sandbox_config.no_special_requirements
     in
+    let () = validate_corrections ~rule in
     let* action =
       let chdir = Expander.dir expander in
       Action_unexpanded.expand
         (snd rule.action)
+        sandbox
         ~loc:(fst rule.action)
         ~chdir
         ~expander
@@ -116,6 +182,7 @@ let user_rule sctx ?extra_bindings ~dir ~expander (rule : Rule_conf.t) =
         ~targets
         ~targets_dir:dir
     in
+    let action = Action_builder.With_targets.map action ~f:(add_corrections ~rule) in
     (match rule_kind ~rule ~action with
      | No_alias ->
        let+ targets = add_user_rule sctx ~dir ~rule ~action ~expander in
@@ -123,18 +190,26 @@ let user_rule sctx ?extra_bindings ~dir ~expander (rule : Rule_conf.t) =
      | Aliases_with_targets (aliases, alias_target) ->
        let+ () =
          Memo.parallel_iter aliases ~f:(fun alias ->
+           let loc =
+             (* standard aliases don't have a loc *)
+             match Alias0.is_standard alias with
+             | true -> Loc.none
+             | false -> rule.loc
+           in
            let alias = Alias.make ~dir alias in
            Rules.Produce.Alias.add_deps
              alias
+             ~loc
              (Action_builder.path (Path.build alias_target)))
        and+ targets = add_user_rule sctx ~dir ~rule ~action ~expander in
        Some targets
      | Aliases_only aliases ->
        let+ () =
-         let action = interpret_and_add_locks ~expander rule.locks action.build in
-         Memo.parallel_iter aliases ~f:(fun alias ->
-           let alias = Alias.make ~dir alias in
-           Alias_rules.add sctx ~alias ~loc:rule.loc action)
+         match List.map ~f:(Alias.make ~dir) aliases with
+         | [] -> Code_error.raise "empty list of aliases" []
+         | aliases ->
+           interpret_and_add_locks ~expander rule.locks action.build
+           |> Alias_rules.add sctx ~aliases ~loc:rule.loc
        in
        None)
 ;;
@@ -171,12 +246,12 @@ let copy_files sctx ~dir ~expander ~src_dir (def : Copy_files.t) =
            (Path.to_string_maybe_quoted glob_in_src)
            (Path.Source.to_string_maybe_quoted src_dir));
   let src_in_src = Path.parent_exn glob_in_src in
-  let glob = Path.basename glob_in_src |> Glob.of_string_exn loc in
+  let glob = Path.basename glob_in_src |> Filename.to_string |> Glob.of_string_exn loc in
+  let context = Super_context.context sctx in
   let src_in_build =
     match Path.as_in_source_tree src_in_src with
     | None -> src_in_src
     | Some src_in_src ->
-      let context = Super_context.context sctx in
       Path.Build.append_source (Context.build_dir context) src_in_src |> Path.build
   in
   let* exists_or_generated =
@@ -214,37 +289,38 @@ let copy_files sctx ~dir ~expander ~src_dir (def : Copy_files.t) =
   in
   if def.syntax_version >= (3, 17) && Filename_set.is_empty files
   then User_error.raise ~loc [ Pp.textf "Does not match any files" ];
+  let* mode = Rule_mode_expand.expand_path ~dir ~expander def.mode in
   (* CR-someday amokhov: We currently traverse the set [files] twice: first, to
      add the corresponding rules, and then to convert the files to [targets]. To
      do only one traversal we need [Memo.parallel_map_set]. *)
   let* () =
-    Memo.parallel_iter_seq
-      (Filename.Set.to_seq (Filename_set.filenames files))
-      ~f:(fun basename ->
-        let file_src = Path.relative src_in_build basename in
-        let file_dst = Path.Build.relative dir basename in
-        let context = Super_context.context sctx in
-        Super_context.add_rule
-          sctx
-          ~loc
-          ~dir
-          ~mode:def.mode
-          ((if def.add_line_directive
-            then Copy_line_directive.builder context
-            else Action_builder.copy)
-             ~src:file_src
-             ~dst:file_dst))
+    Filename_set.filenames files
+    |> Filename.Array.Set.to_list
+    |> Memo.parallel_iter ~f:(fun basename ->
+      let file_src = Path.relative_fname src_in_build basename in
+      let file_dst = Path.Build.relative_fname dir basename in
+      Super_context.add_rule
+        sctx
+        ~loc
+        ~dir
+        ~mode
+        ((if def.add_line_directive
+          then Copy_line_directive.builder context
+          else Action_builder.copy)
+           ~src:file_src
+           ~dst:file_dst))
   in
   let targets =
-    Filename.Set.to_list_map (Filename_set.filenames files) ~f:(fun basename ->
-      let file_dst = Path.Build.relative dir basename in
+    Filename.Array.Set.to_list_map (Filename_set.filenames files) ~f:(fun basename ->
+      let file_dst = Path.Build.relative_fname dir basename in
       Path.build file_dst)
     |> Path.Set.of_list
   in
   let+ () =
     Memo.Option.iter def.alias ~f:(fun alias ->
       let alias = Alias.make alias ~dir in
-      Rules.Produce.Alias.add_deps alias (Action_builder.path_set targets))
+      Alias_rules.check_empty ~loc ~dir alias
+      >>> Rules.Produce.Alias.add_deps alias (Action_builder.path_set targets))
   in
   targets
 ;;
@@ -256,27 +332,33 @@ let copy_files sctx ~dir ~expander ~src_dir (def : Copy_files.t) =
   | false -> Memo.return Path.Set.empty
 ;;
 
-let alias sctx ?extra_bindings ~dir ~expander (alias_conf : Alias_conf.t) =
+let alias sctx ~dir ~expander (alias_conf : Alias_conf.t) =
   let alias = Alias.make ~dir alias_conf.name in
   let loc = alias_conf.loc in
-  Expander.eval_blang expander alias_conf.enabled_if
+  Alias_rules.check_empty ~loc ~dir alias
+  >>> Expander.eval_blang expander alias_conf.enabled_if
   >>= function
-  | false -> Alias_rules.add_empty sctx ~loc ~alias
+  | false -> Alias_rules.add_empty sctx ~loc ~aliases:[ alias ]
   | true ->
     (match alias_conf.action with
      | None ->
-       let builder, _expander, _sandbox = Dep_conf_eval.named ~expander alias_conf.deps in
-       Rules.Produce.Alias.add_deps alias ~loc builder
+       (* Sandboxing options don't make sense for deps, only for actions.
+          The same applies to [action_env]: with no action attached to
+          this alias, there is no command to which the bin-layout PATH
+          hint could be applied. We register the deps and discard env. *)
+       let action_env, _expander, _sandbox =
+         Dep_conf_eval.named
+           ~expander
+           Sandbox_config.no_special_requirements
+           alias_conf.deps
+       in
+       Rules.Produce.Alias.add_deps alias ~loc (Action_builder.ignore action_env)
      | Some (action_loc, action) ->
        let action =
-         let expander =
-           match extra_bindings with
-           | None -> expander
-           | Some bindings -> Expander.add_bindings expander ~bindings
-         in
          let chdir = Expander.dir expander in
          Action_unexpanded.expand_no_targets
            action
+           Sandbox_config.no_special_requirements
            ~loc:action_loc
            ~expander
            ~chdir
@@ -284,5 +366,5 @@ let alias sctx ?extra_bindings ~dir ~expander (alias_conf : Alias_conf.t) =
            ~what:"aliases"
        in
        interpret_and_add_locks ~expander alias_conf.locks action
-       |> Alias_rules.add sctx ~loc ~alias)
+       |> Alias_rules.add sctx ~loc ~aliases:[ alias ])
 ;;

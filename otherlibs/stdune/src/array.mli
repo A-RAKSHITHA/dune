@@ -1,4 +1,4 @@
-include module type of Stdlib.ArrayLabels with type 'a t = 'a array
+include module type of Stdlib.ArrayLabels
 
 val find_opt : f:('a -> bool) -> 'a t -> 'a option
 val equal : ('a -> 'a -> bool) -> 'a t -> 'a t -> bool
@@ -7,19 +7,34 @@ val exists : 'a t -> f:('a -> bool) -> bool
 val fold_right : 'a t -> f:('a -> 'acc -> 'acc) -> init:'acc -> 'acc
 val swap : 'a t -> int -> int -> unit
 
+(** [of_rev_list l] creates an array containing the elements of [l] in reverse order. *)
+val of_rev_list : 'a list -> 'a t
+
 module Immutable : sig
   type 'a t
 
+  val of_array_unsafe : 'a array -> 'a t
+
+  (** [to_array_unsafe t] returns [t]'s underlying array without copying; the
+      caller must not mutate it, as it is shared with [t]. *)
+  val to_array_unsafe : 'a t -> 'a array
+
   val equal : ('a -> 'a -> bool) -> 'a t -> 'a t -> bool
-  val get : 'a t -> int -> 'a
+  external get : 'a t -> int -> 'a = "%array_safe_get"
   val of_array : 'a array -> 'a t
   val to_list : 'a t -> 'a list
   val of_list : 'a list -> 'a t
   val map : 'a t -> f:('a -> 'b) -> 'b t
   val to_dyn : ('a -> Dyn.t) -> 'a t -> Dyn.t
   val fold_right : 'a t -> f:('a -> 'acc -> 'acc) -> init:'acc -> 'acc
+  val fold_left : 'a t -> f:('acc -> 'a -> 'acc) -> init:'acc -> 'acc
+  val iter : 'a t -> f:('a -> unit) -> unit
   val exists : 'a t -> f:('a -> bool) -> bool
   val length : _ t -> int
   val to_list_map : 'a t -> f:('a -> 'b) -> 'b list
   val of_list_map : 'a list -> f:('a -> 'b) -> 'b t
+end
+
+module Sorted : sig
+  module Make (Key : Map_intf.Key) : Array_intf.S with type Set.elt = Key.t
 end

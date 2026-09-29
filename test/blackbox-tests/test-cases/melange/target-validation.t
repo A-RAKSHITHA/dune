@@ -1,9 +1,6 @@
 Validation of target field in melange.emit stanzas
 
-  $ cat > dune-project <<EOF
-  > (lang dune 3.8)
-  > (using melange 0.1)
-  > EOF
+  $ make_melange_project 3.8 0.1
 
 Target should not be empty
 
@@ -15,7 +12,7 @@ Target should not be empty
   > (melange.emit
   >  (target "")
   >  (emit_stdlib false)
-  >  (libraries $foo)
+  >  (libraries $lib)
   >  (module_system es6))
   > EOF
 
@@ -24,6 +21,46 @@ Target should not be empty
   5 |  (target "")
                ^^
   Error: The field target can not be empty
+  [1]
+
+Special directory names are rejected when parsing the target field.
+
+  $ cat > dune <<EOF
+  > (library
+  >  (name $lib)
+  >  (modes melange))
+  > (melange.emit
+  >  (target .)
+  >  (emit_stdlib false)
+  >  (libraries $lib))
+  > EOF
+
+  $ dune build
+  File "dune", line 5, characters 9-10:
+  5 |  (target .)
+               ^
+  Error: The field target must use simple names and can not include paths to
+  other folders. To emit JavaScript files in another folder, move the
+  `melange.emit` stanza to that folder
+  [1]
+
+  $ cat > dune <<EOF
+  > (library
+  >  (name $lib)
+  >  (modes melange))
+  > (melange.emit
+  >  (target ..)
+  >  (emit_stdlib false)
+  >  (libraries $lib))
+  > EOF
+
+  $ dune build
+  File "dune", line 5, characters 9-11:
+  5 |  (target ..)
+               ^^
+  Error: The field target must use simple names and can not include paths to
+  other folders. To emit JavaScript files in another folder, move the
+  `melange.emit` stanza to that folder
   [1]
 
 Target should not try to descend into subdirectories
@@ -35,7 +72,7 @@ Target should not try to descend into subdirectories
   > (melange.emit
   >  (target foo/bar)
   >  (emit_stdlib false)
-  >  (libraries $foo)
+  >  (libraries $lib)
   >  (module_system es6))
   > EOF
 
@@ -66,7 +103,7 @@ Target should not try to escape into parent directories
   > (melange.emit
   >  (target ../bar)
   >  (emit_stdlib false)
-  >  (libraries $foo)
+  >  (libraries $lib)
   >  (module_system es6))
   > EOF
 

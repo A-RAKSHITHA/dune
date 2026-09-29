@@ -1,7 +1,5 @@
 Test what happens in watch mode when we depend on dot files
 
-  $ . ./helpers.sh
-
   $ echo '(lang dune 3.0)' > dune-project
   $ cat > dune <<EOF
   > (rule
@@ -24,9 +22,7 @@ Test what happens in watch mode when we depend on dot files
   $ cat _build/default/y
   2
 
-  $ stop_dune
-  Success, waiting for filesystem changes...
-  Success, waiting for filesystem changes...
+  $ stop_dune_quiet
 
 Same but in a sub-directory (the exclude regexp used to be sensitive to that):
 
@@ -47,7 +43,5 @@ Same but in a sub-directory (the exclude regexp used to be sensitive to that):
   $ cat _build/default/test/y
   2
 
-  $ stop_dune
-  Success, waiting for filesystem changes...
-  Success, waiting for filesystem changes...
+  $ stop_dune_quiet
 

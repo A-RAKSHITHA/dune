@@ -5,18 +5,21 @@ open Import
 module Alias_rules : sig
   val add
     :  Super_context.t
-    -> alias:Alias.t
+    -> aliases:Alias.t list
     -> loc:Loc.t
     -> Action.Full.t Action_builder.t
     -> unit Memo.t
 
-  val add_empty : Super_context.t -> loc:Stdune.Loc.t -> alias:Alias.t -> unit Memo.t
+  val add_empty
+    :  Super_context.t
+    -> loc:Stdune.Loc.t
+    -> aliases:Alias.t list
+    -> unit Memo.t
 end
 
 (** Interpret a [(rule ...)] stanza and return the targets it produces, if any. *)
 val user_rule
   :  Super_context.t
-  -> ?extra_bindings:Value.t list Pform.Map.t
   -> dir:Path.Build.t
   -> expander:Expander.t
   -> Rule_conf.t
@@ -34,8 +37,13 @@ val copy_files
 (** Interpret an [(alias ...)] stanza. *)
 val alias
   :  Super_context.t
-  -> ?extra_bindings:Value.t list Pform.Map.t
   -> dir:Path.Build.t
   -> expander:Expander.t
   -> Alias_conf.t
   -> unit Memo.t
+
+val interpret_and_add_locks
+  :  expander:Expander.t
+  -> Locks.t
+  -> Action.Full.t Action_builder.t
+  -> Action.Full.t Action_builder.t

@@ -1,7 +1,6 @@
 If the dev-tool feature is enabled then "dune fmt" should invoke the "ocamlformat"
 executable from the dev-tool and not the one from PATH.
 
-  $ . ./helpers.sh
   $ mkrepo
 
   $ make_fake_ocamlformat "0.26.2"
@@ -29,13 +28,30 @@ Add a fake executable in the PATH
 
 Build the OCamlFormat binary dev-tool
   $ DUNE_CONFIG__LOCK_DEV_TOOL=enabled dune fmt --preview
-  Solution for dev-tools.locks/ocamlformat:
+  Solution for _build/.dev-tools.locks/ocamlformat:
   - ocamlformat.0.26.2
   File "dune", line 1, characters 0-0:
-  Error: Files _build/default/dune and _build/default/.formatted/dune differ.
+  --- dune
+  +++ dune.corrected
+  @@ -1,8 +1,9 @@
+   (executable
+    (public_name foo))
+  +
+   (rule
+    (target none)
+    (action
+  -    (progn
+  -      (run ocamlformat foo.ml)
+  -      (run touch none))))
+  +  (progn
+  +   (run ocamlformat foo.ml)
+  +   (run touch none))))
   File "foo.ml", line 1, characters 0-0:
-  Error: Files _build/default/foo.ml and _build/default/.formatted/foo.ml
-  differ.
+  --- foo.ml
+  +++ foo.ml.corrected
+  @@ -1 +1 @@
+  -let () = print_endline "Hello, world"
+  +formatted with version 0.26.2
   [1]
 
 When the dev-tool feature is disabled dune runs the OCamlFormat binary from the

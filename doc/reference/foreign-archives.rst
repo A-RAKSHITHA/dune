@@ -33,7 +33,8 @@ described in :ref:`foreign-sandboxing`, or ask Dune to build it via the
      (language c)
      (enabled_if true)
      (names src4 src5)
-     (include_dir headers))
+     (extra_objects obj1)
+     (include_dirs headers))
 
 This asks Dune to compile C source files ``src4`` and ``src5`` with
 headers tracked in the ``headers`` directory and put the resulting
@@ -41,9 +42,18 @@ object files into an archive ``arch1``, whose full name is typically
 ``libarch1.a`` for static linking and ``dllarch1.so`` for dynamic
 linking.
 
+By default, Dune builds and installs both the static (``lib*.a``) and dynamic
+(``dll*.so``) versions of a foreign archive. To statically link all foreign
+archives into the runtime system instead (so no ``dll*.so`` is produced), set
+``(disable_dynamically_linked_foreign_archives true)`` in your
+:doc:`/reference/dune-workspace/context`.
+
 The ``foreign_library`` stanza supports all :doc:`foreign-stubs` fields.
 The ``archive_name`` field specifies the archive's name. You can refer
 to the same archive name from multiple OCaml libraries and executables, so a
 foreign archive is a bit like a foreign library, hence the name of the stanza.
 The ``enabled_if`` field has the same meaning as in the :doc:`dune/library`
 stanza.
+The ``extra_objects`` field specifies additional object files to be included.
+Dune will look for ``obj1.o`` in this case. ``extra_objects`` uses the
+:doc:`/reference/ordered-set-language` and supports ``(:include ...)`` forms.

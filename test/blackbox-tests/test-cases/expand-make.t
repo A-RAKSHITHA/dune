@@ -6,6 +6,7 @@ This needs special setup to have a PATH which does not contain a gmake binary,
 in case the system PATH has one. Instead of prepending to PATH we create a bin/
 subdirectory with links to all the executables dune needs.
 
+  $ export OCAMLLIB=$(ocamlc -where)
   $ mkdir make gmake bin
 
   $ for prog in dune ocamlc sh; do
@@ -24,9 +25,7 @@ subdirectory with links to all the executables dune needs.
 
   $ chmod +x make/make gmake/gmake
 
-  $ cat >dune-project <<EOF
-  > (lang dune 3.0)
-  > EOF
+  $ make_dune_project 3.0
 
   $ cat >dune <<EOF
   > (data_only_dirs bin)

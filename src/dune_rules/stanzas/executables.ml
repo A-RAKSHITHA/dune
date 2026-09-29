@@ -1,10 +1,12 @@
 open Import
 open Dune_lang.Decoder
+module Link_flags = Dune_lang.Link_flags
 
 module Names : sig
   type t
 
   val names : t -> (Loc.t * string) Nonempty_list.t
+  val public_names : t -> (Loc.t * string option) Nonempty_list.t option
   val package : t -> Package.t option
   val has_public_name : t -> bool
 
@@ -21,7 +23,7 @@ module Names : sig
     -> Install_conf.t option
 end = struct
   type public =
-    { public_names : (Loc.t * string option) list
+    { public_names : (Loc.t * string option) Nonempty_list.t
     ; package : Package.t
     }
 
@@ -32,6 +34,7 @@ end = struct
     }
 
   let names t = t.names
+  let public_names t = Option.map t.public ~f:(fun p -> p.public_names)
   let package t = Option.map t.public ~f:(fun p -> p.package)
   let has_public_name t = Option.is_some t.public
 
@@ -53,7 +56,7 @@ end = struct
       ~f:(fun (names, public_names) ->
         match names, public_names with
         | Some names, Some public_names ->
-          if List.length public_names = List.length names
+          if Nonempty_list.length public_names = Nonempty_list.length names
           then Ok (Some names, Some public_names)
           else
             Error
@@ -70,7 +73,8 @@ end = struct
     let dash_is_none = dune_syntax >= (3, 8) in
     let+ name = field_o "name" (located string)
     and+ public_name = field_o "public_name" (public_name ~dash_is_none) in
-    Option.map name ~f:List.singleton, Option.map public_name ~f:List.singleton
+    ( Option.map name ~f:(fun name -> Nonempty_list.[ name ])
+    , Option.map public_name ~f:(fun public_name -> Nonempty_list.[ public_name ]) )
   ;;
 
   let pluralize s ~multi = if multi then s ^ "s" else s
@@ -80,12 +84,7 @@ end = struct
     let+ names = if multi then multi_fields else single_fields
     and+ loc = loc
     and+ dune_syntax = Dune_lang.Syntax.get_exn Stanza.syntax
-    and+ package =
-      field_o
-        "package"
-        (let+ loc = loc
-         and+ pkg = Stanza_common.Pkg.decode in
-         loc, pkg)
+    and+ package = Stanza_pkg.field_opt ()
     and+ project = Dune_project.get_exn () in
     let names, public_names = names in
     let names =
@@ -93,18 +92,19 @@ end = struct
         let open Dune_lang.Syntax.Version.Infix in
         if dune_syntax >= check_valid_name_version
         then
-          Option.iter
-            names
-            ~f:
-              (List.iter ~f:(fun name ->
-                 ignore (Module_name.parse_string_exn name : Module_name.t)));
+          Option.iter names ~f:(fun names ->
+            Nonempty_list.iter names ~f:(fun name ->
+              ignore
+                (Module_name.of_string_allow_invalid name
+                 |> Module_name.Unchecked.validate_exn
+                 : Module_name.t)));
         match names, public_names with
         | Some names, _ -> names
         | None, Some public_names ->
           if dune_syntax >= allow_omit_names_version
           then (
             let check_names = dune_syntax >= check_valid_name_version in
-            List.map public_names ~f:(fun (loc, p) ->
+            Nonempty_list.map public_names ~f:(fun (loc, p) ->
               match p, check_names with
               | None, _ ->
                 User_error.raise ~loc [ Pp.text "This executable must have a name field" ]
@@ -145,20 +145,20 @@ end = struct
               ~loc
               [ Pp.textf "field %s is missing" (pluralize ~multi "name") ]
       in
-      Nonempty_list.of_list names |> Option.value_exn
+      names
     in
     let public =
       match package, public_names with
       | None, None -> None
       | Some (_loc, package), Some public_names -> Some { package; public_names }
       | None, Some public_names ->
-        if List.for_all public_names ~f:(fun (_, x) -> Option.is_none x)
+        if Nonempty_list.for_all public_names ~f:(fun (_, x) -> Option.is_none x)
         then None
         else
           Some
             { public_names
             ; package =
-                Stanza_common.Pkg.default_exn ~loc project (pluralize "executable" ~multi)
+                Stanza_pkg.default_exn ~loc project (pluralize "executable" ~multi)
             }
       | Some (loc, _), None ->
         User_error.raise
@@ -174,24 +174,18 @@ end = struct
   let install_conf t ~ext ~enabled_if ~dir =
     Option.map t.public ~f:(fun { package; public_names } ->
       let files =
-        List.map2
-          (Nonempty_list.to_list t.names)
-          public_names
-          ~f:(fun (locn, name) (locp, pub) ->
-            Option.map pub ~f:(fun pub ->
-              Install_entry.File.of_file_binding
-                (File_binding.Unexpanded.make
-                   ~src:(locn, name ^ ext)
-                   ~dst:(locp, pub)
-                   ~dune_syntax:t.dune_syntax
-                   ~dir:(Some dir))))
+        Nonempty_list.map2 t.names public_names ~f:(fun (locn, name) (locp, pub) ->
+          Option.map pub ~f:(fun pub ->
+            Install_entry.File.of_file_binding
+              (File_binding.Unexpanded.make
+                 ~src:(locn, name ^ Filename.Extension.to_string ext)
+                 ~dst:(locp, pub)
+                 ~dune_syntax:t.dune_syntax
+                 ~dir:(Some dir))))
+        |> Nonempty_list.to_list
         |> List.filter_opt
       in
-      let loc =
-        match public_names with
-        | [] -> assert false
-        | (loc, _) :: _ -> loc
-      in
+      let loc, _ = Nonempty_list.hd public_names in
       { Install_conf.section = loc, Section Bin
       ; files
       ; dirs = []
@@ -231,6 +225,8 @@ module Link_mode = struct
 
   include T
 
+  let default_obj_ext = Filename.Extension.of_string_exn ".OBJ"
+  let default_dll_ext = Filename.Extension.of_string_exn ".DLL"
   let make mode kind = Other { mode; kind }
   let exe = make Best Exe
   let object_ = make Best Object
@@ -262,8 +258,9 @@ module Link_mode = struct
   let simple_representations_including_wasm = ("wasm", wasm) :: simple_representations
 
   let simple =
-    Dune_lang.Decoder.enum simple_representations
-    <|> sum [ "wasm", Syntax.since Stanza.syntax (3, 17) >>> return wasm ]
+    ("wasm", Syntax.since Stanza.syntax (3, 17) >>> return wasm)
+    :: List.map simple_representations ~f:(fun (x, y) -> x, return y)
+    |> enum'
   ;;
 
   let decode =
@@ -308,8 +305,9 @@ module Link_mode = struct
   ;;
 
   let extension t ~loc ~ext_obj ~ext_dll =
+    let of_string = Filename.Extension.of_string_exn in
     match t with
-    | Byte_complete -> ".bc.exe"
+    | Byte_complete -> Filename.Extension.bc_exe
     | Jsoo mode -> Js_of_ocaml.Ext.exe ~mode
     | Other { mode; kind } ->
       let same_as_mode : Mode.t =
@@ -321,14 +319,14 @@ module Link_mode = struct
           Native
       in
       (match same_as_mode, kind with
-       | Byte, C -> ".bc.c"
+       | Byte, C -> of_string ".bc.c"
        | Native, C ->
          User_error.raise ~loc [ Pp.text "C file generation only supports bytecode!" ]
-       | Byte, Exe -> ".bc"
-       | Native, Exe -> ".exe"
-       | Byte, Object -> ".bc" ^ ext_obj
-       | Native, Object -> ".exe" ^ ext_obj
-       | Byte, Shared_object -> ".bc" ^ ext_dll
+       | Byte, Exe -> Filename.Extension.bc
+       | Native, Exe -> Filename.Extension.exe
+       | Byte, Object -> of_string (".bc" ^ Filename.Extension.to_string ext_obj)
+       | Native, Object -> of_string (".exe" ^ Filename.Extension.to_string ext_obj)
+       | Byte, Shared_object -> of_string (".bc" ^ Filename.Extension.to_string ext_dll)
        | Native, Shared_object -> ext_dll
        | mode, Plugin -> Mode.plugin_ext mode)
   ;;
@@ -351,9 +349,11 @@ module Link_mode = struct
           List.fold_left l ~init:empty ~f:(fun acc (loc, link_mode) ->
             set acc link_mode loc)
         in
+        let ext_obj = default_obj_ext in
+        let ext_dll = default_dll_ext in
         (match
-           String.Map.of_list_map (to_list t) ~f:(fun (lm, loc) ->
-             extension lm ~loc ~ext_obj:".OBJ" ~ext_dll:".DLL", lm)
+           Filename.Extension.Map.of_list_map (to_list t) ~f:(fun (lm, loc) ->
+             extension lm ~loc ~ext_obj ~ext_dll, lm)
          with
          | Ok _ -> ()
          | Error (_ext, (lm1, _), (lm2, _)) ->
@@ -406,13 +406,14 @@ end
 
 type t =
   { names : (Loc.t * string) Nonempty_list.t
+  ; public_names : (Loc.t * string option) Nonempty_list.t option
   ; link_flags : Link_flags.Spec.t
   ; link_deps : Dep_conf.t list
   ; modes : Loc.t Link_mode.Map.t
   ; optional : bool
   ; buildable : Buildable.t
   ; package : Package.t option
-  ; promote : Rule.Promote.t option
+  ; promote : Rule_mode.Promote.t option
   ; install_conf : Install_conf.t option
   ; embed_in_plugin_libraries : (Loc.t * Lib_name.t) list
   ; forbidden_libraries : (Loc.t * Lib_name.t) list
@@ -430,7 +431,7 @@ include Stanza.Make (struct
 let bootstrap_info_extension =
   let syntax =
     Dune_lang.Syntax.create
-      ~name:"dune-bootstrap-info"
+      ~name:(Syntax.Name.parse "dune-bootstrap-info")
       ~desc:"private extension to handle Dune bootstrap"
       [ (0, 1), `Since (2, 0) ]
   in
@@ -482,19 +483,24 @@ let common =
     field_o
       "bootstrap_info"
       (let+ loc = loc
-       and+ fname = filename
+       and+ fname = file_path
        and+ project = Dune_project.get_exn () in
        if not (Dune_project.is_extension_set project bootstrap_info_extension)
        then User_error.raise ~loc [ Pp.text "This field is reserved for Dune itself" ];
        fname)
   and+ project_root = Dune_project.get_exn () >>| Dune_project.root
   and+ enabled_if =
-    let allowed_vars = Enabled_if.common_vars ~since:(2, 3) in
     let is_error = Dune_lang.Syntax.Version.Infix.(dune_version >= (2, 6)) in
+    let allowed_vars =
+      if Dune_lang.Syntax.Version.Infix.(dune_version >= (3, 25))
+      then Enabled_if.Any
+      else Enabled_if.common_vars ~since:(2, 3)
+    in
     Enabled_if.decode ~allowed_vars ~is_error ~since:(Some (2, 3)) ()
   in
   fun names ~multi ->
     let has_public_name = Names.has_public_name names in
+    let public_names = Names.public_names names in
     let private_names = Names.names names in
     let install_conf =
       match Link_mode.Map.best_install_mode ~dune_version modes with
@@ -514,10 +520,10 @@ let common =
       | Some mode ->
         let ext =
           match mode with
-          | Byte_complete -> ".bc.exe"
+          | Byte_complete -> Filename.Extension.bc_exe
           | Jsoo mode -> Js_of_ocaml.Ext.exe ~mode
-          | Other { mode = Byte; _ } -> ".bc"
-          | Other { mode = Native | Best; _ } -> ".exe"
+          | Other { mode = Byte; _ } -> Filename.Extension.bc
+          | Other { mode = Native | Best; _ } -> Filename.Extension.exe
         in
         Names.install_conf names ~ext ~enabled_if ~dir:project_root
     in
@@ -537,6 +543,7 @@ let common =
           [ Pp.textf "This field can only be used when linking a plugin." ]
     in
     { names = private_names
+    ; public_names
     ; link_flags
     ; link_deps
     ; modes
@@ -565,8 +572,5 @@ let single, multi =
 
 let has_foreign t = Buildable.has_foreign t.buildable
 let has_foreign_cxx t = Buildable.has_foreign_cxx t.buildable
-
-let obj_dir t ~dir =
-  let name = snd (Nonempty_list.hd t.names) in
-  Obj_dir.make_exe ~dir ~name
-;;
+let exe_target t = Exe_target.executables t.names
+let obj_dir t ~dir = Obj_dir.make_for_exe_target ~dir (exe_target t)

@@ -79,6 +79,7 @@ module O = struct
   let ( >>| ) t f = map t ~f
   let ( let* ) = ( >>= )
   let ( let+ ) = ( >>| )
+  let ( and* ) = both
   let ( and+ ) = both
 end
 
@@ -90,7 +91,10 @@ module List = struct
   let map t ~f =
     let rec loop acc = function
       | [] -> Ok (List.rev acc)
-      | x :: xs -> f x >>= fun x -> loop (x :: acc) xs
+      | x :: xs ->
+        (match f x with
+         | Error _ as error -> error
+         | Ok x -> loop (x :: acc) xs)
     in
     loop [] t
   ;;
@@ -98,7 +102,8 @@ module List = struct
   let all =
     let rec loop acc = function
       | [] -> Ok (List.rev acc)
-      | t :: l -> t >>= fun x -> loop (x :: acc) l
+      | (Error _ as error) :: _ -> error
+      | Ok x :: l -> loop (x :: acc) l
     in
     fun l -> loop [] l
   ;;
@@ -106,7 +111,10 @@ module List = struct
   let concat_map =
     let rec loop f acc = function
       | [] -> Ok (List.rev acc)
-      | x :: l -> f x >>= fun y -> loop f (List.rev_append y acc) l
+      | x :: l ->
+        (match f x with
+         | Error _ as error -> error
+         | Ok y -> loop f (List.rev_append y acc) l)
     in
     fun l ~f -> loop f [] l
   ;;
@@ -114,30 +122,45 @@ module List = struct
   let rec iter t ~f =
     match t with
     | [] -> Ok ()
-    | x :: xs -> f x >>= fun () -> iter xs ~f
+    | x :: xs ->
+      (match f x with
+       | Error _ as error -> error
+       | Ok () -> iter xs ~f)
   ;;
 
   let rec fold_left t ~f ~init =
     match t with
     | [] -> Ok init
-    | x :: xs -> f init x >>= fun init -> fold_left xs ~f ~init
+    | x :: xs ->
+      (match f init x with
+       | Error _ as error -> error
+       | Ok init -> fold_left xs ~f ~init)
   ;;
 
   let filter_map t ~f =
-    fold_left t ~init:[] ~f:(fun acc x ->
-      f x
-      >>| function
-      | None -> acc
-      | Some y -> y :: acc)
-    >>| List.rev
+    let rec loop acc = function
+      | [] -> Ok (List.rev acc)
+      | x :: xs ->
+        (match f x with
+         | Error _ as error -> error
+         | Ok None -> loop acc xs
+         | Ok (Some y) -> loop (y :: acc) xs)
+    in
+    loop [] t
   ;;
 end
 
-let hash h1 h2 t =
-  Stdlib.Hashtbl.hash
-    (match t with
-     | Ok s -> h1 s
-     | Error e -> h2 e)
+let hash h1 h2 = function
+  | Ok s ->
+    let acc = Hash.create () in
+    let acc = Hash.feed acc 0 in
+    let acc = Hash.feed acc (h1 s) in
+    Hash.hash acc
+  | Error e ->
+    let acc = Hash.create () in
+    let acc = Hash.feed acc 1 in
+    let acc = Hash.feed acc (h2 e) in
+    Hash.hash acc
 ;;
 
 let equal e1 e2 x y =
@@ -145,6 +168,18 @@ let equal e1 e2 x y =
   | Ok x, Ok y -> e1 x y
   | Error x, Error y -> e2 x y
   | _, _ -> false
+;;
+
+let repr ok error =
+  Repr.variant
+    "result"
+    [ Repr.case "Ok" ok ~proj:(function
+        | Ok value -> Some value
+        | Error _ -> None)
+    ; Repr.case "Error" error ~proj:(function
+        | Ok _ -> None
+        | Error value -> Some value)
+    ]
 ;;
 
 module Option = struct
@@ -155,10 +190,13 @@ module Option = struct
   ;;
 end
 
-let to_dyn ok err = function
-  | Ok e -> Dyn.variant "Ok" [ ok e ]
-  | Error e -> Dyn.variant "Error" [ err e ]
-;;
+module Repr_derived = Repr.Make2 (struct
+    type nonrec ('a, 'error) t = ('a, 'error) t
+
+    let repr = repr
+  end)
+
+let to_dyn = Repr_derived.to_dyn
 
 let to_either = function
   | Ok e -> Either.Right e

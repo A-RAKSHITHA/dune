@@ -2,6 +2,28 @@ include Loc0
 module O = Comparable.Make (Loc0)
 include O
 
+let position_repr =
+  Repr.record
+    "lexing-position"
+    [ Repr.field "pos_fname" Repr.string ~get:(fun (position : Lexing.position) ->
+        position.pos_fname)
+    ; Repr.field "pos_lnum" Repr.int ~get:(fun (position : Lexing.position) ->
+        position.pos_lnum)
+    ; Repr.field "pos_bol" Repr.int ~get:(fun (position : Lexing.position) ->
+        position.pos_bol)
+    ; Repr.field "pos_cnum" Repr.int ~get:(fun (position : Lexing.position) ->
+        position.pos_cnum)
+    ]
+;;
+
+let repr =
+  Repr.record
+    "loc"
+    [ Repr.field "start" position_repr ~get:start
+    ; Repr.field "stop" position_repr ~get:stop
+    ]
+;;
+
 let in_file p = Lexbuf.Loc.in_file ~fname:(Path.to_string p) |> of_lexbuf_loc
 let in_dir = in_file
 
@@ -108,8 +130,8 @@ let pp_file_excerpt ~context_lines ~max_lines_to_print_in_full loc : tag Pp.t =
     | Error exn ->
       let backtrace = Printexc.get_backtrace () in
       Format.eprintf
-        "Raised when trying to print location contents of %s@.%a@."
-        file
+        "Raised when trying to print location %s@.%a@."
+        (Loc0.to_dyn loc |> Dyn.to_string)
         (Exn.pp_uncaught ~backtrace)
         exn;
       Pp.nop)

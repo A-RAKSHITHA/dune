@@ -45,6 +45,7 @@ end
 type value = Value.t list Deps.t
 
 let lookup_artifacts = Fdecl.create Dyn.opaque
+let resolve_pkg_install_file = Fdecl.create Dyn.opaque
 
 type t =
   { dir : Path.Build.t
@@ -66,6 +67,11 @@ let dir t = t.dir
 let project t = t.project
 let context t = Context.name t.context
 
+let host_context t =
+  let open Memo.O in
+  t.scope_host >>= fun s -> Context.DB.by_dir (Scope.root s)
+;;
+
 let set_local_env_var t ~var ~value =
   { t with local_env = Env.Var.Map.set t.local_env var value }
 ;;
@@ -77,18 +83,18 @@ let set_scope t ~dir ~project ~scope ~scope_host =
 let set_artifacts t ~artifacts_host = { t with artifacts_host }
 let set_expanding_what t x = { t with expanding_what = x }
 
-let map_exe t p =
+let map_exe ~force_host t prog args =
   match t.expanding_what with
-  | Deps_like_field -> p
+  | Deps_like_field -> prog, prog, args
   | Nothing_special | User_action _ | User_action_without_targets _ ->
-    Context.map_exe t.context p
+    Context.map_exe ~force_host t.context prog args
 ;;
 
 let extend_env t ~env =
   (* [t.local_env] has precedence over [t.env], so we cannot extend [env] if
      there are already local bindings.. *)
   let env =
-    Memo.Lazy.create (fun () ->
+    Memo.Lazy.create ~name:"extended-environment" (fun () ->
       let open Memo.O in
       let+ env = env
       and+ base = t.env in
@@ -129,7 +135,7 @@ let expand_version { scope; _ } ~(source : Dune_lang.Template.Pform.t) s =
   match
     let name = Package.Name.of_string s in
     let packages =
-      (* CR-rgrinberg: craziness to preserve buggy behavior people are relying
+      (* CR-someday rgrinberg: craziness to preserve buggy behavior people are relying
          on at the moment *)
       Dune_project.including_hidden_packages project
     in
@@ -169,41 +175,119 @@ let expand_version { scope; _ } ~(source : Dune_lang.Template.Pform.t) s =
          ])
 ;;
 
-let expand_artifact ~source t artifact arg =
-  let path = Path.Build.relative t.dir arg in
-  let loc = Dune_lang.Template.Pform.loc source in
-  let name = Path.Build.basename path in
-  let dir = Path.Build.parent_exn path in
-  if Path.Build.is_root dir
-  then User_error.raise ~loc [ Pp.text "cannot escape the workspace root directory" ];
-  let does_not_exist ~what name =
-    User_error.raise ~loc [ Pp.textf "%s %s does not exist." what name ]
+let expand_artifact =
+  let lookup_artifacts ~dir ~for_ =
+    let lookup = Fdecl.get lookup_artifacts in
+    Action_builder.of_memo (lookup ~dir ~for_)
   in
+  fun ~source t artifact arg ->
+    let path = Path.Build.relative t.dir arg in
+    let loc = Dune_lang.Template.Pform.loc source in
+    let name = Path.Build.basename path in
+    let dir = Path.Build.parent_exn path in
+    if Path.Build.is_root dir
+    then User_error.raise ~loc [ Pp.text "cannot escape the workspace root directory" ];
+    let does_not_exist ~what name =
+      User_error.raise ~loc [ Pp.textf "%s %s does not exist." what name ]
+    in
+    match artifact with
+    | Pform.Artifact.Mod kind ->
+      let reference = Module_reference.of_string_path (loc, Filename.to_string name) in
+      let reference_path = Module_reference.path reference in
+      let lookup_module ~for_ =
+        let+ artifacts = lookup_artifacts ~dir ~for_ in
+        Module_reference.validate_qualified
+          reference
+          ~include_subdirs:(Artifacts_obj.include_subdirs artifacts);
+        (match Artifacts_obj.lookup_module_by_source_path artifacts path with
+         | Some (_, module_)
+           when not (Module_name.Path.equal reference_path (Module.path module_)) ->
+           User_error.raise
+             ~loc
+             ~hints:
+               [ Pp.textf
+                   "%s would be a correct module reference"
+                   (Module.path module_ |> Module_name.Path.to_string)
+               ]
+             [ Pp.textf
+                 "Module reference %s does not match the module at this source path."
+                 (Module_reference.to_string reference)
+             ]
+         | None | Some _ -> ());
+        match Artifacts_obj.lookup_modules_by_logical_path artifacts reference_path with
+        | [ (obj_dir, module_) ] -> Some (for_, obj_dir, module_)
+        | _ :: _ ->
+          User_error.raise
+            ~loc
+            [ Pp.textf
+                "Module reference %s is ambiguous."
+                (Module_reference.to_string reference)
+            ]
+        | [] -> None
+      in
+      let* module_ =
+        match kind with
+        | Cm_kind (Cmo | Cmx) -> lookup_module ~for_:Compilation_mode.Ocaml
+        | Cm_kind Cmi | Cmt | Cmti ->
+          let* ocaml = lookup_module ~for_:Compilation_mode.Ocaml in
+          (match ocaml with
+           | Some _ -> Action_builder.return ocaml
+           | None -> lookup_module ~for_:Compilation_mode.Melange)
+      in
+      (match module_ with
+       | None -> does_not_exist ~what:"Module" (Module_reference.to_string reference)
+       | Some (for_, obj_dir, m) ->
+         let cmi_kind =
+           match for_ with
+           | Compilation_mode.Ocaml -> Lib_mode.Cm_kind.Ocaml Ocaml.Cm_kind.Cmi
+           | Compilation_mode.Melange -> Lib_mode.Cm_kind.Melange Melange.Cm_kind.Cmi
+         in
+         (match
+            match kind with
+            | Cm_kind Cmi -> Obj_dir.Module.cm_file obj_dir m ~kind:cmi_kind
+            | Cm_kind kind -> Obj_dir.Module.cm_file obj_dir m ~kind:(Ocaml kind)
+            | Cmt -> Obj_dir.Module.cmt_file obj_dir m ~cm_kind:cmi_kind ~ml_kind:Impl
+            | Cmti -> Some (Obj_dir.Module.cmti_file obj_dir m ~cm_kind:cmi_kind)
+          with
+          | None -> Action_builder.return [ Value.String "" ]
+          | Some path -> dep (Path.build path)))
+    | Lib mode ->
+      let* artifacts = lookup_artifacts ~dir ~for_:Compilation_mode.Ocaml in
+      let name =
+        Lib_name.parse_string_exn
+          (Dune_lang.Template.Pform.loc source, Filename.to_string name)
+      in
+      (match Artifacts_obj.lookup_library artifacts name with
+       | None -> does_not_exist ~what:"Library" (Lib_name.to_string name)
+       | Some lib ->
+         Mode.Dict.get (Lib_info.archives lib) mode
+         |> Action_builder.List.map ~f:(fun fn ->
+           let fn = Path.build fn in
+           let+ () = Action_builder.path fn in
+           Value.Path fn))
+;;
+
+let expand_melange_emit ~source t arg =
+  let target_dir = Path.Build.relative t.dir arg in
+  let loc = Dune_lang.Template.Pform.loc source in
+  let stanza_dir = Path.Build.parent_exn target_dir in
+  if Path.Build.is_root stanza_dir
+  then User_error.raise ~loc [ Pp.text "cannot escape the workspace root directory" ];
   let* artifacts =
     let lookup = Fdecl.get lookup_artifacts in
-    Action_builder.of_memo (lookup ~dir)
+    Action_builder.of_memo (lookup ~dir:stanza_dir ~for_:Compilation_mode.Melange)
   in
-  match artifact with
-  | Pform.Artifact.Mod kind ->
-    let name =
-      Module_name.of_string_allow_invalid (Dune_lang.Template.Pform.loc source, name)
-    in
-    (match Artifacts_obj.lookup_module artifacts name with
-     | None -> does_not_exist ~what:"Module" (Module_name.to_string name)
-     | Some (t, m) ->
-       (match Obj_dir.Module.cm_file t m ~kind:(Ocaml kind) with
-        | None -> Action_builder.return [ Value.String "" ]
-        | Some path -> dep (Path.build path)))
-  | Lib mode ->
-    let name = Lib_name.parse_string_exn (Dune_lang.Template.Pform.loc source, name) in
-    (match Artifacts_obj.lookup_library artifacts name with
-     | None -> does_not_exist ~what:"Library" (Lib_name.to_string name)
-     | Some lib ->
-       Mode.Dict.get (Lib_info.archives lib) mode
-       |> Action_builder.List.map ~f:(fun fn ->
-         let fn = Path.build fn in
-         let+ () = Action_builder.path fn in
-         Value.Path fn))
+  match Artifacts_obj.lookup_melange_emit artifacts target_dir with
+  | None ->
+    User_error.raise ~loc [ Pp.textf "Melange emit target %S does not exist." arg ]
+  | Some { Melange.Emit.output_dir; stanza_dir; alias } ->
+    let stanza_alias = Alias.make alias ~dir:stanza_dir in
+    let target_alias = Alias.make alias ~dir:target_dir in
+    let output_dir = Path.build output_dir in
+    let open Action_builder.O in
+    let+ () = Action_builder.dep (Dep.alias stanza_alias)
+    and+ () = Action_builder.dep (Dep.alias target_alias) in
+    [ Value.Path output_dir ]
 ;;
 
 let foreign_flags = Fdecl.create Dyn.opaque
@@ -262,7 +346,8 @@ let[@inline never] invalid_use_of_target_variable
        User_error.raise
          ~loc:source.loc
          [ Pp.textf
-             "You cannot use %s with inferred rules."
+             "You cannot use %s unless the rule has a (target ...) or (targets ...) \
+              field."
              (Dune_lang.Template.Pform.describe source)
          ]
      | Static { targets = _; multiplicity } ->
@@ -328,11 +413,10 @@ let expand_lib_variable t source ~lib ~file ~lib_exec ~lib_private =
       let* scope = Resolve.Memo.lift_memo scope in
       let* lib = Lib.DB.resolve (Scope.libs scope) (loc, lib) in
       let* current_project = Resolve.Memo.lift_memo project in
-      let referenced_project =
-        Lib.info lib |> Lib_info.status |> Lib_info.Status.project
-      in
+      let info = Lib.info lib in
+      let referenced_project = Lib_info.status info |> Lib_info.Status.project in
       if Option.equal Dune_project.equal (Some current_project) referenced_project
-      then Resolve.Memo.return (Path.relative (Lib_info.src_dir (Lib.info lib)) file)
+      then Resolve.Memo.return (Path.relative (Lib_info.src_dir info) file)
       else
         Resolve.Memo.fail
           (User_error.make
@@ -392,10 +476,20 @@ let expand_lib_variable t source ~lib ~file ~lib_exec ~lib_private =
                      (Lib_name.to_string lib))
               ]
       | _ ->
-        if (not lib_exec) || (not Sys.win32) || Filename.extension file = ".exe"
+        let has_exe_ext =
+          let extension =
+            Stdlib.Filename.extension file |> Filename.Extension.Or_empty.of_string_exn
+          in
+          Filename.Extension.Or_empty.check extension Filename.Extension.exe
+        in
+        if (not lib_exec) || (not Sys.win32) || has_exe_ext
         then dep p
         else (
-          let p_exe = Path.extend_basename p ~suffix:".exe" in
+          let p_exe =
+            Path.extend_basename
+              p
+              ~suffix:(Filename.Extension.to_filename Filename.Extension.exe)
+          in
           Action_builder.if_file_exists p_exe ~then_:(dep p_exe) ~else_:(dep p)))
    | Error () ->
      (if lib_private
@@ -432,9 +526,9 @@ let make loc context =
 let lib_config_var (var : Pform.Var.t) (lib_config : Lib_config.t) =
   [ (match var with
      | Ocaml_stdlib_dir -> Value.Dir lib_config.stdlib_dir
-     | Ext_obj -> String lib_config.ext_obj
-     | Ext_lib -> String lib_config.ext_lib
-     | Ext_dll -> String lib_config.ext_dll
+     | Ext_obj -> String (Filename.Extension.to_string lib_config.ext_obj)
+     | Ext_lib -> String (Filename.Extension.to_string lib_config.ext_lib)
+     | Ext_dll -> String (Filename.Extension.to_string lib_config.ext_dll)
      | Ccomp_type -> String (Ocaml_config.Ccomp_type.to_string lib_config.ccomp_type)
      | _ -> Code_error.raise "not a Lib_config.t variable" [ "var", Pform.Var.to_dyn var ])
   ]
@@ -452,6 +546,7 @@ let ocaml_config_var (var : Pform.Var.t) (ocaml_config : Ocaml_config.t) =
   | Ext_plugin ->
     (if Ocaml_config.natdynlink_supported ocaml_config then Mode.Native else Byte)
     |> Mode.plugin_ext
+    |> Filename.Extension.to_string
     |> string
   | Os_type ->
     Ocaml_config.os_type ocaml_config |> Ocaml_config.Os_type.to_string |> string
@@ -516,6 +611,7 @@ let expand_pform_var (context : Context.t) ~dir ~source (var : Pform.Var.t) =
     (let+ ocaml = ocaml in
      lib_config_var var ocaml.lib_config)
     |> static
+  | Os v -> static Lock_dir.Sys_vars.(os_values poll v)
   | Ext_exe
   | Cpp
   | Pa_cpp
@@ -558,6 +654,29 @@ let expand_pform_var (context : Context.t) ~dir ~source (var : Pform.Var.t) =
     (let+ inline_tests = Env_stanza_db.inline_tests ~dir in
      Dune_env.Inline_tests.to_string inline_tests |> string)
     |> static
+  | Oxcaml_supported ->
+    (let+ ocaml = Context.ocaml context in
+     let ocaml_version = Ocaml_config.version_string ocaml.ocaml_config in
+     [ Value.of_bool (Ocaml.Version.supports_oxcaml ocaml_version) ])
+    |> static
+  | Dune_warnings ->
+    Need_full_expander
+      (fun { scope; _ } ->
+        Deps.Without
+          (let open Memo.O in
+           let+ scope = scope in
+           let dune_version = Dune_project.dune_version (Scope.project scope) in
+           Value.L.strings (Ocaml_flags.dune_warnings ~dune_version ~profile:Dev)))
+  | Git_sha ->
+    (let open Memo.O in
+     let+ sha =
+       Source_tree.nearest_vcs Path.Source.root
+       >>= function
+       | None -> Memo.return None
+       | Some vcs -> Vcs.git_sha_short vcs
+     in
+     string (Option.value sha ~default:""))
+    |> static
 ;;
 
 let ocaml_config_macro source macro_invocation context =
@@ -594,6 +713,7 @@ let env_macro t source macro_invocation =
       ]
       ~hints:[ Pp.text "the syntax is %{env:VAR=DEFAULT-VALUE}" ]
   | Some (var, default) ->
+    let var = Env.Var.of_string var in
     (match Env.Var.Map.find t.local_env var with
      | Some v -> Deps.With (v >>| string)
      | None ->
@@ -601,6 +721,111 @@ let env_macro t source macro_invocation =
          (let open Memo.O in
           let+ env = t.env in
           Env.get env var |> Option.value ~default |> string))
+;;
+
+let resolve_installed_pkg_file ~loc (pkg : Dune_package.t) ~section ~file =
+  let candidates =
+    List.concat_map pkg.files ~f:(fun (s, paths) ->
+      if Section.equal s section
+      then
+        List.map paths ~f:(fun (p : Dune_package.path) -> Install.Entry.Dst.local p.dst)
+      else [])
+  in
+  match List.mem candidates file ~equal:Path.Local.equal with
+  | false ->
+    let file_str = Path.Local.to_string file in
+    let candidates = List.map candidates ~f:Path.Local.to_string in
+    User_error.raise
+      ~loc
+      ~hints:(User_message.did_you_mean file_str ~candidates)
+      [ Pp.textf
+          "File %s not found in section %s of package %s"
+          file_str
+          (Section.to_string section)
+          (Package.Name.to_string pkg.name)
+      ]
+  | true ->
+    (* pkg.dir is <prefix>/lib/<pkg>, so two parent_exn calls
+       recover the opam prefix. *)
+    let install_paths =
+      let roots =
+        Path.parent_exn (Path.parent_exn pkg.dir)
+        |> Install.Roots.opam_from_prefix ~relative:Path.relative
+      in
+      Install.Paths.make ~relative:Path.relative ~package:pkg.name ~roots
+    in
+    let path = Path.append_local (Install.Paths.get install_paths section) file in
+    let open Action_builder.O in
+    let+ () = Action_builder.path path in
+    path
+;;
+
+let resolve_local_pkg_file ~loc ~context_name ~pkg_name ~section ~file =
+  let open Action_builder.O in
+  let* src =
+    Action_builder.of_memo
+      (Fdecl.get resolve_pkg_install_file ~loc context_name ~pkg:pkg_name ~section ~file)
+  in
+  let path = Path.build src in
+  let+ () = Action_builder.path path in
+  path
+;;
+
+let expand_pkg_macro ~loc { context; _ } macro_invocation =
+  let context_name = Context.name context in
+  let pkg_name, section, file =
+    match Pform.Macro_invocation.Args.split macro_invocation with
+    (* CR-someday Alizter: validate the package name *)
+    | [ pkg_name; section; file ] -> Package.Name.of_string pkg_name, section, file
+    | _ ->
+      User_error.raise
+        ~loc
+        ~hints:[ Pp.text "the syntax is %{pkg:PACKAGE:SECTION:PATH}" ]
+        [ Pp.text "%{pkg:..} requires exactly 3 arguments." ]
+  in
+  let section =
+    match Section.of_string section with
+    | Some Misc | None ->
+      let supported =
+        Section.Set.to_list Section.all
+        |> List.filter_map ~f:(fun s ->
+          if Section.equal s Misc then None else Some (Section.to_string s))
+        |> String.enumerate_and
+      in
+      User_error.raise
+        ~loc
+        ~hints:[ Pp.textf "supported sections are %s." supported ]
+        [ Pp.textf "%s is not a valid section." section ]
+    | Some section -> section
+  in
+  let file =
+    match Path.Local.of_string file with
+    | f -> f
+    | exception User_error.E _ ->
+      User_error.raise
+        ~loc
+        ~hints:[ Pp.text "the path must be relative and must not contain '..'." ]
+        [ Pp.textf "%s is not a valid file path." file ]
+  in
+  let open Action_builder.O in
+  let+ path =
+    let* found =
+      Action_builder.of_memo
+        (let open Memo.O in
+         let* package_db = Package_db.create context_name in
+         Package_db.find_package package_db pkg_name)
+    in
+    match found with
+    | None ->
+      User_error.raise
+        ~loc
+        [ Pp.textf "Package %s does not exist" (Package.Name.to_string pkg_name) ]
+    | Some (Installed pkg) -> resolve_installed_pkg_file ~loc pkg ~section ~file
+    | Some (Local _) -> resolve_local_pkg_file ~loc ~context_name ~pkg_name ~section ~file
+    | Some (Build _) ->
+      Pkg_rules.resolve_installed_file ~loc ~context_name ~pkg_name ~section ~file
+  in
+  [ Value.Path path ]
 ;;
 
 let expand_pform_macro
@@ -611,17 +836,27 @@ let expand_pform_macro
   =
   let s = Pform.Macro_invocation.Args.whole macro_invocation in
   match macro_invocation.macro with
-  | Pkg -> Code_error.raise "pkg forms aren't possible here" []
+  | Pkg ->
+    let loc = Dune_lang.Template.Pform.loc source in
+    Need_full_expander (fun t -> With (expand_pkg_macro ~loc t macro_invocation))
   | Pkg_self -> Code_error.raise "pkg-self forms aren't possible here" []
   | Ocaml_config -> ocaml_config_macro source macro_invocation context
   | Env -> Need_full_expander (fun t -> env_macro t source macro_invocation)
   | Version -> Need_full_expander (fun t -> Deps.Without (expand_version t ~source s))
   | Artifact a -> Need_full_expander (fun t -> Deps.With (expand_artifact ~source t a s))
+  | Melange_emit ->
+    Need_full_expander (fun t -> Deps.With (expand_melange_emit ~source t s))
   | Path_no_dep ->
     (* This case is for %{path-no-dep:...} which was only allowed inside
            jbuild files *)
     assert false
-  | Exe -> Need_full_expander (fun t -> With (dep (map_exe t (relative ~source t.dir s))))
+  | Exe ->
+    Need_full_expander
+      (fun t ->
+        With
+          (dep
+             (match map_exe ~force_host:false t (relative ~source t.dir s) [] with
+              | dep, _, _ -> dep)))
   | Dep -> Need_full_expander (fun t -> With (dep (relative ~source t.dir s)))
   | Bin ->
     Need_full_expander
@@ -633,6 +868,7 @@ let expand_pform_macro
                 let* artifacts_host = t.artifacts_host in
                 Artifacts.binary
                   ~loc:(Some (Dune_lang.Template.Pform.loc source))
+                  ~dir:t.dir
                   artifacts_host
                   s)
            in
@@ -661,7 +897,7 @@ let expand_pform_macro
         Without
           (let open Memo.O in
            let* artifacts_host = t.artifacts_host in
-           let+ b = Artifacts.binary_available artifacts_host s in
+           let+ b = Artifacts.binary_available artifacts_host ~dir:t.dir s in
            b |> string_of_bool |> string))
   | File_available ->
     Direct
@@ -686,13 +922,30 @@ let expand_pform_macro
             ]
         | Ok s -> s)
       |> strings)
-  | Coq_config ->
+  | Ppx ->
+    Need_full_expander
+      (fun t ->
+        With
+          (let open Action_builder.O in
+           let+ exe =
+             let* scope = Action_builder.of_memo t.scope in
+             Pform.Macro_invocation.Args.whole macro_invocation
+             |> String.split ~on:'+'
+             |> List.map ~f:(fun name ->
+               let loc = Dune_lang.Template.Pform.loc source in
+               let name = Lib_name.parse_string_exn (loc, name) in
+               loc, name)
+             |> Ppx_exe.get_ppx_exe context ~scope
+             |> Resolve.Memo.read
+           in
+           [ Value.Path (Path.build exe) ]))
+  | Rocq_config ->
     Need_full_expander
       (fun t ->
         Without
           (let open Memo.O in
            let* artifacts_host = t.artifacts_host in
-           Coq_config.expand source macro_invocation artifacts_host))
+           Rocq_config.expand source macro_invocation ~dir:t.dir artifacts_host))
 ;;
 
 let expand_pform_gen ~(context : Context.t) ~bindings ~dir ~source (pform : Pform.t)
@@ -734,21 +987,18 @@ let describe_source ~source =
     (Loc.to_file_colon_line source.loc)
 ;;
 
+let expand_pform_gen t ~source pform =
+  match
+    expand_pform_gen ~context:t.context ~bindings:t.bindings ~dir:t.dir ~source pform
+  with
+  | Direct value -> value
+  | Need_full_expander f -> f t
+;;
+
 let expand_pform t ~source pform =
   Action_builder.push_stack_frame
     (fun () ->
-       match
-         match
-           expand_pform_gen
-             ~context:t.context
-             ~bindings:t.bindings
-             ~dir:t.dir
-             ~source
-             pform
-         with
-         | Direct v -> v
-         | Need_full_expander f -> f t
-       with
+       match expand_pform_gen t ~source pform with
        | With x -> x
        | Without x -> Action_builder.of_memo x)
     ~human_readable_description:(fun () -> describe_source ~source)
@@ -817,18 +1067,7 @@ module No_deps = struct
   let expand_pform_no_deps t ~source pform =
     Memo.push_stack_frame
       (fun () ->
-         match
-           match
-             expand_pform_gen
-               ~context:t.context
-               ~bindings:t.bindings
-               ~dir:t.dir
-               ~source
-               pform
-           with
-           | Direct v -> v
-           | Need_full_expander f -> f t
-         with
+         match expand_pform_gen t ~source pform with
          | With _ -> isn't_allowed_in_this_position ~source
          | Without x -> x)
       ~human_readable_description:(fun () -> describe_source ~source)
@@ -855,13 +1094,7 @@ module With_deps_if_necessary = struct
   module E = String_with_vars.Make_expander (Deps)
 
   let expand_pform t ~source pform : _ Deps.t =
-    match
-      match
-        expand_pform_gen ~context:t.context ~bindings:t.bindings ~dir:t.dir ~source pform
-      with
-      | Direct v -> v
-      | Need_full_expander f -> f t
-    with
+    match expand_pform_gen t ~source pform with
     | Without t ->
       Without
         (Memo.push_stack_frame
@@ -888,8 +1121,7 @@ module With_deps_if_necessary = struct
 end
 
 let expand_ordered_set_lang =
-  let module Expander =
-    Ordered_set_lang.Unexpanded.Expand (struct
+  let module Expander = Ordered_set_lang.Unexpanded.Expand (struct
       include Action_builder
       include String_expander.Action_builder
     end)

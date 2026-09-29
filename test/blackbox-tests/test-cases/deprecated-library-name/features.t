@@ -96,7 +96,6 @@ that wasn't found:
   1 | (executable (name prog) (libraries a))
                                          ^
   Error: Library "a" not found.
-  -> required by _build/default/c/.prog.eobjs/byte/dune__exe__Prog.cmi
   -> required by _build/default/c/.prog.eobjs/native/dune__exe__Prog.cmx
   -> required by _build/default/c/prog.exe
   [1]
@@ -276,7 +275,7 @@ Another case of ambiguity:
   >  (new_public_name p))
   > EOF
 
-  $ (cd d && dune build --root . --display=short @all)
+  $ (cd d && dune build --root . @all)
   Error: Package name p is defined twice:
   - dune-project:3
   - dune-project:2
@@ -289,7 +288,8 @@ Qualified, deprecated old_public_name:
   > (package (name p) (deprecated_package_names q))
   > EOF
 
-  $ cat >d/dune <<EOF
+  $ write_deprecated_q_foo_dune() {
+  > cat >d/dune <<'EOF'
   > (rule (with-stdout-to bar.ml (progn)))
   > (library
   >  (name p)
@@ -299,6 +299,9 @@ Qualified, deprecated old_public_name:
   >  (old_public_name q.foo)
   >  (new_public_name p))
   > EOF
+  > }
+
+  $ write_deprecated_q_foo_dune
 
   $ (cd d && dune build --root . @all)
 
@@ -328,15 +331,8 @@ Two libraries redirecting to the same library:
   > (package (name p) (deprecated_package_names q))
   > EOF
 
-  $ cat >d/dune <<EOF
-  > (rule (with-stdout-to bar.ml (progn)))
-  > (library
-  >  (name p)
-  >  (public_name p)
-  >  (modules bar))
-  > (deprecated_library_name
-  >  (old_public_name q.foo)
-  >  (new_public_name p))
+  $ write_deprecated_q_foo_dune
+  $ cat >>d/dune <<EOF
   > (deprecated_library_name
   >  (old_public_name q.bar)
   >  (new_public_name p))

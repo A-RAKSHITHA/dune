@@ -1,6 +1,6 @@
-open Dune_config
 open Import
 module Lock_dir = Dune_pkg.Lock_dir
+module Pin = Dune_pkg.Pin
 
 let is_enabled =
   lazy
@@ -65,48 +65,50 @@ let make_local_package_wrapping_dev_tool ~dev_tool ~dev_tool_version ~extra_depe
   }
 ;;
 
+(* Collect all pins from all projects and filter to only compiler packages.
+   This allows dev tools to use the same pinned compiler as the main project. *)
+let compiler_pins = Memo.O.(Pkg.Lock.project_pins >>| Pin.DB.filter_compilers)
+
 let solve ~dev_tool ~local_packages =
   let open Memo.O in
   let* solver_env_from_current_system =
-    Dune_pkg.Sys_poll.make ~path:(Env_path.path Stdune.Env.initial)
-    |> Dune_pkg.Sys_poll.solver_env_from_current_system
+    Pkg.Pkg_common.poll_solver_env_from_current_system ()
     |> Memo.of_reproducible_fiber
     >>| Option.some
-  and* workspace = Workspace.workspace () in
-  let lock_dir = Lock_dir.dev_tool_lock_dir_path dev_tool in
+  and* workspace =
+    let+ workspace = Workspace.workspace () in
+    match Config.get Dune_rules.Compile_time.bin_dev_tools with
+    | `Enabled ->
+      Workspace.add_repo workspace Dune_pkg.Pkg_workspace.Repository.binary_packages
+    | `Disabled -> workspace
+  and* compiler_pins = compiler_pins in
+  (* as we want to write to the source, we're using the source lock dir here *)
+  let lock_dir =
+    Dune_rules.Lock_dir.dev_tool_external_lock_dir dev_tool |> Path.external_
+  in
   Memo.of_reproducible_fiber
-  @@ Lock.solve
-       (Workspace.add_repo workspace Dune_pkg.Pkg_workspace.Repository.binary_packages)
+  @@ Pkg.Lock.solve
+       workspace
        ~local_packages
-       ~project_pins:Dune_pkg.Pin_stanza.DB.empty
+       ~project_pins:compiler_pins
        ~solver_env_from_current_system
        ~version_preference:None
        ~lock_dirs:[ lock_dir ]
        ~print_perf_stats:false
+       ~portable_lock_dir:false
 ;;
 
-let compiler_package_name = Package_name.of_string "ocaml"
+(* Some dev tools must be built with the same version of the ocaml compiler as
+   the project. This function returns the compiler package used to compile the
+   project in the default build context. *)
 
-(* Some dev tools must be built with the same version of the ocaml
-   compiler as the project. This function returns the version of the
-   "ocaml" package used to compile the project in the default build
-   context.
-
-   TODO: This only makes sure that the version of compiler used to
-   build the dev tool matches the version of the compiler used to
-   build this project. This will fail if the project is built with a
-   custom compiler (e.g. ocaml-variants) since the version of the
-   compiler will be the same between the project and dev tool while
-   they still use different compilers. A more robust solution would be
-   to ensure that the exact compiler package used to build the dev
-   tool matches the package used to build the compiler. *)
-let locked_ocaml_compiler_version () =
+let compiler_package () =
   let open Memo.O in
-  let context =
-    (* Dev tools are only ever built with the default context. *)
-    Context_name.default
+  let context = Context_name.default in
+  let* result = Dune_rules.Lock_dir.get context
+  and* platform =
+    Pkg.Pkg_common.poll_solver_env_from_current_system () |> Memo.of_reproducible_fiber
   in
-  let* result = Dune_rules.Lock_dir.get context in
   match result with
   | Error _ ->
     User_error.raise
@@ -114,99 +116,156 @@ let locked_ocaml_compiler_version () =
       ~hints:
         [ Pp.concat
             ~sep:Pp.space
-            [ Pp.text "Try running"; User_message.command "dune pkg lock" ]
+            [ Pp.text "Try running"; User_message.command "dune build" ]
         ]
-  | Ok { packages; _ } ->
-    (match Package_name.Map.find packages compiler_package_name with
+  | Ok lockfile ->
+    let pkgs = Lock_dir.Packages.pkgs_on_platform_by_name lockfile.packages ~platform in
+    (match lockfile.ocaml with
      | None ->
        User_error.raise
-         [ Pp.textf
-             "The lockdir doesn't contain a lockfile for the package %S."
-             (Package_name.to_string compiler_package_name)
-         ]
+         [ Pp.textf "No compiler declared in the lockfile" ]
          ~hints:
            [ Pp.concat
                ~sep:Pp.space
-               [ Pp.textf
-                   "Add a dependency on %S to one of the packages in dune-project and \
-                    then run"
-                   (Package_name.to_string compiler_package_name)
-               ; User_message.command "dune pkg lock"
+               [ Pp.text
+                   "Add a dependency on a compiler to one of the packages in \
+                    dune-project and then run"
+               ; User_message.command "dune build"
                ]
            ]
-     | Some pkg -> Memo.return pkg.info.version)
+     | Some (_loc, pkg_name) ->
+       (match Package_name.Map.find pkgs pkg_name with
+        | None ->
+          User_error.raise
+            [ Pp.textf "Compiler package %s not found." (Package_name.to_string pkg_name)
+            ]
+        | Some pkg -> Memo.return pkg))
 ;;
 
-(* Returns a dependency constraint on the version of the ocaml
-   compiler in the lockdir associated with the default context. *)
-let locked_ocaml_compiler_constraint () =
-  let open Dune_lang in
+let compiler_constraints () =
   let open Memo.O in
-  let+ ocaml_compiler_version = locked_ocaml_compiler_version () in
+  let open Dune_lang in
+  let+ pkg = compiler_package () in
+  let version = pkg.info.version in
   let constraint_ =
-    Some
-      (Package_constraint.Uop
-         (Eq, String_literal (Package_version.to_string ocaml_compiler_version)))
+    Some (Package_constraint.Uop (Eq, String_literal (Package_version.to_string version)))
   in
-  { Package_dependency.name = compiler_package_name; constraint_ }
+  [ { Package_dependency.name = pkg.info.name; constraint_ } ]
 ;;
 
 let extra_dependencies dev_tool =
-  let open Memo.O in
   match Dune_pkg.Dev_tool.needs_to_build_with_same_compiler_as_project dev_tool with
   | false -> Memo.return []
-  | true ->
-    let+ constraint_ = locked_ocaml_compiler_constraint () in
-    [ constraint_ ]
+  | true -> compiler_constraints ()
 ;;
 
 let lockdir_status dev_tool =
   let open Memo.O in
-  let dev_tool_lock_dir = Lock_dir.dev_tool_lock_dir_path dev_tool in
-  match Lock_dir.read_disk dev_tool_lock_dir with
-  | Error _ -> Memo.return `No_lockdir
-  | Ok { packages; _ } ->
-    (match Dune_pkg.Dev_tool.needs_to_build_with_same_compiler_as_project dev_tool with
-     | false -> Memo.return `Lockdir_ok
-     | true ->
-       (match Package_name.Map.find packages compiler_package_name with
-        | None -> Memo.return `No_compiler_lockfile_in_lockdir
-        | Some { info; _ } ->
-          let+ ocaml_compiler_version = locked_ocaml_compiler_version () in
-          (match Package_version.equal info.version ocaml_compiler_version with
-           | true -> `Lockdir_ok
-           | false ->
-             `Dev_tool_needs_to_be_relocked_because_project_compiler_version_changed
-               (User_message.make
-                  [ Pp.textf
-                      "The version of the compiler package (%S) in this project's \
-                       lockdir has changed to %s (formerly the compiler version was %s). \
-                       The dev-tool %S will be re-locked and rebuilt with this version \
-                       of the compiler."
-                      (Package_name.to_string compiler_package_name)
-                      (Package_version.to_string ocaml_compiler_version)
-                      (Package_version.to_string info.version)
-                      (Dune_pkg.Dev_tool.package_name dev_tool |> Package_name.to_string)
-                  ]))))
+  let dev_tool_lock_dir = Dune_rules.Lock_dir.dev_tool_external_lock_dir dev_tool in
+  let* lock_dir_exists =
+    Dune_engine.Fs_memo.dir_exists (Path.Outside_build_dir.External dev_tool_lock_dir)
+  in
+  match lock_dir_exists with
+  | false -> Memo.return `No_lockdir
+  | true ->
+    let dev_tool_lock_dir = Path.external_ dev_tool_lock_dir in
+    (match Lock_dir.read_disk dev_tool_lock_dir with
+     | Error _ -> Memo.return `No_lockdir
+     | Ok { packages; _ } ->
+       let* platform =
+         Pkg.Pkg_common.poll_solver_env_from_current_system ()
+         |> Memo.of_reproducible_fiber
+       in
+       let packages = Lock_dir.Packages.pkgs_on_platform_by_name packages ~platform in
+       let package_name = Dune_pkg.Dev_tool.package_name dev_tool in
+       (match Package_name.Map.find packages package_name with
+        | None ->
+          Memo.return
+            (`Lockdir_missing_entry_for_tool
+                (User_message.make
+                   [ Pp.textf
+                       "The lock directory for the tool %S exists but does not contain a \
+                        lockfile for the package %S. This may indicate that the lock \
+                        directory has been tampered with. Please avoid making manual \
+                        changes to tool lock directories. The tool will now be relocked."
+                       (Dune_pkg.Dev_tool.exe_name dev_tool)
+                       (Package_name.to_string package_name)
+                   ]))
+        | Some pkg ->
+          (match
+             Dune_pkg.Dev_tool.needs_to_build_with_same_compiler_as_project dev_tool
+           with
+           | false -> Memo.return (`Lockdir_ok_with_tool_pkg pkg)
+           | true ->
+             let open Memo.O in
+             let* compiler = compiler_package () in
+             (match Package_name.Map.find packages compiler.info.name with
+              | None -> Memo.return `No_compiler_lockfile_in_lockdir
+              | Some pkg ->
+                let+ ocaml_compiler = compiler_package () in
+                (match Lock_dir.Pkg.equal pkg ocaml_compiler with
+                 | true -> `Lockdir_ok_with_tool_pkg pkg
+                 | false ->
+                   `Dev_tool_needs_to_be_relocked_because_project_compiler_version_changed
+                     (User_message.make
+                        [ Pp.textf
+                            "The version of the compiler package (%S) in this project's \
+                             lockdir has changed to %s (formerly the compiler version \
+                             was %s). The dev-tool %S will be re-locked and rebuilt with \
+                             this version of the compiler."
+                            (Package_name.to_string compiler.info.name)
+                            (Package_version.to_string ocaml_compiler.info.version)
+                            (Package_version.to_string pkg.info.version)
+                            (Dune_pkg.Dev_tool.package_name dev_tool
+                             |> Package_name.to_string)
+                        ]))))))
 ;;
 
-let lock_dev_tool dev_tool version =
+(* [lock_dev_tool_at_version dev_tool version] generates the lockdir for the
+   dev tool [dev_tool]. If [version] is [Some v] then version [v] of the tool
+   will be chosen by the solver. Otherwise the solver is free to choose the
+   appropriate version of the tool to install. *)
+let lock_dev_tool_at_version dev_tool version =
   let open Memo.O in
   let* need_to_solve =
     lockdir_status dev_tool
     >>| function
-    | `Lockdir_ok -> false
+    | `Lockdir_ok_with_tool_pkg (pkg : Dune_pkg.Lock_dir.Pkg.t) ->
+      (match version with
+       | None -> false
+       | Some version ->
+         (* If this function was passed a specific version, and the dev
+            tool's lockfile contains a different version from the specified
+            version, regenerate the lockdir. *)
+         let different_version_currently_locked =
+           not (Package_version.equal pkg.info.version version)
+         in
+         if different_version_currently_locked
+         then
+           Console.print
+             [ Pp.textf
+                 "The lock directory for the tool %S exists but contains a solution for \
+                  %s of the tool, whereas version %s now needs to be installed. The tool \
+                  will now be re-locked."
+                 (Dune_pkg.Dev_tool.exe_name dev_tool)
+                 (Package_version.to_string pkg.info.version)
+                 (Package_version.to_string version)
+             ];
+         different_version_currently_locked)
     | `No_lockdir -> true
     | `No_compiler_lockfile_in_lockdir ->
       Console.print
         [ Pp.textf
             "The lockdir for %s lacks a lockfile for %s. Regenerating..."
             (Dune_pkg.Dev_tool.package_name dev_tool |> Package_name.to_string)
-            (Package_name.to_string compiler_package_name)
+            "ocaml"
         ];
       true
     | `Dev_tool_needs_to_be_relocked_because_project_compiler_version_changed message ->
       Console.print_user_message message;
+      true
+    | `Lockdir_missing_entry_for_tool message ->
+      User_warning.emit_message message;
       true
   in
   if need_to_solve
@@ -225,8 +284,11 @@ let lock_dev_tool dev_tool version =
 
 let lock_ocamlformat () =
   let version = Dune_pkg.Ocamlformat.version_of_current_project's_ocamlformat_config () in
-  lock_dev_tool Ocamlformat version
+  lock_dev_tool_at_version Ocamlformat version
 ;;
 
-let lock_odoc () = lock_dev_tool Odoc None
-let lock_ocamllsp () = lock_dev_tool Ocamllsp None
+let lock_dev_tool dev_tool =
+  match (dev_tool : Dune_pkg.Dev_tool.t) with
+  | Ocamlformat -> lock_ocamlformat ()
+  | other -> lock_dev_tool_at_version other None
+;;

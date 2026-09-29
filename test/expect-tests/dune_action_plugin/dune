@@ -3,13 +3,15 @@
 (library
  (name dune_action_unit_tests)
  (inline_tests
-  (deps some_dir/some_file))
+  (deps
+   (source_tree some_dir)))
  (libraries
-  dune_action_plugin
+  dune_rpc_lwt
+  lwt
+  lwt.unix
   ppx_expect.config
   ppx_expect.config_types
   base
-  ppx_inline_test.config
-  dune-glob)
+  ppx_inline_test.config)
  (preprocess
   (pps ppx_expect)))

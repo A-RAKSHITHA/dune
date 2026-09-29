@@ -2,7 +2,7 @@ Test that dune will add checksums to lockfiles when the package has a source
 archive but no checksum. This test uses an http server to serve packages to
 test checksum generation, since we only generate checksums for packages
 downloaded from non-local sources.
-  $ . ./helpers.sh
+
   $ mkrepo
 
 A file that will comprise the package source:
@@ -26,13 +26,14 @@ A file that will comprise the package source:
 
 Replace the path in the lockfile as it would otherwise include the sandbox
 path.
-  $ cat dune.lock/foo.pkg
+  $ cat ${default_lock_dir}/foo.0.0.1.pkg
   (version 0.0.1)
   
   (source
    (fetch
     (url http://0.0.0.0:1)
-    (checksum md5=bea8252ff4e80f41719ea13cdf007273)))
+    (checksum
+     sha256=c98c24b677eff44860afea6f493bbaec5bb1c4cbb209c6fc2bbb47f66ff2ad31)))
   
   (dev)
 
@@ -51,10 +52,9 @@ Recreate the foo package with a fake port number to signal that the file will
   Package "foo" has source archive which lacks a checksum.
   The source archive will be downloaded from: http://0.0.0.0:9000
   Dune will compute its own checksum for this source archive.
-  Warning: download failed with code 404
   Solution for dune.lock:
   - foo.0.0.1
-  $ cat dune.lock/foo.pkg
+  $ cat ${default_lock_dir}/foo.0.0.1.pkg
   (version 0.0.1)
   
   (source
@@ -85,7 +85,6 @@ Check that no checksum is computed for a local source directory:
   $ solve foo 2>&1
   Solution for dune.lock:
   - foo.0.0.1
-
 
 Create 3 packages that all share the same source url with no checksum. Dune
 will need to download each package's source archive to compute their hashes.

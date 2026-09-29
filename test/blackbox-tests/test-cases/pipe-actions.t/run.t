@@ -1,8 +1,6 @@
 The new pipe actions are only available since dune 2.7:
 
-  $ cat >dune-project <<EOF
-  > (lang dune 2.6)
-  > EOF
+  $ make_dune_project 2.6
 
   $ cat >dune <<EOF
   > (rule
@@ -28,9 +26,7 @@ The new pipe actions are only available since dune 2.7:
 
 You need to set the language to 2.7 or higher for it to work:
 
-  $ cat >dune-project <<EOF
-  > (lang dune 2.7)
-  > EOF
+  $ make_dune_project 2.7
 
   $ dune build @pipe
   x
@@ -50,44 +46,48 @@ The makefile version of pipe actions uses actual pipes:
   >    (pipe-outputs (run a) (run b) (run c)))))
   > EOF
 
-  $ dune rules -m target
-  _build/default/target: _build/install/default/bin/a \
-    _build/install/default/bin/b _build/install/default/bin/c
-  	mkdir -p _build/default; \
-  	mkdir -p _build/default; \
-  	cd _build/default; \
-  	../install/default/bin/a  2>&1 |  \
-  	  ../install/default/bin/b | ../install/default/bin/c  &> target
+  $ dune rules target
+  ((deps
+    ((File (In_build_dir _build/install/default/bin/a))
+     (File (In_build_dir _build/install/default/bin/b))
+     (File (In_build_dir _build/install/default/bin/c))))
+   (targets ((files (_build/default/target)) (directories ())))
+   (context default)
+   (action
+    (chdir
+     _build/default
+     (with-outputs-to
+      target
+      (pipe-outputs
+       (run ../install/default/bin/a)
+       (run ../install/default/bin/b)
+       (run ../install/default/bin/c))))))
 
   $ cat >dune <<EOF
-  > (executable
-  >  (public_name apl) (name append_to_line) (modules append_to_line))
-  > (executable
-  >  (public_name echo-outputs) (name echo_outputs) (modules echo_outputs))
   > (rule
   >  (action
   >   (with-stderr-to target-stdout.stderr
   >    (with-stdout-to target-stdout.stdout
   >     (pipe-stdout
-  >      (run echo-outputs a)
-  >      (run apl b)
-  >      (run apl c))))))
+  >      (run dune_cmd echo-outputs a)
+  >      (run dune_cmd append-to-lines b)
+  >      (run dune_cmd append-to-lines c))))))
   > (rule
   >  (action
   >   (with-stderr-to target-stderr.stderr
   >    (with-stdout-to target-stderr.stdout
   >     (pipe-stderr
-  >      (run echo-outputs a)
-  >      (run apl b)
-  >      (run apl c))))))
+  >      (run dune_cmd echo-outputs a)
+  >      (run dune_cmd append-to-lines b)
+  >      (run dune_cmd append-to-lines c))))))
   > (rule
   >  (action
   >   (with-stderr-to target-outputs.stderr
   >   (with-stdout-to target-outputs.stdout
   >    (pipe-outputs
-  >     (run echo-outputs a)
-  >     (run apl b)
-  >     (run apl c))))))
+  >     (run dune_cmd echo-outputs a)
+  >     (run dune_cmd append-to-lines b)
+  >     (run dune_cmd append-to-lines c))))))
   > EOF
 
   $ dune build _build/default/target-stdout.stdout _build/default/target-stdout.stderr
@@ -113,3 +113,44 @@ The makefile version of pipe actions uses actual pipes:
   e a | e b
   o a | o b | e c
   e a | o b | e c
+
+A failed pipe currently retains its temporary file until the build finishes.
+
+  $ mkdir "$TMPDIR/pipe-cleanup"
+  $ export TMPDIR="$TMPDIR/pipe-cleanup"
+  $ pipe_started="$PWD/pipe-started"
+  $ blocker_started="$PWD/blocker-started"
+  $ release="$PWD/pipe-release"
+
+  $ cat >dune <<EOF
+  > (rule
+  >  (alias failed-pipe)
+  >  (action
+  >   (pipe-stdout
+  >    (bash "touch '$pipe_started'; echo input")
+  >    (system "exit 1"))))
+  > (rule
+  >  (target blocked)
+  >  (action
+  >   (bash
+  >    "touch '$blocker_started'
+  >     while test ! -e '$release'; do sleep 0.01; done
+  >     touch blocked")))
+  > EOF
+
+  $ dune build -j2 @failed-pipe blocked >pipe-output 2>&1 &
+  $ build_pid=$!
+  $ with_timeout dune_cmd wait-for-file-to-appear "$pipe_started"
+  $ with_timeout dune_cmd wait-for-file-to-appear "$blocker_started"
+  $ $timeout 1 sh -c '
+  > while find "$TMPDIR" -type f -name "dune-pipe-action-*" | grep -q .; do
+  >   sleep 0.01
+  > done' || true
+
+  $ find "$TMPDIR" -type f -name 'dune-pipe-action-*' -exec basename {} \; |
+  > sed -E 's/^dune-pipe-action-.*$/dune-pipe-action-<id>/'
+  dune-pipe-action-<id>
+
+  $ touch "$release"
+  $ wait "$build_pid"
+  [1]

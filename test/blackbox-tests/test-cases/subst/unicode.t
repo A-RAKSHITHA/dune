@@ -1,4 +1,3 @@
-
 Test subst and files with unicode (#3879)
 -----------------------------------------
 

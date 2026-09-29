@@ -1,17 +1,18 @@
 include Stdune
-module Console = Dune_console
-module Dune_rpc = Dune_rpc_private
+module Console = Console
+module Dune_rpc = Dune_rpc.Private
+include Dune_scheduler
 
 include struct
   open Dune_engine
   module Build_system = Build_system
   module Build_system_error = Build_system_error
-  module Scheduler = Scheduler
   module Running_jobs = Running_jobs
+  module Build_outcome = Build_outcome
 end
 
 include struct
-  open Dune_rpc_client
+  open Rpc
   module Where = Where
-  module Client = Dune_rpc_client.Client
+  module Client = Rpc.Client
 end

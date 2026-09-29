@@ -1,4 +1,5 @@
 open Import
+open Memo.O
 
 type t =
   { libraries : Foreign.Sources.t Lib_name.Map.t
@@ -7,12 +8,18 @@ type t =
   }
 
 let for_lib t ~name = Lib_name.Map.find_exn t.libraries name
+let for_lib_opt t ~name = Lib_name.Map.find t.libraries name
 
 let for_archive t ~archive_name =
   Foreign.Archive.Name.Map.find_exn t.archives archive_name
 ;;
 
+let for_archive_opt t ~archive_name =
+  Foreign.Archive.Name.Map.find t.archives archive_name
+;;
+
 let for_exes t ~first_exe = String.Map.find_exn t.executables first_exe
+let for_exes_opt t ~first_exe = String.Map.find t.executables first_exe
 
 let empty =
   { libraries = Lib_name.Map.empty
@@ -73,11 +80,11 @@ module Unresolved = struct
 
   let load ~dune_version ~dir ~files =
     let init = String.Map.empty in
-    String.Set.fold files ~init ~f:(fun fn acc ->
-      match drop_source_extension fn ~dune_version with
+    Filename.Array.Set.fold files ~init ~f:(fun fn acc ->
+      match drop_source_extension (Filename.to_string fn) ~dune_version with
       | None -> acc
       | Some (obj, language) ->
-        let path = Path.Build.relative dir fn in
+        let path = Path.Build.relative_fname dir fn in
         String.Map.add_multi acc obj (language, path))
   ;;
 
@@ -95,9 +102,9 @@ module Unresolved = struct
 
   let load_dirs ~dune_version dirs =
     List.fold_left
-      dirs
+      (Nonempty_list.to_list dirs)
       ~init:String.Map.empty
-      ~f:(fun acc { Source_file_dir.dir; path_to_root = _; files } ->
+      ~f:(fun acc { Source_file_dir.dir; files; _ } ->
         let sources = load ~dir ~dune_version ~files in
         String.Map.Multi.rev_union sources acc)
   ;;
@@ -118,6 +125,29 @@ let valid_name language ~loc s =
       ~loc
       [ Pp.textf "%S is not a valid %s name." s (Foreign_language.proper_name language) ]
   | _ -> s
+;;
+
+let ctypes_stubs sources (ctypes : Ctypes_field.t) =
+  String.Map.of_list_map_exn
+    ctypes.function_description
+    ~f:(fun (fd : Ctypes_field.Function_description.t) ->
+      let loc =
+        Loc.none
+        (* TODO *)
+      in
+      let name =
+        Ctypes_field.c_generated_functions_cout_c ctypes fd
+        |> Stdlib.Filename.remove_extension
+      in
+      let path =
+        match Unresolved.find_source sources C (loc, name) with
+        | Some p -> p
+        | None ->
+          (* impossible b/c ctypes fields generates this *)
+          assert false
+      in
+      let source = Foreign.Source.make (Ctypes ctypes) ~path in
+      name, (loc, source))
 ;;
 
 let eval_foreign_stubs
@@ -155,7 +185,7 @@ let eval_foreign_stubs
       match Unresolved.find_source sources language (loc, name) with
       | Some path ->
         let src = Foreign.Source.make (Stubs stubs) ~path in
-        let new_key = Foreign.Source.object_name src in
+        let new_key = Foreign.Source.object_name src |> Filename.to_string in
         String.Map.add_exn acc new_key (loc, src)
       | None ->
         User_error.raise
@@ -172,35 +202,11 @@ let eval_foreign_stubs
     let init = List.map foreign_stubs ~f:eval in
     match ctypes with
     | None -> init
-    | Some ctypes ->
-      let ctypes =
-        List.fold_left
-          ~init:String.Map.empty
-          ctypes.function_description
-          ~f:(fun acc (fd : Ctypes_field.Function_description.t) ->
-            let loc =
-              Loc.none
-              (* TODO *)
-            in
-            let name =
-              Ctypes_field.c_generated_functions_cout_c ctypes fd
-              |> Filename.remove_extension
-            in
-            let path =
-              match Unresolved.find_source sources C (loc, name) with
-              | Some p -> p
-              | None ->
-                (* impossible b/c ctypes fields generates this *)
-                assert false
-            in
-            let source = Foreign.Source.make (Ctypes ctypes) ~path in
-            String.Map.add_exn acc name (loc, source))
-      in
-      ctypes :: init
+    | Some ctypes -> ctypes_stubs sources ctypes :: init
   in
   List.fold_left stub_maps ~init:String.Map.empty ~f:(fun a b ->
     String.Map.union a b ~f:(fun _name (loc, src1) (_, src2) ->
-      let name = Foreign.Source.user_object_name src1 in
+      let name = Foreign.Source.user_object_name src1 |> Filename.to_string in
       let mode = Foreign.Source.mode src1 in
       multiple_sources_error
         ~name
@@ -212,36 +218,28 @@ let eval_foreign_stubs
 
 let make stanzas ~(sources : Unresolved.t) ~dune_version =
   let libs, foreign_libs, exes =
+    let eval_foreign_stubs = eval_foreign_stubs ~dune_version ~sources in
     let libs, foreign_libs, exes =
       List.fold_left
         stanzas
         ~init:([], [], [])
-        ~f:(fun ((libs, foreign_libs, exes) as acc) stanza ->
-          match Stanza.repr stanza with
-          | Library.T lib ->
+        ~f:(fun (libs, foreign_libs, exes) stanza ->
+          match stanza with
+          | `Library (lib : Library.t) ->
             let all =
-              eval_foreign_stubs
-                ~dune_version
-                lib.buildable.foreign_stubs
-                lib.buildable.ctypes
-                ~sources
+              eval_foreign_stubs lib.buildable.foreign_stubs lib.buildable.ctypes
             in
             (lib, all) :: libs, foreign_libs, exes
-          | Foreign_library.T library ->
-            let all = eval_foreign_stubs ~dune_version [ library.stubs ] ~sources None in
+          | `Foreign_library (library : Foreign_library.t) ->
+            let all = eval_foreign_stubs [ library.stubs ] None in
             ( libs
             , (library.archive_name, (library.archive_name_loc, all)) :: foreign_libs
             , exes )
-          | Executables.T exe | Tests.T { exes = exe; _ } ->
+          | `Executables exe | `Tests { Tests.exes = exe; _ } ->
             let all =
-              eval_foreign_stubs
-                ~dune_version
-                exe.buildable.foreign_stubs
-                ~sources
-                exe.buildable.ctypes
+              eval_foreign_stubs exe.buildable.foreign_stubs exe.buildable.ctypes
             in
-            libs, foreign_libs, (exe, all) :: exes
-          | _ -> acc)
+            libs, foreign_libs, (exe, all) :: exes)
     in
     List.(rev libs, rev foreign_libs, rev exes)
   in
@@ -254,7 +252,7 @@ let make stanzas ~(sources : Unresolved.t) ~dune_version =
         ]
       |> List.concat_map ~f:(fun sources ->
         Foreign.Sources.to_list_map sources ~f:(fun _ (loc, source) ->
-          Foreign.Source.object_name source, loc))
+          Foreign.Source.object_name source |> Filename.to_string, loc))
     in
     match String.Map.of_list objects with
     | Ok _ -> ()
@@ -262,18 +260,16 @@ let make stanzas ~(sources : Unresolved.t) ~dune_version =
       let main_message =
         sprintf "Multiple definitions for the same object file %S" path
       in
-      let annots =
+      let compound =
         let main = User_message.make ~loc [ Pp.text main_message ] in
         let related =
           [ User_message.make ~loc:another_loc [ Pp.text "Object already defined here" ] ]
         in
-        User_message.Annots.singleton
-          Compound_user_error.annot
-          [ Compound_user_error.make ~main ~related ]
+        [ Compound_user_error.make ~main ~related ]
       in
       User_error.raise
         ~loc
-        ~annots
+        ~compound
         [ Pp.textf
             "%s. See another definition at %s."
             main_message
@@ -320,17 +316,15 @@ let make stanzas ~(sources : Unresolved.t) ~dune_version =
             "Multiple foreign libraries with the same archive name %S"
             (Foreign.Archive.Name.to_string archive_name)
         in
-        let annots =
+        let compound =
           let main = User_message.make ~loc:loc2 [ Pp.text main_message ] in
           let related =
             [ User_message.make ~loc:loc1 [ Pp.text "Name already used here" ] ]
           in
-          User_message.Annots.singleton
-            Compound_user_error.annot
-            [ Compound_user_error.make ~main ~related ]
+          [ Compound_user_error.make ~main ~related ]
         in
         User_error.raise
-          ~annots
+          ~compound
           ~loc:loc2
           [ Pp.textf
               "%s; the name has already been taken in %s."
@@ -345,4 +339,24 @@ let make stanzas ~(sources : Unresolved.t) ~dune_version =
 let make stanzas ~dune_version ~dirs =
   let sources = Unresolved.load_dirs ~dune_version dirs in
   make stanzas ~dune_version ~sources
+;;
+
+let make stanzas ~dir ~dune_version ~dirs =
+  let+ stanzas =
+    List.filter_map stanzas ~f:(fun stanza ->
+      match Stanza.repr stanza with
+      | Library.T lib -> Some (`Library lib, lib.enabled_if)
+      | Foreign_library.T lib -> Some (`Foreign_library lib, lib.enabled_if)
+      | Executables.T exe -> Some (`Executables exe, exe.enabled_if)
+      | Tests.T ({ exes = exe; _ } as tests) -> Some (`Tests tests, exe.enabled_if)
+      | _ -> None)
+    |> Memo.parallel_map ~f:(fun (stanza, enabled_if) ->
+      let* expander = Expander0.get ~dir in
+      Expander0.eval_blang expander enabled_if
+      >>| function
+      | false -> None
+      | true -> Some stanza)
+    >>| List.filter_opt
+  in
+  make stanzas ~dune_version ~dirs
 ;;

@@ -56,10 +56,30 @@ uses the ``dune-rpc`` and ``dune-rpc-lwt`` packages.
 Connecting
 ==========
 
-To connect to Dune's RPC server, it needs to be started in watch mode. It is
-possible to use ``dune build --passive-watch-mode`` to start an RPC server which
-will listen for requests without starting a build by itself. Then ``dune rpc
-build .`` will connect to it, trigger a build, and report status.
+To connect to Dune's RPC server, it needs to be started in watch mode. There
+are two ways of doing this:
+
+- Run ``dune build --passive-watch-mode`` to start an RPC server which will
+  listen for requests without starting a build by itself...
+- Or run ``dune build --watch`` to start a build server that rebuilds the
+  project's default target when source files change and *also* starts an RPC
+  server that listens for requests.
+
+Then ``dune rpc build .`` will connect to it, trigger a build, and report
+status.
+
+Status Line
+===========
+
+With ``progress`` display enabled, the server's status line includes
+``[rpc N]`` while RPC clients are connected, where ``N`` is the number of
+clients. A command whose build is forwarded to the server displays
+``Connected to RPC server`` in its own status line. ``dune monitor`` connects
+as an RPC client and displays the server's build-rule progress, running job
+count, and diagnostics.
+
+See :doc:`reference/config/display` for a description of all status-line
+components.
 
 .. _lwt: https://github.com/ocsigen/lwt
 .. _Dune_rpc: https://github.com/ocaml/dune/blob/main/otherlibs/dune-rpc/dune_rpc.mli

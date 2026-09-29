@@ -8,7 +8,19 @@ open Memo.O
    extension is not .ml or when the .ml and .mli are in different directories.
    This flags makes the compiler think there is a .mli file and will the read
    the cmi file rather than create it. *)
-let force_read_cmi source_file = [ "-intf-suffix"; Path.extension source_file ]
+let force_read_cmi ~obj_dir ~version ~src ~cm_kind module_ : _ Command.Args.t =
+  let cmi_file =
+    Obj_dir.Module.cm_file_exn obj_dir module_ ~kind:(Lib_mode.Cm_kind.cmi cm_kind)
+    |> Path.build
+  in
+  match Version.supports_cmi_file version, Lib_mode.of_cm_kind cm_kind with
+  | true, Ocaml _ -> S [ A "-cmi-file"; Dep cmi_file ]
+  | _ ->
+    S
+      [ As [ "-intf-suffix"; Filename.Extension.Or_empty.to_string (Path.extension src) ]
+      ; Hidden_deps (Dep.Set.of_files [ cmi_file ])
+      ]
+;;
 
 (* Build the cm* if the corresponding source is present, in the case of cmi if
    the mli is not present it is added as additional target to the .cmo
@@ -18,19 +30,93 @@ let opens modules m =
   Command.Args.As (Modules.With_vlib.local_open modules m |> Ocaml_flags.open_flags)
 ;;
 
-let other_cm_files ~opaque ~cm_kind ~obj_dir =
+let as_parameter_arg m =
+  Command.Args.As (if Module.kind m = Parameter then [ "-as-parameter" ] else [])
+;;
+
+let as_argument_for cctx m =
+  Command.Args.dyn
+    (let open Action_builder.O in
+     let impl = Compilation_context.implements cctx in
+     Virtual_rules.implements_parameter impl m
+     |> Resolve.Memo.read
+     >>| function
+     | None -> []
+     | Some parameter -> [ "-as-argument-for"; Module_name.to_string parameter ])
+;;
+
+let parameters cctx =
+  Command.Args.dyn
+    (let open Action_builder.O in
+     Resolve.Memo.read (Compilation_context.parameters cctx)
+     >>| List.concat_map ~f:(fun m -> [ "-parameter"; Module_name.to_string m ]))
+;;
+
+let add_rule ?mode ?loc ~can_go_in_shared_cache sctx ~dir build =
+  let build =
+    if can_go_in_shared_cache
+    then
+      Action_builder.With_targets.map
+        build
+        ~f:(Action.Full.add_can_go_in_shared_cache true)
+    else build
+  in
+  Super_context.add_rule sctx ?mode ?loc ~dir build
+;;
+
+let other_cm_files
+      ~opaque
+      ~cm_kind
+      ~obj_dir
+      ~cms_cmt_dependency
+      ~bin_annot
+      ~bin_annot_cms
+      ~is_ox
+  =
   List.concat_map ~f:(fun m ->
     let cmi_kind = Lib_mode.Cm_kind.cmi cm_kind in
     let deps = [ Path.build (Obj_dir.Module.cm_file_exn obj_dir m ~kind:cmi_kind) ] in
-    if Module.has m ~ml_kind:Impl && cm_kind = Ocaml Cmx && not opaque
-    then (
-      let cmx = Obj_dir.Module.cm_file_exn obj_dir m ~kind:(Ocaml Cmx) in
-      Path.build cmx :: deps)
-    else if Module.has m ~ml_kind:Impl && cm_kind = Melange Cmj
-    then (
-      let cmj = Obj_dir.Module.cm_file_exn obj_dir m ~kind:(Melange Cmj) in
-      Path.build cmj :: deps)
-    else deps)
+    let deps =
+      if Module.has m ~ml_kind:Impl && cm_kind = Ocaml Cmx && not opaque
+      then (
+        let cmx = Obj_dir.Module.cm_file_exn obj_dir m ~kind:(Ocaml Cmx) in
+        Path.build cmx :: deps)
+      else if Module.has m ~ml_kind:Impl && cm_kind = Melange Cmj
+      then (
+        let cmj = Obj_dir.Module.cm_file_exn obj_dir m ~kind:(Melange Cmj) in
+        Path.build cmj :: deps)
+      else deps
+    in
+    (* Add .cms/.cmt dependencies when enabled. Like .cmx dependencies, these are
+       skipped when -opaque is used. *)
+    let cms_cmt_deps =
+      let open Workspace.Context.Cms_cmt_dependency in
+      match cms_cmt_dependency with
+      | No_dependency -> []
+      | Depends_on_cms when bin_annot_cms && is_ox && not opaque ->
+        (* We pass as [cm_kind] [Ocaml Cmx/Cmi] but the specific [cm_kind]
+           doesn't matter here: .cms/.cmt files are stored in byte_dir
+           regardless (see [Obj_dir.Module.cms_file]). *)
+        List.filter_opt
+          [ Obj_dir.Module.cms_file obj_dir m ~ml_kind:Impl ~cm_kind:(Ocaml Cmx)
+          ; Obj_dir.Module.cms_file obj_dir m ~ml_kind:Intf ~cm_kind:(Ocaml Cmi)
+          ]
+        |> List.map ~f:Path.build
+      | Depends_on_cms -> []
+      | Depends_on_cmt when bin_annot && is_ox && not opaque ->
+        List.filter_opt
+          [ Obj_dir.Module.cmt_file obj_dir m ~ml_kind:Impl ~cm_kind:(Ocaml Cmx)
+          ; Obj_dir.Module.cmt_file obj_dir m ~ml_kind:Intf ~cm_kind:(Ocaml Cmi)
+          ]
+        |> List.map ~f:Path.build
+      | Depends_on_cmt -> []
+    in
+    cms_cmt_deps @ deps)
+;;
+
+let cm_kind_can_go_in_shared_cache = function
+  | Lib_mode.Cm_kind.Melange _ -> true
+  | Lib_mode.Cm_kind.Ocaml _ -> false
 ;;
 
 let copy_interface ~sctx ~dir ~obj_dir ~cm_kind m =
@@ -39,8 +125,10 @@ let copy_interface ~sctx ~dir ~obj_dir ~cm_kind m =
     (Module.visibility m <> Visibility.Private
      && Obj_dir.need_dedicated_public_dir obj_dir)
     (fun () ->
+       let can_go_in_shared_cache = cm_kind_can_go_in_shared_cache cm_kind in
        let cmi_kind = Lib_mode.Cm_kind.cmi cm_kind in
-       Super_context.add_rule
+       add_rule
+         ~can_go_in_shared_cache
          sctx
          ~dir
          (Action_builder.symlink
@@ -48,13 +136,38 @@ let copy_interface ~sctx ~dir ~obj_dir ~cm_kind m =
             ~dst:(Obj_dir.Module.cm_public_file_exn obj_dir m ~kind:cmi_kind)))
 ;;
 
+let melange_js_basename m =
+  match Module.file ~ml_kind:Impl m with
+  | Some s ->
+    (* we aren't using Filename.extension because we want to handle
+       filenames such as foo.pp.ml *)
+    (match String.lsplit2 (Path.basename s |> Filename.to_string) ~on:'.' with
+     | None ->
+       Code_error.raise
+         "could not extract module name from file path"
+         [ "module", Module.to_dyn m ]
+     | Some (module_name, _) -> Filename.of_string_exn module_name)
+  | None ->
+    Code_error.raise
+      "could not find melange source from module"
+      [ "module", Module.to_dyn m ]
+;;
+
 let melange_args (cctx : Compilation_context.t) (cm_kind : Lib_mode.Cm_kind.t) module_ =
   match cm_kind with
   | Ocaml (Cmi | Cmo | Cmx) | Melange Cmi -> []
   | Melange Cmj ->
-    let bs_package_name, bs_package_output =
+    let melange_cli =
+      let scope = Compilation_context.scope cctx in
+      let dune_project = Scope.project scope in
+      Melange.Cli.of_project dune_project
+    in
+    let mel_package_name, mel_package_output =
       let package_output =
-        Module.file ~ml_kind:Impl module_ |> Option.value_exn |> Path.parent_exn
+        Module.source ~ml_kind:Impl module_
+        |> Option.value_exn
+        |> Module.File.original_path
+        |> Path.parent_exn
       in
       match Compilation_context.melange_package_name cctx with
       | None -> [], package_output
@@ -72,40 +185,32 @@ let melange_args (cctx : Compilation_context.t) (cm_kind : Lib_mode.Cm_kind.t) m
           |> Path.Local.to_string
           |> Path.Build.relative build_dir
         in
-        ( [ Command.Args.A "--bs-package-name"; A (Lib_name.to_string lib_name) ]
+        ( [ Command.Args.A melange_cli.package_name; A (Lib_name.to_string lib_name) ]
         , Path.build dir )
     in
-    Command.Args.A "--bs-stop-after-cmj"
-    :: A "--bs-package-output"
-    :: Command.Args.Path bs_package_output
-    :: A "--bs-module-name"
-    :: A (Melange.js_basename module_)
-    :: bs_package_name
+    Command.Args.A melange_cli.stop_after_cmj
+    :: A melange_cli.package_output
+    :: Command.Args.Path mel_package_output
+    :: A melange_cli.module_name
+    :: A (melange_js_basename module_ |> Filename.to_string)
+    :: mel_package_name
 ;;
 
-let build_cm
-      cctx
-      ~force_write_cmi
-      ~precompiled_cmi
-      ~cm_kind
-      (m : Module.t)
-      ~(phase : Fdo.phase option)
-  =
+let build_cm cctx ~force_write_cmi ~precompiled_cmi ~cm_kind (m : Module.t) =
   if force_write_cmi && precompiled_cmi
-  then Code_error.raise "force_read_cmi and precompiled_cmi are mutually exclusive" [];
+  then Code_error.raise "force_write_cmi and precompiled_cmi are mutually exclusive" [];
   let sctx = Compilation_context.super_context cctx in
   let dir = Compilation_context.dir cctx in
   let obj_dir = Compilation_context.obj_dir cctx in
   let ctx = Super_context.context sctx in
   let mode = Lib_mode.of_cm_kind cm_kind in
   let sandbox =
-    let default = Compilation_context.sandbox cctx in
     match Module.kind m with
     | Root ->
       (* This is need to guarantee that no local modules shadow the modules
          referenced by the root module *)
       Sandbox_config.needs_sandboxing
-    | _ -> default
+    | _ -> Compilation_context.sandbox cctx
   in
   let ocaml = Compilation_context.ocaml cctx in
   let* compiler =
@@ -126,65 +231,70 @@ let build_cm
    let* compiler = compiler in
    let ml_kind = Lib_mode.Cm_kind.source cm_kind in
    let+ src = Module.file m ~ml_kind in
+   let original = Module.source_without_pp m ~ml_kind in
    let dst = Obj_dir.Module.cm_file_exn obj_dir m ~kind:cm_kind in
    let obj =
      Obj_dir.Module.obj_file obj_dir m ~kind:(Ocaml Cmx) ~ext:ocaml.lib_config.ext_obj
    in
    let open Memo.O in
-   let* extra_args, extra_deps, other_targets =
+   let* (extra_args : _ Command.Args.t) =
      if precompiled_cmi
-     then Memo.return (force_read_cmi src, [], [])
+     then
+       (* CR-someday Alizter: We should use the correct precompiled cmi here.
+          Currently, we don't have easy access to it. *)
+       Memo.return
+         (Command.Args.As
+            [ "-intf-suffix"; Filename.Extension.Or_empty.to_string (Path.extension src) ])
      else (
        (* If we're compiling an implementation, then the cmi is present *)
        let public_vlib_module = Module.kind m = Impl_vmodule in
-       match phase with
-       | Some Emit -> Memo.return ([], [], [])
-       | Some Compile | Some All | None ->
-         (match cm_kind, Module.file m ~ml_kind:Intf, public_vlib_module with
-          (* If there is no mli, [ocamlY -c file.ml] produces both the .cmY and
-             .cmi. We choose to use ocamlc to produce the cmi and to produce the
-             cmx we have to wait to avoid race conditions. *)
-          | (Ocaml Cmo | Melange Cmj), None, false ->
-            if force_write_cmi
-            then Memo.return ([ "-intf-suffix"; ".dummy-ignore-mli" ], [], [])
-            else
-              let+ () = copy_interface ~dir ~obj_dir ~sctx ~cm_kind m in
-              let cmi_kind = Lib_mode.Cm_kind.cmi cm_kind in
-              [], [], [ Obj_dir.Module.cm_file_exn obj_dir m ~kind:cmi_kind ]
-          | (Ocaml Cmo | Melange Cmj), None, true
-          | (Ocaml (Cmo | Cmx) | Melange Cmj), _, _ ->
-            let cmi_kind = Lib_mode.Cm_kind.cmi cm_kind in
-            Memo.return
-              ( force_read_cmi src
-              , [ Path.build (Obj_dir.Module.cm_file_exn obj_dir m ~kind:cmi_kind) ]
-              , [] )
-          | (Ocaml Cmi | Melange Cmi), _, _ ->
-            let+ () = copy_interface ~dir ~obj_dir ~sctx ~cm_kind m in
-            [], [], []))
+       match cm_kind, Module.file m ~ml_kind:Intf, public_vlib_module with
+       (* If there is no mli, [ocamlY -c file.ml] produces both the .cmY and
+          .cmi. We choose to use ocamlc to produce the cmi and to produce the
+          cmx we have to wait to avoid race conditions. *)
+       | (Ocaml Cmo | Melange Cmj), None, false ->
+         if force_write_cmi
+         then Memo.return (Command.Args.As [ "-intf-suffix"; ".dummy-ignore-mli" ])
+         else
+           let+ () = copy_interface ~dir ~obj_dir ~sctx ~cm_kind m in
+           let cmi_kind = Lib_mode.Cm_kind.cmi cm_kind in
+           Command.Args.Hidden_targets
+             [ Obj_dir.Module.cm_file_exn obj_dir m ~kind:cmi_kind ]
+       | (Ocaml Cmo | Melange Cmj), None, true | (Ocaml (Cmo | Cmx) | Melange Cmj), _, _
+         -> Memo.return (force_read_cmi ~obj_dir ~version:ocaml.version ~cm_kind ~src m)
+       | (Ocaml Cmi | Melange Cmi), _, _ ->
+         let+ () = copy_interface ~dir ~obj_dir ~sctx ~cm_kind m in
+         Command.Args.empty)
    in
    let other_targets =
      match cm_kind with
-     | Ocaml (Cmi | Cmo) | Melange (Cmi | Cmj) -> other_targets
-     | Ocaml Cmx ->
-       (match phase with
-        | Some Compile ->
-          let linear =
-            Obj_dir.Module.obj_file obj_dir m ~kind:(Ocaml Cmx) ~ext:Fdo.linear_ext
-          in
-          linear :: other_targets
-        | Some Emit -> other_targets
-        | Some All | None -> obj :: other_targets)
+     | Ocaml (Cmi | Cmo) | Melange (Cmi | Cmj) -> Command.Args.empty
+     | Ocaml Cmx -> Hidden_targets [ obj ]
    in
    let opaque = Compilation_context.opaque cctx in
    let other_cm_files =
      let dep_graph = Ml_kind.Dict.get (Compilation_context.dep_graphs cctx) ml_kind in
      let module_deps = Dep_graph.deps_of dep_graph m in
+     let cms_cmt_dependency = Compilation_context.cms_cmt_dependency cctx in
+     let bin_annot = Compilation_context.bin_annot cctx in
+     let bin_annot_cms = Compilation_context.bin_annot_cms cctx in
+     let is_ox = Ocaml_config.ox ocaml.ocaml_config in
      Action_builder.dyn_paths_unit
-       (Action_builder.map module_deps ~f:(other_cm_files ~opaque ~cm_kind ~obj_dir))
+       (Action_builder.map
+          module_deps
+          ~f:
+            (other_cm_files
+               ~opaque
+               ~cm_kind
+               ~obj_dir
+               ~cms_cmt_dependency
+               ~bin_annot
+               ~bin_annot_cms
+               ~is_ox))
    in
-   let other_targets, cmt_args =
+   let cmt_args =
      match cm_kind with
-     | Ocaml Cmx -> other_targets, Command.Args.empty
+     | Ocaml Cmx -> Command.Args.empty
      | Ocaml (Cmi | Cmo) | Melange (Cmi | Cmj) ->
        if Compilation_context.bin_annot cctx
        then (
@@ -198,8 +308,19 @@ let build_cm
            then [ "-bin-annot-occurrences" ]
            else []
          in
-         fn :: other_targets, As annots)
-       else other_targets, Command.Args.empty
+         S [ Hidden_targets [ fn ]; As annots ])
+       else Command.Args.empty
+   in
+   let cms_args =
+     match cm_kind with
+     | Ocaml Cmx | Melange _ -> Command.Args.empty
+     | Ocaml (Cmi | Cmo) ->
+       if Compilation_context.bin_annot_cms cctx && Ocaml_config.ox ocaml.ocaml_config
+       then (
+         match Obj_dir.Module.cms_file obj_dir m ~cm_kind ~ml_kind with
+         | None -> Command.Args.empty
+         | Some fn -> S [ Hidden_targets [ fn ]; As [ "-bin-annot-cms" ] ])
+       else Command.Args.empty
    in
    let opaque_arg : _ Command.Args.t =
      let intf_only = cm_kind = Ocaml Cmi && not (Module.has m ~ml_kind:Impl) in
@@ -207,29 +328,11 @@ let build_cm
      then A "-opaque"
      else Command.Args.empty
    in
-   let flags, sandbox =
-     let flags =
-       Command.Args.dyn (Ocaml_flags.get (Compilation_context.flags cctx) mode)
-     in
+   let flags = Command.Args.dyn (Ocaml_flags.get (Compilation_context.flags cctx) mode) in
+   let pp_flags, sandbox =
      match Module.pp_flags m with
-     | None -> flags, sandbox
-     | Some (pp, sandbox') ->
-       S [ flags; Command.Args.dyn pp ], Sandbox_config.inter sandbox sandbox'
-   in
-   let output =
-     match phase with
-     | Some Compile -> dst
-     | Some Emit -> obj
-     | Some All | None -> dst
-   in
-   let src =
-     match phase with
-     | Some Emit ->
-       let linear_fdo =
-         Obj_dir.Module.obj_file obj_dir m ~kind:(Ocaml Cmx) ~ext:Fdo.linear_fdo_ext
-       in
-       Path.build linear_fdo
-     | Some Compile | Some All | None -> src
+     | None -> Command.Args.empty, sandbox
+     | Some (pp, sandbox') -> Command.Args.dyn pp, Sandbox_config.inter sandbox sandbox'
    in
    let opens =
      let modules = Compilation_context.modules cctx in
@@ -239,7 +342,9 @@ let build_cm
      Obj_dir.all_obj_dirs obj_dir ~mode
      |> List.concat_map ~f:(fun p -> [ Command.Args.A "-I"; Path (Path.build p) ])
    in
-   Super_context.add_rule
+   let can_go_in_shared_cache = cm_kind_can_go_in_shared_cache cm_kind in
+   add_rule
+     ~can_go_in_shared_cache
      sctx
      ~dir:
        (let dune_version =
@@ -249,135 +354,260 @@ let build_cm
         if dune_version >= (3, 7) then dir else Context.build_dir ctx)
      ?loc:(Compilation_context.loc cctx)
      (let open Action_builder.With_targets.O in
-      Action_builder.with_no_targets (Action_builder.paths extra_deps)
-      >>> Action_builder.with_no_targets other_cm_files
+      Action_builder.with_no_targets other_cm_files
       >>> Command.run
             ~dir:(Path.build (Context.build_dir ctx))
+            ~sandbox
+            ~forbid_action_runner:true
             compiler
             [ flags
+            ; pp_flags
             ; cmt_args
+            ; cms_args
             ; Command.Args.S obj_dirs
             ; Command.Args.as_any
                 (Lib_mode.Cm_kind.Map.get (Compilation_context.includes cctx) cm_kind)
-            ; As extra_args
+            ; extra_args
+            ; as_parameter_arg m
+            ; as_argument_for cctx m
+            ; parameters cctx
             ; S (melange_args cctx cm_kind m)
             ; A "-no-alias-deps"
             ; opaque_arg
-            ; As (Fdo.phase_flags phase)
             ; opens
-            ; As
-                (match Compilation_context.stdlib cctx with
-                 | None -> []
-                 | Some _ ->
-                   (* XXX why aren't these just normal library flags? *)
-                   [ "-nopervasives"; "-nostdlib" ])
             ; A "-o"
-            ; Target output
+            ; Target dst
             ; A "-c"
             ; Command.Ml_kind.flag ml_kind
             ; Dep src
-            ; Hidden_targets other_targets
-            ]
-      >>| Action.Full.add_sandbox sandbox))
+            ; (* We add a hidden dependency on the original, pre-PPX source
+                 file, which the compiler wants to find to display error
+                 location snippets. *)
+              Hidden_deps (Dep.Set.of_files (Option.to_list original))
+            ; other_targets
+            ]))
   |> Memo.Option.iter ~f:Fun.id
 ;;
 
 let build_module ?(force_write_cmi = false) ?(precompiled_cmi = false) cctx m =
   let open Memo.O in
-  let { Lib_mode.Map.ocaml; melange } = Compilation_context.modes cctx in
   let build_cm = build_cm cctx m ~force_write_cmi ~precompiled_cmi in
-  let* () =
-    Memo.when_ (ocaml.byte || ocaml.native) (fun () ->
-      let* () = build_cm ~cm_kind:(Ocaml Cmo) ~phase:None
-      and* () =
-        let ctx = Compilation_context.context cctx in
-        let ocaml = Compilation_context.ocaml cctx in
-        let can_split =
-          Ocaml.Version.supports_split_at_emit ocaml.version
-          || Ocaml_config.is_dev_version ocaml.ocaml_config
-        in
-        match Context.fdo_target_exe ctx, can_split with
-        | None, _ -> build_cm ~cm_kind:(Ocaml Cmx) ~phase:None
-        | Some _, false -> build_cm ~cm_kind:(Ocaml Cmx) ~phase:(Some All)
-        | Some _, true ->
-          build_cm ~cm_kind:(Ocaml Cmx) ~phase:(Some Compile)
-          >>> Fdo.opt_rule cctx m
-          >>> build_cm ~cm_kind:(Ocaml Cmx) ~phase:(Some Emit)
-      and* () =
-        Memo.when_ (not precompiled_cmi) (fun () ->
-          build_cm ~cm_kind:(Ocaml Cmi) ~phase:None)
-      in
+  match Compilation_context.for_ cctx with
+  | Ocaml ->
+    let* () = build_cm ~cm_kind:(Ocaml Cmo)
+    and* () = build_cm ~cm_kind:(Ocaml Cmx)
+    and* () =
+      Memo.when_ (not precompiled_cmi) (fun () -> build_cm ~cm_kind:(Ocaml Cmi))
+    in
+    let obj_dir = Compilation_context.obj_dir cctx in
+    (match Obj_dir.Module.cm_file obj_dir m ~kind:(Ocaml Cmo) with
+     | None -> Memo.return ()
+     | Some src ->
+       let ml_kind = Ml_kind.Impl in
+       let dep_graph = Ml_kind.Dict.get (Compilation_context.dep_graphs cctx) ml_kind in
+       let module_deps = Dep_graph.deps_of dep_graph m in
+       Memo.parallel_iter Js_of_ocaml.Mode.all ~f:(fun mode ->
+         Compilation_context.js_of_ocaml cctx
+         |> Js_of_ocaml.Mode.Pair.select ~mode
+         |> Memo.Option.iter ~f:(fun in_context ->
+           (* Build *.cmo.js / *.wasmo *)
+           let sctx = Compilation_context.super_context cctx in
+           let dir = Compilation_context.dir cctx in
+           let action_with_targets =
+             Jsoo_rules.build_cm
+               cctx
+               ~dir
+               ~in_context
+               ~mode
+               ~src:(Path.build src)
+               ~obj_dir
+               ~deps:module_deps
+               ~config:None
+           in
+           Super_context.add_rule sctx ~dir action_with_targets)))
+  | Melange ->
+    let* () = build_cm ~cm_kind:(Melange Cmj)
+    and* () =
+      Memo.when_ (not precompiled_cmi) (fun () -> build_cm ~cm_kind:(Melange Cmi))
+    in
+    let project = Compilation_context.scope cctx |> Scope.project in
+    let dir = Compilation_context.dir cctx in
+    let predicate_dir =
       let obj_dir = Compilation_context.obj_dir cctx in
-      match Obj_dir.Module.cm_file obj_dir m ~kind:(Ocaml Cmo) with
-      | None -> Memo.return ()
-      | Some src ->
-        Memo.parallel_iter Js_of_ocaml.Mode.all ~f:(fun mode ->
-          Compilation_context.js_of_ocaml cctx
-          |> Js_of_ocaml.Mode.Pair.select ~mode
-          |> Memo.Option.iter ~f:(fun in_context ->
-            (* Build *.cmo.js / *.wasmo *)
-            let sctx = Compilation_context.super_context cctx in
-            let dir = Compilation_context.dir cctx in
-            let action_with_targets =
-              Jsoo_rules.build_cm
-                sctx
-                ~dir
-                ~in_context
-                ~mode
-                ~src:(Path.build src)
-                ~obj_dir
-                ~config:None
-            in
-            Super_context.add_rule sctx ~dir action_with_targets)))
-  in
-  Memo.when_ melange (fun () ->
-    let* () = build_cm ~cm_kind:(Melange Cmj) ~phase:None in
-    Memo.when_ (not precompiled_cmi) (fun () ->
-      build_cm ~cm_kind:(Melange Cmi) ~phase:None))
+      Obj_dir.melange_dir obj_dir
+    in
+    let predicate =
+      [ Lib_mode.Cm_kind.ext (Melange Cmi); Lib_mode.Cm_kind.ext (Melange Cmj) ]
+      |> Glob.matching_extensions
+      |> Predicate_lang.Glob.of_glob
+    in
+    let deps =
+      File_selector.of_predicate_lang
+        ~dir:(Path.build predicate_dir)
+        ~only_generated_files:(Dune_project.dune_version project >= (3, 0))
+        predicate
+      |> Action_builder.paths_matching_unit ~loc:Loc.none
+    in
+    Rules.Produce.Alias.add_deps (Alias.make Alias0.all ~dir) deps
 ;;
 
-let ocamlc_i ~deps cctx (m : Module.t) ~output =
+let build_inference_alias cctx ~name ~aliases =
   let sctx = Compilation_context.super_context cctx in
-  let obj_dir = Compilation_context.obj_dir cctx in
   let dir = Compilation_context.dir cctx in
-  let ctx = Super_context.context sctx in
+  let obj_dir = Compilation_context.obj_dir cctx in
+  let name = Module_name.Unique.of_name_assuming_needs_no_mangling name in
+  let file ext =
+    Path.Build.relative_fname
+      (Obj_dir.obj_dir obj_dir)
+      (Module_name.Unique.artifact_filename name ~ext)
+  in
+  let source = file Filename.Extension.mli in
+  let cmi = file (Lib_mode.Cm_kind.ext (Ocaml Cmi)) in
+  let contents =
+    List.map aliases ~f:(fun m ->
+      let name = Module.obj_name m |> Module_name.Unique.to_name ~loc:Loc.none in
+      sprintf "  include %s\n" (Module_name.to_string name))
+    |> String.concat ~sep:""
+  in
+  let* () =
+    (* The structure preserves type equalities for instantiated libraries. *)
+    Action_builder.write_file
+      source
+      ("include module type of struct\n" ^ contents ^ "end\n")
+    |> Super_context.add_rule sctx ~dir
+  in
+  let ocaml = Compilation_context.ocaml cctx in
+  let+ () =
+    Command.run
+      (Ok ocaml.ocamlc)
+      ~dir:(Path.build (Context.build_dir (Super_context.context sctx)))
+      ~sandbox:Sandbox_config.needs_sandboxing
+      ~forbid_action_runner:true
+      [ Command.Args.As [ "-no-alias-deps"; "-opaque"; "-c" ]
+      ; parameters cctx
+      ; A "-I"
+      ; Path (Path.build (Obj_dir.byte_dir obj_dir))
+      ; Command.Args.as_any
+          (Lib_mode.Cm_kind.Map.get (Compilation_context.includes cctx) (Ocaml Cmi))
+      ; Hidden_deps
+          (Dep.Set.of_files (Obj_dir.Module.L.cm_files obj_dir aliases ~kind:(Ocaml Cmi)))
+      ; A "-o"
+      ; Target cmi
+      ; Command.Ml_kind.flag Intf
+      ; Dep (Path.build source)
+      ]
+    |> Super_context.add_rule sctx ~dir
+  in
+  cmi
+;;
+
+let ocamlc_i_action ~impl_deps ~alias cctx (m : Module.t) =
+  let obj_dir = Compilation_context.obj_dir cctx in
+  let ctx = Compilation_context.super_context cctx |> Super_context.context in
   let src = Option.value_exn (Module.file m ~ml_kind:Impl) in
-  let sandbox = Compilation_context.sandbox cctx in
+  let original = Module.source_without_pp m ~ml_kind:Impl in
+  let sandbox =
+    match Module.kind m with
+    | Root -> Sandbox_config.needs_sandboxing
+    | _ -> Compilation_context.sandbox cctx
+  in
+  let pp_flags, sandbox =
+    match Module.pp_flags m with
+    | None -> Command.Args.empty, sandbox
+    | Some (pp_flags, pp_sandbox) ->
+      Command.Args.dyn pp_flags, Sandbox_config.inter sandbox pp_sandbox
+  in
   let cm_deps =
     Action_builder.dyn_paths_unit
       (let open Action_builder.O in
-       let+ deps = Ml_kind.Dict.get deps Impl in
-       List.concat_map deps ~f:(fun m ->
+       impl_deps
+       >>| List.concat_map ~f:(fun m ->
          [ Path.build (Obj_dir.Module.cm_file_exn obj_dir m ~kind:(Ocaml Cmi)) ]))
   in
   let ocaml_flags = Ocaml_flags.get (Compilation_context.flags cctx) (Ocaml Byte) in
   let modules = Compilation_context.modules cctx in
+  let opens =
+    match alias with
+    | None -> opens modules m
+    | Some cmi ->
+      Command.Args.S
+        [ A "-no-alias-deps"
+        ; A "-I"
+        ; Path (Path.build (Path.Build.parent_exn cmi))
+        ; Hidden_deps (Dep.Set.of_files [ Path.build cmi ])
+        ]
+  in
   let ocaml = Compilation_context.ocaml cctx in
-  Super_context.add_rule
+  let open Action_builder.O in
+  cm_deps
+  >>> Command.run'
+        (Ok ocaml.ocamlc)
+        ~dir:(Path.build (Context.build_dir ctx))
+        ~sandbox
+        ~forbid_action_runner:true
+        [ Command.Args.dyn ocaml_flags
+        ; pp_flags
+        ; A "-I"
+        ; Path (Path.build (Obj_dir.byte_dir obj_dir))
+        ; Lib_mode.Cm_kind.Map.get (Compilation_context.includes cctx) (Ocaml Cmo)
+        ; as_parameter_arg m
+        ; as_argument_for cctx m
+        ; parameters cctx
+        ; opens
+        ; A "-short-paths"
+        ; A "-i"
+        ; Command.Ml_kind.flag Impl
+        ; Dep src
+        ; Hidden_deps (Dep.Set.of_files (Option.to_list original))
+        ; Hidden_deps (Dep.Set.of_files [ ocaml.lib_config.stdlib_dir ])
+        ]
+;;
+
+let ocamlc_i ~impl_deps ~alias cctx m ~output =
+  let sctx = Compilation_context.super_context cctx in
+  let dir = Compilation_context.dir cctx in
+  ocamlc_i_action ~impl_deps ~alias cctx m
+  |> Action_builder.with_stdout_to output
+  |> Super_context.add_rule sctx ~dir
+;;
+
+let infer_interface cctx m =
+  let sctx = Compilation_context.super_context cctx in
+  let dir = Compilation_context.dir cctx in
+  let action =
+    let source_file =
+      match Module.source_without_pp m ~ml_kind:Intf with
+      | Some source_file -> Path.as_in_build_dir_exn source_file
+      | None ->
+        Module.source_without_pp m ~ml_kind:Impl
+        |> Option.value_exn
+        |> Path.set_extension ~ext:Filename.Extension.mli
+        |> Path.as_in_build_dir_exn
+    in
+    let source_path = Path.build source_file in
+    let open Action_builder.O in
+    let+ action =
+      let impl_deps =
+        let dep_graphs = Compilation_context.dep_graphs cctx in
+        Dep_graph.deps_of (Ml_kind.Dict.get dep_graphs Impl) m
+      in
+      ocamlc_i_action ~impl_deps ~alias:None cctx m
+    and+ () = Action_builder.paths_existing [ source_path ] in
+    Action.Full.map action ~f:(fun action ->
+      let correction_file =
+        Path.Build.extend_basename source_file ~suffix:Filename.corrected
+      in
+      Action.progn
+        [ Action.with_stdout_to correction_file action
+        ; Action.diff ~optional:true source_path correction_file
+        ])
+  in
+  Super_context.execute_action_stdout
     sctx
+    ~loc:(Option.value (Compilation_context.loc cctx) ~default:Loc.none)
     ~dir
-    (Action_builder.With_targets.add
-       ~file_targets:[ output ]
-       (let open Action_builder.With_targets.O in
-        Action_builder.with_no_targets cm_deps
-        >>> Command.run
-              (Ok ocaml.ocamlc)
-              ~dir:(Path.build (Context.build_dir ctx))
-              ~stdout_to:output
-              [ Command.Args.dyn ocaml_flags
-              ; A "-I"
-              ; Path (Path.build (Obj_dir.byte_dir obj_dir))
-              ; Command.Args.as_any
-                  (Lib_mode.Cm_kind.Map.get
-                     (Compilation_context.includes cctx)
-                     (Ocaml Cmo))
-              ; opens modules m
-              ; A "-short-paths"
-              ; A "-i"
-              ; Command.Ml_kind.flag Impl
-              ; Dep src
-              ]
-        >>| Action.Full.add_sandbox sandbox))
+    action
+  >>| fun (_ : string) -> ()
 ;;
 
 module Alias_module = struct
@@ -395,45 +625,124 @@ module Alias_module = struct
      `-open` option of the compiler. This module is called the alias module and
      is implicitly generated by Dune.*)
 
-  type alias =
-    { local_name : Module_name.t
-    ; canonical_path : Module_name.Path.t
-    ; obj_name : Module_name.Unique.t
-    }
+  module Literals = struct
+    let header = "(* generated by dune *)\n"
+    let canonical_prefix = "\n(** @canonical "
+    let canonical_path_separator = '.'
+    let canonical_suffix = " *)\nmodule "
+    let alias_separator = " = "
+    let alias_suffix = "\n"
+    let shadowed_prefix = "\nmodule "
+    let shadowed_definition_suffix = " = struct end\n"
+    let shadowed_deprecation = "[@@deprecated \"this module is shadowed\"]\n"
+  end
+
+  module Alias = struct
+    type t =
+      { local_name : Module_name.t
+      ; canonical_path : Module_name.Path.t
+      ; obj_name : Module_name.Unique.t
+      }
+
+    let add_canonical_path builder (name :: names : Module_name.Path.t) =
+      let open Literals in
+      String_builder.add_string builder (Module_name.to_string name);
+      List.iter names ~f:(fun name ->
+        String_builder.add_char builder canonical_path_separator;
+        String_builder.add_string builder (Module_name.to_string name))
+    ;;
+
+    let length =
+      let static_length =
+        let open Literals in
+        String.length canonical_prefix
+        + String.length canonical_suffix
+        + String.length alias_separator
+        + String.length alias_suffix
+      in
+      let module_name_length name =
+        let name = Module_name.to_string name in
+        String.length name
+      in
+      let canonical_path_length (name :: names : Module_name.Path.t) =
+        let init = module_name_length name in
+        List.fold_left names ~init ~f:(fun length name ->
+          (* The [+ 1] accounts for the ['.'] between path components. *)
+          length + 1 + module_name_length name)
+      in
+      fun { canonical_path; local_name; obj_name } ->
+        static_length
+        + canonical_path_length canonical_path
+        + module_name_length local_name
+        + String.length (Module_name.Unique.to_string obj_name)
+    ;;
+
+    let add builder { canonical_path; local_name; obj_name } =
+      let open Literals in
+      let obj_name = Module_name.Unique.to_name ~loc:Loc.none obj_name in
+      String_builder.add_string builder canonical_prefix;
+      add_canonical_path builder canonical_path;
+      String_builder.add_string builder canonical_suffix;
+      String_builder.add_string builder (Module_name.to_string local_name);
+      String_builder.add_string builder alias_separator;
+      String_builder.add_string builder (Module_name.to_string obj_name);
+      String_builder.add_string builder alias_suffix
+    ;;
+  end
 
   type t =
-    { aliases : alias list
+    { aliases : Alias.t list
     ; shadowed : Module_name.t list
+    ; instances : Parameterised_instances.t
     }
 
-  let to_ml { aliases; shadowed } =
-    let b = Buffer.create 16 in
-    Buffer.add_string b "(* generated by dune *)\n";
-    List.iter aliases ~f:(fun { canonical_path; local_name; obj_name } ->
-      Printf.bprintf
-        b
-        "\n(** @canonical %s *)"
-        (Module_name.Path.to_string canonical_path);
-      Printf.bprintf
-        b
-        "\nmodule %s = %s\n"
-        (Module_name.to_string local_name)
-        (Module_name.Unique.to_name ~loc:Loc.none obj_name |> Module_name.to_string));
-    List.iter shadowed ~f:(fun shadowed ->
-      Printf.bprintf
-        b
-        "\nmodule %s = struct end\n[@@deprecated \"this module is shadowed\"]\n"
-        (Module_name.to_string shadowed));
-    Buffer.contents b
+  let add_shadowed builder shadowed =
+    let open Literals in
+    String_builder.add_string builder shadowed_prefix;
+    String_builder.add_string builder (Module_name.to_string shadowed);
+    String_builder.add_string builder shadowed_definition_suffix;
+    String_builder.add_string builder shadowed_deprecation
   ;;
 
-  let of_modules project modules group =
+  let to_ml =
+    let static_length =
+      let open Literals in
+      String.length shadowed_prefix
+      + String.length shadowed_definition_suffix
+      + String.length shadowed_deprecation
+    in
+    let shadowed_length shadowed =
+      let name_length = String.length (Module_name.to_string shadowed) in
+      static_length + name_length
+    in
+    let total_length { aliases; shadowed; instances } =
+      let length = String.length Literals.header in
+      let length =
+        List.fold_left aliases ~init:length ~f:(fun length alias ->
+          length + Alias.length alias)
+      in
+      let length =
+        List.fold_left shadowed ~init:length ~f:(fun length shadowed ->
+          length + shadowed_length shadowed)
+      in
+      length + Parameterised_instances.ml_source_length instances
+    in
+    fun ({ aliases; shadowed; instances } as t) ->
+      let builder = String_builder.create (total_length t) in
+      String_builder.add_string builder Literals.header;
+      List.iter aliases ~f:(Alias.add builder);
+      List.iter shadowed ~f:(add_shadowed builder);
+      Parameterised_instances.add_ml_source builder instances;
+      String_builder.build_exact_exn builder
+  ;;
+
+  let of_modules project modules group instances =
     let aliases =
       Modules.Group.for_alias group
       |> List.map ~f:(fun (local_name, m) ->
-        let canonical_path = Modules.With_vlib.canonical_path modules group m in
+        let canonical_path = Modules.With_vlib.canonical_path modules m in
         let obj_name = Module.obj_name m in
-        { canonical_path; local_name; obj_name })
+        { Alias.local_name; canonical_path; obj_name })
     in
     let shadowed =
       if Dune_project.dune_version project < (3, 5)
@@ -444,28 +753,28 @@ module Alias_module = struct
         | Alias _ -> []
         | _ -> [ Module.name (Modules.Group.alias group) ])
     in
-    { aliases; shadowed }
+    { aliases; shadowed; instances }
   ;;
 end
 
 let build_alias_module cctx group =
-  let alias_file () =
-    let project = Compilation_context.scope cctx |> Scope.project in
-    let modules = Compilation_context.modules cctx in
-    Alias_module.of_modules project modules group |> Alias_module.to_ml
-  in
   let alias_module = Modules.Group.alias group in
-  let cctx = Compilation_context.for_alias_module cctx alias_module in
-  let sctx = Compilation_context.super_context cctx in
-  let file = Option.value_exn (Module.file alias_module ~ml_kind:Impl) in
-  let dir = Compilation_context.dir cctx in
   let* () =
+    let alias_file =
+      let open Action_builder.O in
+      let+ instances = Compilation_context.instances cctx in
+      let project = Compilation_context.scope cctx |> Scope.project in
+      let modules = Compilation_context.modules cctx in
+      Alias_module.of_modules project modules group instances |> Alias_module.to_ml
+    in
+    let dir = Compilation_context.dir cctx in
+    let sctx = Compilation_context.super_context cctx in
     Super_context.add_rule
       ~loc:Loc.none
       sctx
       ~dir
-      (Action_builder.delayed alias_file
-       |> Action_builder.write_file_dyn (Path.as_in_build_dir_exn file))
+      (let file = Option.value_exn (Module.file alias_module ~ml_kind:Impl) in
+       Action_builder.write_file_dyn (Path.as_in_build_dir_exn file) alias_file)
   in
   let cctx = Compilation_context.for_alias_module cctx alias_module in
   build_module cctx alias_module
@@ -483,9 +792,14 @@ let root_source entries =
 ;;
 
 let build_root_module cctx root_module =
-  let entries = Compilation_context.root_module_entries cctx in
-  let cctx = Compilation_context.for_root_module cctx root_module in
+  let for_ = Compilation_context.for_ cctx in
   let sctx = Compilation_context.super_context cctx in
+  let entries =
+    match Compilation_context.user_written_requires cctx with
+    | Some requires_compile -> Root_module.entries sctx ~requires_compile ~for_
+    | None -> Code_error.raise "root module without user-written dependencies" []
+  in
+  let cctx = Compilation_context.for_root_module cctx root_module in
   let file = Option.value_exn (Module.file root_module ~ml_kind:Impl) in
   let dir = Compilation_context.dir cctx in
   let* () =
@@ -537,7 +851,7 @@ let with_empty_intf ~sctx ~dir module_ =
   let name =
     Module.file module_ ~ml_kind:Impl
     |> Option.value_exn
-    |> Path.set_extension ~ext:".mli"
+    |> Path.set_extension ~ext:Filename.Extension.mli
   in
   let rule =
     Action_builder.write_file

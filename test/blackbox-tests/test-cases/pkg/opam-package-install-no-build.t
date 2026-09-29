@@ -1,6 +1,5 @@
 In this test we test the translation of an opam package with only an install step.
 
-  $ . ./helpers.sh
   $ mkrepo
 
 Make a package with only an install step 
@@ -15,11 +14,12 @@ Make a package with only an install step
   - install-no-build.0.0.1
 The lockfile should only contain an install step.
 
-  $ cat dune.lock/install-no-build.pkg 
+  $ cat ${default_lock_dir}/install-no-build.0.0.1.pkg 
   (version 0.0.1)
   
   (install
-   (run echo "just installing"))
+   (all_platforms
+    (run echo "just installing")))
 
 Building should only do the install step.
 

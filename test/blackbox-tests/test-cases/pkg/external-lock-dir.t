@@ -1,9 +1,9 @@
 A lock directory which does not exist in the source tree:
 
-  $ . ./helpers.sh
+  $ mkdir project
 
-  $ mkdir dune.lock project
-  $ cat >dune.lock/foo.pkg <<EOF
+  $ make_lockdir
+  $ make_lockpkg foo <<EOF
   > (build (run echo foo))
   > (version 1.0.0)
   > EOF
@@ -14,7 +14,9 @@ A lock directory which does not exist in the source tree:
   > EOF
 
   $ build_pkg foo 2>&1 | awk '/Internal error/,/Raised/'
-  Internal error, please report upstream including the contents of _build/log.
+  Internal error! Please report to https://github.com/ocaml/dune/issues,
+  providing the file _build/trace.csexp, if possible. This includes build
+  commands, message logs, and file paths.
   Description:
     ("Local.relative: received absolute path",
      { t = "."
@@ -22,3 +24,4 @@ A lock directory which does not exist in the source tree:
          "$TESTCASE_ROOT/dune.lock"
      })
   Raised at Stdune__Code_error.raise in file
+  [1]

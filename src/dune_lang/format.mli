@@ -1,5 +1,4 @@
-open Stdune
-open Dune_sexp
+open Import
 
 type dune_file =
   | OCaml_syntax of Loc.t
@@ -7,6 +6,7 @@ type dune_file =
 
 val format_string : version:Syntax.Version.t -> string -> string
 val parse : Lexing.lexbuf -> dune_file
+val format_to_channel : version:Syntax.Version.t -> src:Path.t -> out_channel -> unit
 
 (** Reformat a dune file in a dune action *)
 val format_action : version:Syntax.Version.t -> src:Path.t -> dst:Path.Build.t -> unit

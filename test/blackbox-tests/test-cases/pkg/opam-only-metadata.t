@@ -1,5 +1,5 @@
 Test that we can read package metadata from opam files.
-  $ . ./helpers.sh
+
   $ mkrepo
   $ add_mock_repo_if_needed
 
@@ -13,9 +13,7 @@ Test that we can read package metadata from opam files.
 
   $ mkpkg d
 
-  $ cat > dune-project <<EOF
-  > (lang dune 3.12)
-  > EOF
+  $ make_dune_project 3.12
 
   $ cat > foo.opam <<EOF
   > opam-version: "2.0"
@@ -34,7 +32,7 @@ Test that we can read package metadata from opam files.
   > ]
   > EOF
 
-  $ dune pkg lock
+  $ dune_pkg_lock_normalized
   Solution for dune.lock:
   - a.0.1
   - b.0.6
@@ -51,18 +49,9 @@ Test that we can read package metadata from opam files.
     - b.0.6
     
 
-  $ cat > dune-workspace <<EOF
-  > (lang dune 3.12)
-  > (lock_dir
-  >  (repositories mock)
-  >  (solver_env
-  >   (with-doc true)))
-  > (repository
-  >  (name mock)
-  >  (url "$PWD/mock-opam-repository"))
-  > EOF
+  $ create_mock_repo_with_doc_workspace
 
-  $ dune pkg lock
+  $ dune_pkg_lock_normalized
   Solution for dune.lock:
   - a.0.1
   - b.0.6

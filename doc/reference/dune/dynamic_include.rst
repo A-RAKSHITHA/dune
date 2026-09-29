@@ -26,6 +26,6 @@ directory.
 
 The following stanzas cannot be dynamically generated:
 
-* Libraries, coq theories, library redirects
+* Libraries, Rocq theories, library redirects
 * Public executables or install section with the ``bin`` section
 * Plugin stanzas

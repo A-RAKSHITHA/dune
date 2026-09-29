@@ -15,6 +15,7 @@ val is_error : _ t -> bool
 val iter : ('a, _) t -> f:('a -> unit) -> unit
 val ok_exn : ('a, exn) t -> 'a
 val try_with : (unit -> 'a) -> ('a, exn) t
+val repr : 'a Repr.t -> 'error Repr.t -> ('a, 'error) t Repr.t
 val equal : ('a -> 'a -> bool) -> ('b -> 'b -> bool) -> ('a, 'b) t -> ('a, 'b) t -> bool
 val hash : ('a -> int) -> ('b -> int) -> ('a, 'b) t -> int
 
@@ -24,6 +25,7 @@ module O : sig
   val ( let* ) : ('a, 'error) t -> ('a -> ('b, 'error) t) -> ('b, 'error) t
   val ( and+ ) : ('a, 'error) t -> ('b, 'error) t -> ('a * 'b, 'error) t
   val ( let+ ) : ('a, 'error) t -> ('a -> 'b) -> ('b, 'error) t
+  val ( and* ) : ('a, 'error) t -> ('b, 'error) t -> ('a * 'b, 'error) t
 end
 
 val map : ('a, 'error) t -> f:('a -> 'b) -> ('b, 'error) t
@@ -35,6 +37,8 @@ val to_dyn : 'a Dyn.builder -> 'error Dyn.builder -> ('a, 'error) t Dyn.builder
 
 (** Produce [Error <message>] *)
 val errorf : ('a, unit, string, (_, string) t) format4 -> 'a
+
+val both : ('a, 'e) t -> ('b, 'e) t -> ('a * 'b, 'e) t
 
 (** For compatibility with some other code *)
 type ('a, 'error) result = ('a, 'error) t

@@ -70,7 +70,7 @@ let value ~default ~f =
 
 let profile ~dir =
   let name, _ = Path.Build.extract_build_context_exn dir in
-  let context = Context_name.of_string name in
+  let context = Context_name.of_string (Filename.to_string name) in
   Per_context.profile context
 ;;
 
@@ -95,6 +95,18 @@ let bin_annot ~dir =
   value ~default:true ~dir ~f:(fun (t : Dune_env.config) -> Memo.return t.bin_annot)
 ;;
 
+let bin_annot_cms ~dir =
+  let* explicit =
+    value ~default:None ~dir ~f:(fun (t : Dune_env.config) ->
+      Memo.return (Option.map t.bin_annot_cms ~f:Option.some))
+  in
+  Memo.Option.value explicit ~default:(fun () ->
+    (* Enabled by default for OxCaml *)
+    let* context = Context.DB.by_dir dir in
+    let+ ocaml = Context.ocaml context in
+    Ocaml_config.ox ocaml.ocaml_config)
+;;
+
 let inline_tests ~dir =
   value ~default:None ~dir ~f:(fun (t : Dune_env.config) ->
     Memo.return
@@ -102,11 +114,9 @@ let inline_tests ~dir =
     match t.inline_tests with
     | None -> None
     | Some s -> Some (Some s))
-  >>= function
-  | Some s -> Memo.return s
-  | None ->
+  >>= Memo.Option.value ~default:(fun () ->
     let+ profile = profile ~dir in
-    if Profile.is_inline_test profile then Dune_env.Inline_tests.Enabled else Disabled
+    if Profile.is_inline_test profile then Dune_env.Inline_tests.Enabled else Disabled)
 ;;
 
 module Inherit = struct
@@ -117,10 +127,12 @@ module Inherit = struct
         (context : Context_name.t)
         ~(f : parent:a Memo.t -> dir:Path.Build.t -> Dune_env.config -> a Memo.t)
     =
+    let context_data = Context.DB.get context in
+    let profile = context_data >>| Context.profile in
     let for_context =
-      Memo.Lazy.create (fun () ->
-        let+ context = Context.DB.get context in
-        let profile = Context.profile context in
+      Memo.Lazy.create ~name:"environment-stanzas-for-context" (fun () ->
+        let+ context = context_data
+        and+ profile = profile in
         let { Context.Env_nodes.context; workspace } = Context.env_nodes context in
         let make env = Option.bind env ~f:(Dune_env.find_opt ~profile) in
         [ make workspace; make context ] |> List.filter_opt)
@@ -148,7 +160,7 @@ module Inherit = struct
             >>= function
             | None -> Memo.return None
             | Some stanza ->
-              let+ profile = Context.DB.get context >>| Context.profile in
+              let+ profile = profile in
               Dune_env.find_opt stanza ~profile
           in
           let parent =

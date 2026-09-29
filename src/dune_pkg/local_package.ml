@@ -1,13 +1,18 @@
-open! Import
+open Import
 module Package_constraint = Dune_lang.Package_constraint
-module Digest = Dune_digest
+
+module Origin = struct
+  type t =
+    | Opam_file
+    | Pin_stanza
+end
 
 type pin =
   { loc : Loc.t
   ; version : Package_version.t
   ; url : Loc.t * OpamUrl.t
   ; name : Package_name.t
-  ; origin : [ `Dune | `Opam ]
+  ; origin : Origin.t
   }
 
 type pins = pin Package_name.Map.t
@@ -32,14 +37,17 @@ type t =
   }
 
 module Dependency_hash = struct
-  include Digest
+  type t = Md5.t
 
+  let equal = Md5.equal
+  let to_dyn = Md5.to_dyn
+  let to_string = Md5.to_hex
   let encode t = to_string t |> Encoder.string
 
   let decode =
     let open Decoder in
     let+ loc, hash = located string in
-    match Digest.from_hex hash with
+    match Md5.of_hex hash with
     | Some hash -> hash
     | None ->
       User_error.raise
@@ -52,7 +60,7 @@ module Dependency_hash = struct
     | false -> None
     | true ->
       let hashable = formula |> Dependency_formula.to_dyn |> Dyn.to_string in
-      Some (string hashable)
+      Some (Md5.string hashable)
   ;;
 end
 
@@ -94,7 +102,7 @@ module For_solver = struct
          (List.map conflict_class ~f:Package_name.to_opam_package_name)
     |> OpamFile.OPAM.with_depopts
          (List.map depopts ~f:Package_dependency.to_opam_filtered_formula
-          |> OpamFormula.ands)
+          |> OpamFormula.ors)
     |> OpamFile.OPAM.with_install install
     |> OpamFile.OPAM.with_build build
   ;;
@@ -156,10 +164,8 @@ let of_package (t : Dune_lang.Package.t) =
     ; pins = Package_name.Map.empty
     ; command_source = Assume_defaults
     }
-  | Some { file; contents = opam_file_string } ->
-    let opam_file =
-      Opam_file.read_from_string_exn ~contents:opam_file_string (Path.source file)
-    in
+  | Some { file; contents } ->
+    let opam_file = Opam_file.opam_file_of_string_exn ~contents (Path.source file) in
     let command_source =
       Opam_file
         { build = opam_file |> OpamFile.OPAM.build
@@ -188,7 +194,7 @@ let of_package (t : Dune_lang.Package.t) =
             Package_version.of_opam_package_version (OpamPackage.version pkg)
           in
           let loc = Loc.in_file (Path.source file) in
-          name, { loc; version; url = loc, url; name; origin = `Opam })
+          name, { loc; version; url = loc, url; name; origin = Opam_file })
         |> Package_name.Map.of_list
       with
       | Ok x -> x

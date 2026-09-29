@@ -2,12 +2,12 @@
 
 open Stdune
 open Dune_engine
+open Dune_scheduler
 module Caml = Stdlib
 
 let config =
-  Dune_engine.Clflags.display := Short;
+  Clflags.display := Short;
   { Scheduler.Config.concurrency = 1
-  ; stats = None
   ; print_ctrl_c_warning = false
   ; watch_exclusions = []
   }
@@ -21,10 +21,7 @@ let setup =
 
 let prog = Option.value_exn (Bin.which ~path:(Env_path.path Env.initial) "true")
 let run () = Process.run ~display:Quiet ~env:Env.initial Strict prog []
-
-let go ~jobs fiber =
-  Scheduler.Run.go ~on_event:(fun _ _ -> ()) { config with concurrency = jobs } fiber
-;;
+let go ~jobs fiber = Scheduler.Run.go { config with concurrency = jobs } fiber
 
 let%bench_fun "single" =
   Lazy.force setup;

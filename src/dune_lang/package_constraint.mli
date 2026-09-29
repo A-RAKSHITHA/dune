@@ -1,4 +1,4 @@
-open! Stdune
+open Import
 
 module Value : sig
   type t =
@@ -13,7 +13,7 @@ end
     represent strings and booleans. If a variable appears in a position where a
     boolean is expected it will be assumed to represent a boolean. *)
 type t =
-  | Bvar of Package_variable_name.t (** A boolean variable *)
+  | Bvar of Value.t
   | Uop of Relop.t * Value.t
   (** A unary operator applied to a value. Unary operators are operators
       whose LHS is implied by context. E.g. when placing version constraints
@@ -25,8 +25,8 @@ type t =
   | Or of t list (** The disjunction of a list of boolean expressions *)
   | Not of t (** The negation of a boolean expression *)
 
-val encode : t Dune_sexp.Encoder.t
-val decode : t Dune_sexp.Decoder.t
+val encode : t Encoder.t
+val decode : t Decoder.t
 val to_dyn : t -> Dyn.t
 val equal : t -> t -> bool
 

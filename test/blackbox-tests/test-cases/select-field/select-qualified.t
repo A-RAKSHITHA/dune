@@ -1,0 +1,139 @@
+We test the `(select)` field of the `(libraries)` field in the presence of
+`(include_subdirs qualified)`
+
+  $ make_dune_project 3.22
+
+  $ cat > dune <<EOF
+  > (include_subdirs qualified)
+  > (library
+  >  (name foo)
+  >  (libraries
+  >   (select bar.ml from
+  >    (unix -> bar.unix.ml)
+  >    (!unix -> bar.nounix.ml))))
+  > EOF
+
+  $ mkdir -p sub
+  $ cat > sub/bar.unix.ml <<EOF
+  > let () = print_endline "Test: Unix was found!"
+  > EOF
+  $ cat > sub/bar.nounix.ml <<EOF
+  > let () = print_endline "Test: Unix was not found!"
+  > EOF
+
+The select field does not pick up the module sources for the test stanza
+correctly. This is a bug.
+
+  $ dune build foo.cma
+  File "dune", lines 5-7, characters 2-75:
+  5 |   (select bar.ml from
+  6 |    (unix -> bar.unix.ml)
+  7 |    (!unix -> bar.nounix.ml))))
+  Error: No rule found for bar.unix.ml
+  [1]
+
+  $ cat > dune <<EOF
+  > (include_subdirs qualified)
+  > (library
+  >  (name foo)
+  >  (libraries
+  >   (select bar.ml from
+  >    (unix -> sub/bar.unix.ml)
+  >    (!unix -> sub/bar.nounix.ml))))
+  > EOF
+
+It also doesn't allow specifying the path
+
+  $ dune build foo.cma
+  File "dune", line 6, characters 12-27:
+  6 |    (unix -> sub/bar.unix.ml)
+                  ^^^^^^^^^^^^^^^
+  Error: The format for files in this select branch must be bar.{name}.ml
+  [1]
+
+Specifying the relative filename works
+
+  $ cat > dune <<EOF
+  > (include_subdirs qualified)
+  > (library
+  >  (name foo)
+  >  (libraries
+  >   (select sub/bar.ml from
+  >    (unix -> sub/bar.unix.ml)
+  >    (!unix -> sub/bar.nounix.ml))))
+  > EOF
+  $ cat > foo.ml <<EOF
+  > module X = Sub.Bar
+  > EOF
+
+Paths must be specified relative to the module group root
+
+  $ dune build foo.cma
+
+Works with executables as well:
+
+  $ cat > dune <<EOF
+  > (include_subdirs qualified)
+  > (executable
+  >  (name foo)
+  >  (libraries
+  >   (select sub/bar.ml from
+  >    (unix -> sub/bar.unix.ml)
+  >    (!unix -> sub/bar.nounix.ml))))
+  > EOF
+
+  $ dune exec ./foo.exe
+  Test: Unix was found!
+
+More levels:
+
+  $ mkdir -p sub/more/levels
+  $ cat > sub/more/levels/mod.unix.ml <<EOF
+  > let () = print_endline "Test: Unix was found!"
+  > EOF
+  $ cat > sub/more/levels/mod.nounix.ml <<EOF
+  > let () = print_endline "Test: Unix was not found!"
+  > EOF
+  $ cat > dune <<EOF
+  > (include_subdirs qualified)
+  > (executable
+  >  (name foo)
+  >  (libraries
+  >   (select sub/bar.ml from
+  >    (unix -> sub/bar.unix.ml)
+  >    (!unix -> sub/bar.nounix.ml))
+  >   (select sub/more/levels/mod.ml from
+  >    (unix -> sub/more/levels/mod.unix.ml)
+  >    (!unix -> sub/more/levels/mod.nounix.ml))
+  > ))
+  > EOF
+
+  $ dune clean
+  $ dune exec ./foo.exe
+  Test: Unix was found!
+  Test: Unix was found!
+
+A selected file can itself be a nested group interface:
+
+  $ mkdir -p selected-group-interface/outer/foo
+  $ cat >selected-group-interface/dune-project <<'EOF'
+  > (lang dune 3.22)
+  > EOF
+  $ cat >selected-group-interface/dune <<'EOF'
+  > (include_subdirs qualified)
+  > (library
+  >  (name selected)
+  >  (wrapped false)
+  >  (libraries
+  >   (select outer/foo/foo.ml from
+  >    (unix -> outer/foo/foo.unix.ml)
+  >    (!unix -> outer/foo/foo.nounix.ml))))
+  > EOF
+  $ touch selected-group-interface/outer/foo/foo.unix.ml
+  $ touch selected-group-interface/outer/foo/foo.nounix.ml
+  $ touch selected-group-interface/outer/foo/bar.ml
+  $ dune build --root=selected-group-interface
+  $ grep -A1 '@canonical Outer.Foo' \
+  > selected-group-interface/_build/default/outer.ml-gen
+  (** @canonical Outer.Foo *)
+  module Foo = Outer__Foo

@@ -1,8 +1,12 @@
 open Import
 
-module Gen_rules = struct
-  module Context_type = Build_config_intf.Context_type
+module Context_type = struct
+  type t =
+    | Empty
+    | With_sources
+end
 
+module Gen_rules = struct
   module Build_only_sub_dirs = struct
     type t = Subdir_set.t Path.Build.Map.t
 
@@ -17,7 +21,11 @@ module Gen_rules = struct
   end
 
   module Rules = struct
-    include Build_config_intf.Rules
+    type nonrec t =
+      { build_dir_only_sub_dirs : Build_only_sub_dirs.t
+      ; directory_targets : Loc.t Path.Build.Map.t
+      ; rules : Rules.t Memo.t
+      }
 
     let empty =
       { build_dir_only_sub_dirs = Path.Build.Map.empty
@@ -34,21 +42,31 @@ module Gen_rules = struct
       { build_dir_only_sub_dirs; directory_targets; rules }
     ;;
 
-    let combine_exn r { build_dir_only_sub_dirs; directory_targets; rules } =
-      { build_dir_only_sub_dirs =
-          Build_only_sub_dirs.union r.build_dir_only_sub_dirs build_dir_only_sub_dirs
-      ; directory_targets = Path.Build.Map.union_exn r.directory_targets directory_targets
-      ; rules =
-          (let open Memo.O in
-           let+ r = r.rules
-           and+ r' = rules in
-           Rules.union r r')
-      }
+    let combine_exn r ({ build_dir_only_sub_dirs; directory_targets; rules } as other) =
+      match phys_equal r empty with
+      | true -> other
+      | false ->
+        (match phys_equal other empty with
+         | true -> r
+         | false ->
+           { build_dir_only_sub_dirs =
+               Build_only_sub_dirs.union r.build_dir_only_sub_dirs build_dir_only_sub_dirs
+           ; directory_targets =
+               Path.Build.Map.union_exn r.directory_targets directory_targets
+           ; rules =
+               (let open Memo.O in
+                let+ r = r.rules
+                and+ r' = rules in
+                Rules.union r r')
+           })
     ;;
   end
 
   module Gen_rules_result = struct
-    include Build_config_intf.Gen_rules_result
+    type t =
+      | Rules of Rules.t
+      | Unknown_context
+      | Redirect_to_parent of Rules.t
 
     let redirect_to_parent rules = Redirect_to_parent rules
     let rules_here rules = Rules rules
@@ -56,47 +74,53 @@ module Gen_rules = struct
     let no_rules = rules_here Rules.empty
   end
 
-  module type Rule_generator = Build_config_intf.Rule_generator
+  module type Rule_generator = sig
+    val gen_rules
+      :  Context_name.t
+      -> dir:Path.Build.t
+      -> string list
+      -> Gen_rules_result.t Memo.t
+  end
 end
 
-module type Source_tree = Build_config_intf.Source_tree
+module type Source_tree = sig
+  module Dir : sig
+    type t
+
+    val sub_dir_names : t -> Filename.Array.Set.t
+    val filenames : t -> Filename.Array.Set.t
+  end
+
+  val find_dir : Path.Source.t -> Dir.t option Memo.t
+end
 
 type t =
-  { contexts : (Build_context.t * Gen_rules.Context_type.t) Context_name.Map.t Memo.Lazy.t
+  { contexts : (Build_context.t * Context_type.t) Context_name.Map.t Memo.Lazy.t
   ; rule_generator : (module Gen_rules.Rule_generator)
   ; sandboxing_preference : Sandbox_mode.t list
   ; promote_source :
-      chmod:(int -> int)
+      chmod:(Permissions.Mode.t -> Permissions.Mode.t)
       -> delete_dst_if_it_is_a_directory:bool
       -> src:Path.Build.t
       -> dst:Path.Source.t
       -> unit Fiber.t
-  ; stats : Dune_stats.t option
-  ; cache_config : Dune_cache.Config.t
-  ; cache_debug_flags : Cache_debug_flags.t
   ; implicit_default_alias : Path.Build.t -> unit Action_builder.t option Memo.t
-  ; execution_parameters : dir:Path.Build.t -> Execution_parameters.t Memo.t
+  ; execution_parameters :
+      Context_name.t -> dir:Path.Build.t -> Execution_parameters.t Memo.t
   ; source_tree : (module Source_tree)
-  ; shared_cache : (module Dune_cache.Shared.S)
-  ; write_error_summary : Build_system_error.Set.t -> unit Fiber.t
   }
 
 let t : t Fdecl.t = Fdecl.create Dyn.opaque
 let get () = Fdecl.get t
 
 let set
-      ~stats
       ~contexts
       ~promote_source
-      ~cache_config
-      ~cache_debug_flags
       ~sandboxing_preference
       ~rule_generator
       ~implicit_default_alias
       ~execution_parameters
       ~source_tree
-      ~shared_cache
-      ~write_error_summary
   =
   let contexts =
     Memo.lazy_ ~name:"Build_config.set" (fun () ->
@@ -113,13 +137,8 @@ let set
     ; sandboxing_preference =
         sandboxing_preference @ Sandbox_mode.all_except_patch_back_source_tree
     ; promote_source
-    ; stats
-    ; cache_config
-    ; cache_debug_flags
     ; implicit_default_alias
     ; execution_parameters
     ; source_tree
-    ; shared_cache
-    ; write_error_summary
     }
 ;;

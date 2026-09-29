@@ -1,14 +1,6 @@
-open Import
-
-let info =
-  let doc = "Dune's RPC mechanism. Experimental." in
-  let man =
-    [ `S "DESCRIPTION"
-    ; `P {|This is experimental. do not use|}
-    ; `Blocks Common.help_secs
-    ]
-  in
-  Cmd.info "rpc" ~doc ~man
-;;
-
-let group = Cmd.group info [ Status.cmd; Build.cmd; Ping.cmd ]
+module Group = Group
+module Rpc_build = Rpc_build
+module Rpc_common = Rpc_common
+module Rpc_flush_file_watcher = Rpc_flush_file_watcher
+module Rpc_ping = Rpc_ping
+module Rpc_status = Rpc_status

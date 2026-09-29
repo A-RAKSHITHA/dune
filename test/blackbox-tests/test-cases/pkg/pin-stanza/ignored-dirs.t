@@ -1,20 +1,10 @@
 Pulling projects should respect ignored directories.
 
-  $ . ../helpers.sh
-
   $ mkrepo
   $ add_mock_repo_if_needed
 
 
-  $ cat >dune-project <<EOF
-  > (lang dune 3.13)
-  > (pin
-  >  (url "file://$PWD/_foo")
-  >  (package (name foo)))
-  > (package
-  >  (name main)
-  >  (depends foo))
-  > EOF
+  $ make_project_pinned_to_foo
 
   $ mkdir -p _foo/subproject
   $ cat >_foo/dune-project <<EOF
@@ -34,6 +24,6 @@ should be ignored.
   > should not be parsed because it's ignored by the stanza above
   > EOF
 
-  $ dune pkg lock
+  $ dune_pkg_lock_normalized
   Solution for dune.lock:
   - foo.dev

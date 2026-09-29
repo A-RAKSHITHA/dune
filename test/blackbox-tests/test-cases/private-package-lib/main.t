@@ -137,9 +137,9 @@ But we shouldn't be able to access it directly:
   > print_endline Secret.secret
   > EOF
   $ dune exec ./subproj/subproj.exe
-  File "subproj/subproj.ml", line 1, characters 14-27:
+  File "subproj/subproj.ml", line 1, characters 14-20:
   1 | print_endline Secret.secret
-                    ^^^^^^^^^^^^^
+                    ^^^^^^
   Error: Unbound module Secret
   [1]
 
@@ -157,8 +157,6 @@ Now we make sure such libraries are transitively usable when installed:
   $ echo "(lang dune 2.8)" > use/dune-project
   $ export OCAMLPATH=$PWD/_build/install/default/lib
   $ dune exec --root use -- ./run.exe
-  Entering directory 'use'
-  Leaving directory 'use'
   Using library foo: from library foo secret string
 
 But we cannot use such libraries directly:
@@ -168,9 +166,9 @@ But we cannot use such libraries directly:
   > EOF
   $ dune exec --root use -- ./run.exe
   Entering directory 'use'
-  File "run.ml", line 1, characters 43-56:
+  File "run.ml", line 1, characters 43-49:
   1 | print_endline ("direct access attempt: " ^ Secret.secret)
-                                                 ^^^^^^^^^^^^^
+                                                 ^^^^^^
   Error: Unbound module Secret
   Leaving directory 'use'
   [1]

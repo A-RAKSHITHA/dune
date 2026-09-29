@@ -1,13 +1,11 @@
 The test-source folder has a file to use substitution on.
 
-  $ . ./helpers.sh
-
   $ mkdir test-source
   $ cat >test-source/foo.ml.in <<EOF
   > This file will be fed to the substitution mechanism
   > EOF
   $ make_lockdir
-  $ cat >dune.lock/test.pkg <<EOF
+  $ make_lockpkg test <<EOF
   > (version 0.0.1)
   > (source (copy $PWD/test-source))
   > (build
@@ -31,7 +29,7 @@ This should also work with any other filename combination:
   $ cat >test-source/foo.ml.template <<EOF
   > This is using a different file suffix
   > EOF
-  $ cat >dune.lock/test.pkg <<EOF
+  $ make_lockpkg test <<EOF
   > (version 0.0.1)
   > (source (copy $PWD/test-source))
   > (build
@@ -51,7 +49,7 @@ Undefined variables, how do they substitute?
   $ cat >test-source/variables.ml.in <<EOF
   > We substitute this '%%{var}%%' into '%{var}%'
   > EOF
-  $ cat >dune.lock/test.pkg <<EOF
+  $ make_lockpkg test <<EOF
   > (version 0.0.1)
   > (source (copy $PWD/test-source))
   > (build
@@ -81,7 +79,7 @@ Now with variables set
   > %%{with-test}%% is '%{with-test}%'
   > %%{os}%% is '%{os}%'
   > EOF
-  $ cat >dune.lock/test.pkg <<EOF
+  $ make_lockpkg test <<EOF
   > (version 0.0.1)
   > (source (copy $PWD/test-source))
   > (build
@@ -89,7 +87,7 @@ Now with variables set
   >   (substitute defined.ml.in defined.ml)
   >   (system "cat defined.ml")))
   > EOF
-  $ build_pkg test 2>&1 | sed 's/%{os}% is.*/%{os}% is $REDACTED/g'
+  $ build_pkg test 2>&1 | dune_cmd subst '%\{os\}% is.*' '%{os}% is $REDACTED'
   We substitute '%{name}%' into 'test' and '%{_:name}%' into 'test'
   And '%{version}%' is set to '0.0.1'
   There is also some paths set:
@@ -109,11 +107,11 @@ Now with variables set
 It is also possible to use variables of your dependencies:
 
   $ mkdir dependency-source
-  $ cat >dune.lock/dependency.pkg <<EOF
+  $ make_lockpkg dependency <<EOF
   > (version 0.0.1)
   > (source (copy $PWD/dependency-source))
   > EOF
-  $ cat >dune.lock/test.pkg <<EOF
+  $ make_lockpkg test <<EOF
   > (version 0.0.1)
   > (source (copy $PWD/test-source))
   > (depends dependency)
@@ -126,6 +124,27 @@ It is also possible to use variables of your dependencies:
   > There is also some paths set:
   > '%%{dependency:lib}%%' is '%{dependency:lib}%'
   > EOF
-  $ build_pkg test
+  $ build_pkg test 2>&1 | sanitize_pkg_digest dependency.0.0.1
   There is also some paths set:
-  '%{dependency:lib}%' is '../../dependency/target/lib/dependency'
+  '%{dependency:lib}%' is '../../dependency.0.0.1-DIGEST_HASH/target/lib/dependency'
+
+The substitute action should not observe the environment:
+
+  $ make_lockpkg test <<EOF
+  > (version 0.0.1)
+  > (source (copy $PWD/test-source))
+  > (depends dependency)
+  > (build
+  >  (progn
+  >   (system "echo running")
+  >   (substitute foo.in foo)))
+  > EOF
+  $ touch test-source/foo.in
+  $ build_pkg test 2>&1
+  running
+  $ build_pkg test 2>&1
+
+Modifying this variable should not trigger a rebuild:
+
+  $ export FOOBAR=1
+  $ build_pkg test 2>&1

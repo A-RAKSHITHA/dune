@@ -1,12 +1,11 @@
 (** General warning mechanism for dune rules *)
 
-open Dune_config
-module Syntax := Dune_sexp.Syntax
+open Import
 
 type t
 
 val make
-  :  default:(Syntax.Version.t -> Config.Toggle.t)
+  :  default:(Syntax.Version.t -> Toggle.t)
   -> name:string
   -> since:Syntax.Version.t
   -> t
@@ -21,6 +20,6 @@ module Settings : sig
 
   val to_dyn : t -> Dyn.t
   val empty : t
-  val decode : t Dune_sexp.Decoder.t
-  val active : t -> warning -> Syntax.Version.t -> Config.Toggle.t
+  val decode : t Decoder.t
+  val active : t -> warning -> Syntax.Version.t -> Toggle.t
 end

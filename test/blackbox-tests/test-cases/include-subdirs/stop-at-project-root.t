@@ -1,8 +1,6 @@
 include_subdirs should not recurse past project root
 
-  $ cat >dune-project <<EOF
-  > (lang dune 3.1)
-  > EOF
+  $ make_dune_project 3.1
 
   $ cat >dune <<EOF
   > (include_subdirs unqualified)
@@ -32,8 +30,8 @@ Doesn't work with when we make [subproj] a separate project with a dune-project
 file, since include_subdirs is stopped.
 
   $ dune exec ./foo.exe
-  File "foo.ml", line 1, characters 14-19:
+  File "foo.ml", line 1, characters 14-17:
   1 | print_endline Bar.v;;
-                    ^^^^^
+                    ^^^
   Error: Unbound module Bar
   [1]

@@ -1,5 +1,7 @@
-open Stdune
+open Import
 include String
+
+let repr = Repr.string
 
 include (
   Dune_util.Stringlike.Make (struct
@@ -10,7 +12,7 @@ include (
     let description = "package name"
     let description_of_valid_string = None
     let hint_valid = None
-    let of_string_opt s = if s = "" then None else Some s
+    let of_string_opt s = if String.is_empty s then None else Some s
   end) :
     Dune_util.Stringlike with type t := t)
 
@@ -42,9 +44,17 @@ module Opam_compatible = struct
     let is_valid_char c = is_letter c || is_other_valid_char c
 
     let is_valid_string s =
-      let all_chars_valid = String.for_all s ~f:is_valid_char in
-      let has_one_letter = String.exists s ~f:is_letter in
-      all_chars_valid && has_one_letter
+      let len = String.length s in
+      let rec loop i has_one_letter =
+        if i = len
+        then has_one_letter
+        else (
+          match String.unsafe_get s i with
+          | 'a' .. 'z' | 'A' .. 'Z' -> loop (i + 1) true
+          | '0' .. '9' | '-' | '+' | '_' -> loop (i + 1) has_one_letter
+          | _ -> false)
+      in
+      loop 0 false
     ;;
 
     let of_string_opt s = Option.some_if (is_valid_string s) s
@@ -63,17 +73,23 @@ module Opam_compatible = struct
   let to_package_name s = s
 end
 
-let opam_ext = ".opam"
-let opam_fn (t : t) = to_string t ^ opam_ext
+let opam_ext = Filename.Extension.to_string Filename.Extension.opam
+
+let opam_fn (t : t) =
+  Filename.add_extension (Filename.of_string_exn (to_string t)) Filename.Extension.opam
+;;
+
 let is_opam_compatible s = Option.is_some (Opam_compatible.of_string_opt (to_string s))
-let file t ~dir = Path.Source.relative dir (to_string t ^ opam_ext)
+let file t ~dir = Path.Source.relative_fname dir (opam_fn t)
 
 let decode_opam_compatible =
-  Dune_sexp.Decoder.map ~f:Opam_compatible.to_package_name Opam_compatible.decode
+  Decoder.map ~f:Opam_compatible.to_package_name Opam_compatible.decode
 ;;
 
 let of_opam_file_basename basename =
   let open Option.O in
-  let* name = String.drop_suffix basename ~suffix:opam_ext in
+  let* name = String.drop_suffix (Filename.to_string basename) ~suffix:opam_ext in
   of_string_opt name
 ;;
+
+let digest_feed = Dune_digest.Feed.string

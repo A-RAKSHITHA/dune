@@ -1,8 +1,6 @@
 Tests for dynamic dependencies computed from the `%{read:...}` family of macros
 
-  $ cat > dune-project <<EOF
-  > (lang dune 3.1)
-  > EOF
+  $ make_dune_project 3.1
 
 Define 2 rules and a file containing their paths
 
@@ -34,18 +32,16 @@ Now we define a rule that reads `deps.d` to figure out what to build.
 
 Building `./output` should now produce a file with contents "depA depB"
 
-  $ dune build ./output --display=short
-            sh depA
-            sh depB
-            sh output
+  $ dune build ./output
+
+  $ cat _build/default/output
+  ./depA ./depB
 
 Doesn't work in dune pre 3.0
 
-  $ cat > dune-project <<EOF
-  > (lang dune 3.0)
-  > EOF
+  $ make_dune_project 3.0
 
-  $ dune build ./output --display=short
+  $ dune build ./output
   File "dune", line 12, characters 7-23:
   12 |  (deps (include deps.d))
               ^^^^^^^^^^^^^^^^
@@ -55,9 +51,7 @@ Doesn't work in dune pre 3.0
 
 Works with aliases and other dependency specifications
 
-  $ cat > dune-project <<EOF
-  > (lang dune 3.1)
-  > EOF
+  $ make_dune_project 3.1
 
   $ cat > deps.d <<EOF
   > ((alias depA) (universe) depB another_dep)
@@ -87,14 +81,10 @@ Works with aliases and other dependency specifications
   >   (no-infer (echo "dependencies %{deps}"))))
   > EOF
 
-  $ dune build @output --display=short
-            sh alias depA
+  $ dune build @output
   building depA
-          echo depB
   building depB
-            sh another_dep
-            sh depB
-  dependencies depB another_dep
+  dependencies ./depB ./another_dep
 
 Multiple `(include)` nesting
 
@@ -110,7 +100,5 @@ Multiple `(include)` nesting
   >  (action (no-infer (echo "metadeps: %{deps}"))))
   > EOF
 
-  $ dune build @nested --display=short
-            sh meta-deps.d
-  metadeps: depB another_dep
-
+  $ dune build @nested
+  metadeps: ./depB ./another_dep

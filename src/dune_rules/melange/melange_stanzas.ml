@@ -6,16 +6,15 @@ module Emit = struct
     { loc : Loc.t
     ; target : string
     ; alias : Alias.Name.t option
-    ; module_systems : (Melange.Module_system.t * Filename.Extension.t) list
-    ; modules : Stanza_common.Modules_settings.t
+    ; module_systems : (Melange.Module_system.t * Filename.Extension.t) Nonempty_list.t
+    ; modules : Modules_settings.t
     ; emit_stdlib : bool
     ; libraries : Lib_dep.t list
     ; package : Package.t option
-    ; preprocess : Preprocess.With_instrumentation.t Preprocess.Per_module.t
+    ; preprocess : Preprocess.preprocess
     ; runtime_deps : Loc.t * Dep_conf.t list
-    ; preprocessor_deps : Dep_conf.t list
     ; lint : Preprocess.Without_instrumentation.t Preprocess.Per_module.t
-    ; promote : Rule.Promote.t option
+    ; promote : Rule_mode.Promote.t option
     ; compile_flags : Ordered_set_lang.Unexpanded.t
     ; allow_overlapping_dependencies : bool
     ; enabled_if : Blang.t
@@ -30,39 +29,59 @@ module Emit = struct
   let implicit_alias = Alias.Name.of_string "melange"
 
   let decode =
-    let extension_field = extension in
+    let extension_field =
+      let open Dune_lang.Decoder in
+      located extension
+      >>| fun (loc, ext) ->
+      match Filename.Extension.of_string ext with
+      | Some ext -> loc, ext
+      | None ->
+        User_error.raise
+          ~loc
+          [ Pp.text "extension must start with '.' and not contain '/'." ]
+    in
     let module_systems =
+      let module Module_system = Melange.Module_system in
       let module_system =
-        enum [ "esm", Melange.Module_system.ESM; "es6", ESM; "commonjs", CommonJS ]
+        enum'
+          Module_system.
+            [ ( "es6"
+              , Syntax.deprecated_in
+                  Dune_lang.Melange.syntax
+                  (1, 0)
+                  ~extra_info:"Use `esm' instead."
+                >>> return ESM )
+            ; "esm", return ESM
+            ; "commonjs", return CommonJS
+            ]
       in
       let+ module_systems =
-        repeat
-          (pair module_system (located extension_field)
+        repeat1
+          (pair module_system extension_field
            <|> let+ loc, module_system = located module_system in
-               let _, ext = Melange.Module_system.default in
+               let _, ext = Module_system.default in
                module_system, (loc, ext))
       in
       let module_systems =
         match
-          String.Map.of_list_map module_systems ~f:(fun (ms, (loc, ext)) ->
-            ext, (loc, ms))
+          Filename.Extension.Map.of_list_map
+            (Nonempty_list.to_list module_systems)
+            ~f:(fun (ms, (loc, ext)) -> ext, (loc, ms))
         with
-        | Ok m -> String.Map.to_list_map m ~f:(fun ext (_loc, ms) -> ms, ext)
+        | Ok m ->
+          Filename.Extension.Map.to_list_map m ~f:(fun ext (_loc, ms) -> ms, ext)
+          |> Nonempty_list.of_list_exn
         | Error (ext, (_, (loc1, _)), (_, (loc2, _))) ->
           let main_message =
-            Pp.textf "JavaScript extension %s appears more than once:" ext
+            Pp.textf
+              "JavaScript extension %s appears more than once:"
+              (Filename.Extension.to_string ext)
           in
-          let annots =
-            let main = User_message.make ~loc:loc2 [ main_message ] in
-            let related =
-              [ User_message.make ~loc:loc1 [ Pp.text "Already defined here" ] ]
-            in
-            User_message.Annots.singleton
-              Compound_user_error.annot
-              [ Compound_user_error.make ~main ~related ]
+          let compound =
+            Compound_user_error.duplicate ~main_loc:loc2 ~previous_loc:loc1 main_message
           in
           User_error.raise
-            ~annots
+            ~compound
             ~loc:loc2
             [ main_message
             ; Pp.enumerate ~f:Loc.pp_file_colon_line [ loc1; loc2 ]
@@ -80,28 +99,29 @@ module Emit = struct
       (let* loc = loc in
        let+ target =
          let of_string ~loc s =
-           match String.is_empty s with
-           | true ->
+           match Filename.of_string s with
+           | Some _ -> s
+           | None when String.is_empty s ->
              User_error.raise ~loc [ Pp.textf "The field target can not be empty" ]
-           | false ->
-             (match Filename.dirname s with
-              | "." -> s
-              | _ ->
-                User_error.raise
-                  ~loc
-                  [ Pp.textf
-                      "The field target must use simple names and can not include paths \
-                       to other folders. To emit JavaScript files in another folder, \
-                       move the `melange.emit` stanza to that folder"
-                  ])
+           | None ->
+             User_error.raise
+               ~loc
+               [ Pp.textf
+                   "The field target must use simple names and can not include paths to \
+                    other folders. To emit JavaScript files in another folder, move the \
+                    `melange.emit` stanza to that folder"
+               ]
          in
          field "target" (plain_string (fun ~loc s -> of_string ~loc s))
        and+ alias = field_o "alias" Dune_lang.Alias.decode
        and+ module_systems =
-         field "module_systems" module_systems ~default:[ Melange.Module_system.default ]
+         field
+           "module_systems"
+           module_systems
+           ~default:Nonempty_list.[ Melange.Module_system.default ]
        and+ libraries =
          field "libraries" (Lib_dep.L.decode ~allow_re_export:false) ~default:[]
-       and+ package = field_o "package" Stanza_common.Pkg.decode
+       and+ package = Stanza_pkg.field_opt () >>| Option.map ~f:snd
        and+ runtime_deps =
          field
            "runtime_deps"
@@ -114,18 +134,14 @@ module Emit = struct
        and+ compile_flags = Ordered_set_lang.Unexpanded.field "compile_flags"
        and+ allow_overlapping_dependencies = field_b "allow_overlapping_dependencies"
        and+ emit_stdlib = field "emit_stdlib" bool ~default:true
-       and+ modules = Stanza_common.Modules_settings.decode
+       and+ modules = Modules_settings.decode
        and+ enabled_if =
          let open Enabled_if in
          let allowed_vars = Any in
          decode ~allowed_vars ~since:None ()
        in
        let preprocess =
-         let init =
-           let f libname = Preprocess.With_instrumentation.Ordinary libname in
-           Module_name.Per_item.map preprocess ~f:(Preprocess.map ~f)
-         in
-         List.fold_left instrumentation ~init ~f:Preprocess.Per_module.add_instrumentation
+         Preprocess.preprocess_config ~preprocess ~instrumentation ~preprocessor_deps
        in
        { loc
        ; target
@@ -137,7 +153,6 @@ module Emit = struct
        ; package
        ; preprocess
        ; runtime_deps
-       ; preprocessor_deps
        ; lint
        ; promote
        ; compile_flags
@@ -146,22 +161,12 @@ module Emit = struct
        })
   ;;
 
+  let exe_target t = Exe_target.melange_emit t.target
   let target_dir (emit : t) ~dir = Path.Build.relative dir emit.target
 end
 
-let syntax =
-  Dune_lang.Syntax.create
-    ~name:Dune_project.Melange_syntax.name
-    ~desc:"the Melange extension"
-    [ (0, 1), `Since (3, 8) ]
-;;
-
 let () =
   Dune_project.Extension.register_simple
-    syntax
-    (return
-       [ ( "melange.emit"
-         , let+ stanza = Emit.decode in
-           [ Emit.make_stanza stanza ] )
-       ])
+    Dune_lang.Melange.syntax
+    (return [ ("melange.emit", Emit.(decode_stanza decode)) ])
 ;;

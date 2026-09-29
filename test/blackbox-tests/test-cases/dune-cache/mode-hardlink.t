@@ -3,41 +3,49 @@ Test basic cache store/restore functionality in the default [hardlink] mode.
 Dune supports setting the cache directory in two ways, via the [XDG_CACHE_HOME]
 variable, and via the [DUNE_CACHE_ROOT] variable. Here we test the former.
 
-  $ export XDG_RUNTIME_DIR=$PWD/.xdg-runtime
-  $ export XDG_CACHE_HOME=$PWD/.xdg-cache
+  $ export XDG_CACHE_HOME=$(dune_cmd native-path $PWD/.xdg-cache)
+  $ setup_xdg_runtime_dir
 
-  $ cat > config <<EOF
-  > (lang dune 2.1)
-  > (cache enabled)
-  > EOF
-  $ cat > dune-project <<EOF
-  > (lang dune 2.1)
-  > EOF
-  $ cat > dune <<EOF
-  > (rule
-  >   (deps source)
-  >   (targets target1 target2)
-  >   (action (bash "touch beacon; cat source > target1; cat source source > target2")))
-  > EOF
-
-It's a duck. It quacks. (Yes, the author of this comment didn't get it.)
-
-  $ cat > source <<EOF
-  > \_o< COIN
-  > EOF
+  $ setup_basic_shared_cache_project default
 
 Test that after the build, the files in the build directory have the hard link
 counts greater than 1, because they are shared with the corresponding cache entries.
 
-We expect to see both workspace-local and shared cache misses, because we've
-never built [target1] before.
+Build target1 with cache tracing enabled. We expect to see both workspace-local
+and shared cache misses, because we've never built target1 before.
 
-  $ dune build --config-file=config target1 --debug-cache=shared,workspace-local \
-  >   2>&1 | grep '_build/default/source\|_build/default/target'
-  Workspace-local cache miss: _build/default/source: never seen this target before
-  Shared cache miss [b680278cc381aadce4727f68fb94cbe2] (_build/default/source): not found in cache
-  Workspace-local cache miss: _build/default/target1: never seen this target before
-  Shared cache miss [8818eb46b9935b64bb4c63ca38b86d2e] (_build/default/target1): not found in cache
+  $ export DUNE_TRACE=cache
+  $ dune build --config-file=config target1
+
+All cache metadata is read-only.
+
+  $ find .xdg-cache/dune/db/meta -type f \
+  >   -exec dune_cmd stat permissions {} \; | cut -c1 | sort -u
+  4
+
+Verify we see cache miss events for our targets in the trace:
+
+  $ dune trace cat | jq_dune -s 'cacheMissesMatching("source|target1")'
+  {
+    "name": "workspace_local_miss",
+    "target": "_build/default/source",
+    "reason": "never seen this target before"
+  }
+  {
+    "name": "miss",
+    "target": "_build/default/source",
+    "reason": "not found in cache"
+  }
+  {
+    "name": "workspace_local_miss",
+    "target": "_build/default/target1",
+    "reason": "never seen this target before"
+  }
+  {
+    "name": "miss",
+    "target": "_build/default/target1",
+    "reason": "not found in cache"
+  }
 
   $ dune_cmd stat hardlinks _build/default/source
   3
@@ -48,16 +56,34 @@ never built [target1] before.
   $ dune_cmd exists _build/default/beacon
   true
 
-Test that rebuilding works.
+Test that rebuilding works. Now we expect to see only workspace-local cache
+misses, because we've cleaned _build/default but not the shared cache.
 
-Now we expect to see only workspace-local cache misses, because we've cleaned
-[_build/default] but not the shared cache.
+  $ rm -rf _build/
+  $ dune build --config-file=config target1
 
-  $ rm -rf _build/default
-  $ dune build --config-file=config target1 --debug-cache=shared,workspace-local \
-  >   2>&1 | grep '_build/default/source\|_build/default/target'
-  Workspace-local cache miss: _build/default/source: target missing from build dir
-  Workspace-local cache miss: _build/default/target1: target missing from build dir
+Verify we see only workspace-local miss events for our targets (shared cache hits should not appear as misses):
+
+  $ dune trace cat | jq_dune -s 'cacheMissesMatching("source|target1")'
+  {
+    "name": "workspace_local_miss",
+    "target": "_build/default/source",
+    "reason": "never seen this target before"
+  }
+  {
+    "name": "workspace_local_miss",
+    "target": "_build/default/target1",
+    "reason": "never seen this target before"
+  }
+  $ dune trace cat | jq_dune -s 'cacheHitsMatching("source|target1")'
+  {
+    "name": "hit",
+    "target": "_build/default/source"
+  }
+  {
+    "name": "hit",
+    "target": "_build/default/target1"
+  }
 
   $ dune_cmd stat hardlinks _build/default/source
   3
@@ -75,17 +101,17 @@ Now we expect to see only workspace-local cache misses, because we've cleaned
   \_o< COIN
   \_o< COIN
 
-Test how zero the zero build is. We do not expect to see any cache misses.
+Test that the zero build is indeed a zero build (nothing should be rebuilt).
+No cache misses should appear in the trace.
 
-  $ dune build --config-file=config target1 --debug-cache=shared,workspace-local \
-  >   2>&1 | grep '_build/default/source\|_build/default/target'
-  [1]
+  $ dune build --config-file=config target1
+
+  $ dune trace cat | jq_dune -s '[ .[] | cacheMisses ] | length'
+  0
 
 Test that the cache stores all historical build results.
 
-  $ cat > dune-project <<EOF
-  > (lang dune 2.1)
-  > EOF
+  $ make_dune_project 2.1
   $ cat > dune-v1 <<EOF
   > (rule
   >   (targets t1)

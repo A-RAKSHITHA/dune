@@ -1,7 +1,5 @@
 Fetch from more than one source
 
-  $ . ./helpers.sh
-
   $ make_lockdir
   $ mkdir foo
   $ cat >foo/bar <<EOF
@@ -12,7 +10,7 @@ Fetch from more than one source
   > this is baz
   > EOF
 
-  $ cat >dune.lock/test.pkg <<EOF
+  $ make_lockpkg test <<EOF
   > (version 0.0.1)
   > (source (copy $PWD/foo))
   > (extra_sources (mybaz (copy $PWD/baz)))
@@ -30,7 +28,7 @@ when building.
 
 First we need a project that will have the patch applied:
 
-  $ mkdir needs-patch 
+  $ mkdir needs-patch
   $ cd needs-patch
   $ git init --quiet
   $ cat > dune-project <<EOF
@@ -109,9 +107,30 @@ Lock the dependency, it should generate an a lock dir that references both the
 url and the extra source.
 
   $ add_mock_repo_if_needed
-  $ dune pkg lock
+  $ dune_pkg_lock_normalized
   Solution for dune.lock:
   - needs-patch.0.0.1
+
+  $ dune_cmd subst 'md5=[0-9a-f]+' 'md5=$HASH'< "${default_lock_dir}/needs-patch.0.0.1.pkg"
+  (version 0.0.1)
+  
+  (build
+   (all_platforms
+    ((action
+      (progn
+       (patch required.patch)
+       (run dune build -p %{pkg-self:name} -j %{jobs}))))))
+  
+  (source
+   (fetch
+    (url http://localhost:1)
+    (checksum md5=$HASH)))
+  
+  (extra_sources
+   (required.patch
+    (fetch
+     (url http://localhost:2)
+     (checksum md5=$HASH))))
 
 Running the binary should download the tarball & patch, build them and show the
 correct, patched, message:
@@ -148,7 +167,7 @@ application order of them mattering:
 
 Lock the project to use that new package
 
-  $ dune pkg lock
+  $ dune_pkg_lock_normalized
   Solution for dune.lock:
   - needs-patch.0.0.2
 

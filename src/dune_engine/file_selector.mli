@@ -20,12 +20,10 @@ val equal : t -> t -> bool
 val hash : t -> int
 val compare : t -> t -> Ordering.t
 
-(** [to_dyn] is used as a marshallable representation of [t] (to compute
+(** [repr] is used as a marshallable representation of [t] (to compute
     digests), so it must be injective *)
+val repr : t Repr.t
+
 val to_dyn : t -> Dyn.t
-
-val test : t -> Path.t -> bool
-val test_basename : t -> basename:string -> bool
-
-(** Raises on non-serialisable globs, just like most other functions above. *)
-val digest_exn : t -> Digest.t
+val test_basename : t -> basename:Filename.t -> bool
+val digest : t -> Digest.t

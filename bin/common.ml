@@ -1,7 +1,7 @@
 open Stdune
 open Dune_config_file
-module Console = Dune_console
-module Graph = Dune_graph.Graph
+open Dune_scheduler
+module Console = Console
 module Profile = Dune_lang.Profile
 
 open struct
@@ -17,35 +17,77 @@ open struct
   module Only_packages = Only_packages
 end
 
+module Workspace = Source.Workspace
+
 open struct
   open Cmdliner
   module Cmd = Cmd
-  module Term = Term
+
+  module Term = struct
+    include Term
+
+    (* Evaluate a parser, passing it no command-line arguments, in an
+       environment with no variables set. It's only valid to pass a parser
+       which can be evaluated with no arguments, otherwise a code error will
+       be raised. Returns the result of the parser. This is intended to be
+       used to extract the default value for a type implied by the behaviour
+       of its parser when no command-line arguments are passed to it. *)
+    let eval_no_args_empty_env t =
+      let raise_code_error data =
+        Code_error.raise "Unexpected result evaluating term with no args" data
+      in
+      (* Cmdliner doesn't allow argv to be empty. *)
+      let argv = [| "dune" |] in
+      let env _ = None in
+      match Cmd.eval_value ~argv ~env (Cmd.v (Cmd.info "dune") t) with
+      | Ok (`Ok x) -> x
+      | Ok `Help -> raise_code_error [ "ok", Dyn.string "help" ]
+      | Ok `Version -> raise_code_error [ "ok", Dyn.string "version" ]
+      | Error e ->
+        let error_string =
+          match e with
+          | `Parse -> "parse"
+          | `Term -> "term"
+          | `Exn -> "exn"
+        in
+        raise_code_error [ "error", Dyn.string error_string ]
+    ;;
+  end
+
   module Manpage = Manpage
 end
 
+let default_build_dir = "_build"
+let trace_file_name = "trace.csexp"
+
+let find_default_trace_file () =
+  let trace_file = Filename.concat default_build_dir trace_file_name in
+  let cwd = Sys.getcwd () in
+  let rec loop dir =
+    let candidate = Filename.concat dir trace_file in
+    if Sys.file_exists candidate
+    then candidate
+    else (
+      let parent = Filename.dirname dir in
+      if parent = dir then Filename.concat cwd trace_file else loop parent)
+  in
+  loop cwd
+;;
+
 module Package = Dune_lang.Package
-
-module Let_syntax = struct
-  let ( let+ ) t f = Term.(const f $ t)
-  let ( and+ ) a b = Term.(const (fun x y -> x, y) $ a $ b)
-end
-
 open Let_syntax
 
 let copts_sect = "COMMON OPTIONS"
 
-let debug_backtraces =
+let debug_backtraces_term =
   Arg.(
     value
     & flag
     & info
         [ "debug-backtraces" ]
         ~docs:copts_sect
-        ~doc:"Always print exception backtraces.")
+        ~doc:(Some "Always print exception backtraces."))
 ;;
-
-let default_build_dir = "_build"
 
 let one_of term1 term2 =
   Term.ret
@@ -61,7 +103,9 @@ let one_of term1 term2 =
 let build_info =
   let+ build_info =
     Arg.(
-      value & flag & info [ "build-info" ] ~docs:"OPTIONS" ~doc:"Show build information.")
+      value
+      & flag
+      & info [ "build-info" ] ~docs:"OPTIONS" ~doc:(Some "Show build information."))
   in
   if build_info
   then (
@@ -89,6 +133,30 @@ let build_info =
     exit 0)
 ;;
 
+module No_build = struct
+  type t = { debug_backtraces : bool }
+
+  let equal t { debug_backtraces } = Bool.equal t.debug_backtraces debug_backtraces
+  let debug_backtraces = debug_backtraces_term
+
+  let set_debug_backtraces debug_backtraces =
+    Report_error.debug_backtraces debug_backtraces
+  ;;
+
+  let set { debug_backtraces } = set_debug_backtraces debug_backtraces
+
+  let term =
+    let+ () = build_info
+    and+ debug_backtraces = debug_backtraces in
+    { debug_backtraces }
+  ;;
+
+  let term_and_set =
+    let+ t = term in
+    set t
+  ;;
+end
+
 module Options_implied_by_dash_p = struct
   type t =
     { root : string option
@@ -100,7 +168,6 @@ module Options_implied_by_dash_p = struct
     ; always_show_command_line : bool
     ; promote_install_files : bool
     ; require_dune_project_file : bool
-    ; ignore_lock_dir : bool
     }
 
   let docs = copts_sect
@@ -121,14 +188,14 @@ module Options_implied_by_dash_p = struct
                  [ "config-file" ]
                  ~docs
                  ~docv:"FILE"
-                 ~doc:"Load this configuration file instead of the default one.")
+                 ~doc:(Some "Load this configuration file instead of the default one."))
          in
          Option.map fn ~f:(fun fn -> This (Arg.Path.path fn)))
         (let+ x =
            Arg.(
              value
              & flag
-             & info [ "no-config" ] ~docs ~doc:"Do not load the configuration file")
+             & info [ "no-config" ] ~docs ~doc:(Some "Do not load the configuration file"))
          in
          Option.some_if x No_config)
     in
@@ -165,6 +232,11 @@ module Options_implied_by_dash_p = struct
 
   let options =
     let+ root =
+      let doc =
+        "Use this directory as workspace root instead of guessing it. Note that this \
+         option doesn't change the interpretation of targets given on the command line. \
+         It is only intended for scripts."
+      in
       Arg.(
         value
         & opt (some dir) None
@@ -172,10 +244,8 @@ module Options_implied_by_dash_p = struct
             [ "root" ]
             ~docs
             ~docv:"DIR"
-            ~doc:
-              "Use this directory as workspace root instead of guessing it. Note that \
-               this option doesn't change the interpretation of targets given on the \
-               command line. It is only intended for scripts.")
+            ~doc:(Some doc)
+            ~env:(Cmd.Env.info ~doc "DUNE_ROOT"))
     and+ ignore_promoted_rules =
       Arg.(
         value
@@ -184,9 +254,10 @@ module Options_implied_by_dash_p = struct
             [ "ignore-promoted-rules" ]
             ~docs
             ~doc:
-              "Ignore rules with (mode promote), except ones with (only ...). The \
-               variable %{ignoring_promoted_rules} in dune files reflects whether this \
-               option was passed or not.")
+              (Some
+                 "Ignore rules with (mode promote), except ones with (only ...). The \
+                  variable %{ignoring_promoted_rules} in dune files reflects whether \
+                  this option was passed or not."))
     and+ config_from_config_file = config_term
     and+ default_target =
       Arg.(
@@ -197,26 +268,24 @@ module Options_implied_by_dash_p = struct
             ~docs
             ~docv:"TARGET"
             ~doc:
-              "Set the default target that is used when none is specified to $(b,dune \
-               build).")
+              (Some
+                 "Set the default target that is used when none is specified to $(b,dune \
+                  build)."))
     and+ always_show_command_line =
       let doc = "Always show the full command lines of programs executed by dune." in
-      Arg.(value & flag & info [ "always-show-command-line" ] ~docs ~doc)
+      Arg.(value & flag & info [ "always-show-command-line" ] ~docs ~doc:(Some doc))
     and+ promote_install_files =
       let doc = "Promote any generated <package>.install files to the source tree." in
       Arg.(
         last
         & opt_all ~vopt:true bool [ false ]
-        & info [ "promote-install-files" ] ~docs ~doc)
+        & info [ "promote-install-files" ] ~docs ~doc:(Some doc))
     and+ require_dune_project_file =
       let doc = "Fail if a dune-project file is missing." in
       Arg.(
         last
         & opt_all ~vopt:true bool [ false ]
-        & info [ "require-dune-project-file" ] ~docs ~doc)
-    and+ ignore_lock_dir =
-      let doc = "Ignore dune.lock/ directory." in
-      Arg.(value & flag & info [ "ignore-lock-dir" ] ~docs ~doc)
+        & info [ "require-dune-project-file" ] ~docs ~doc:(Some doc))
     in
     { root
     ; only_packages = No_restriction
@@ -227,7 +296,6 @@ module Options_implied_by_dash_p = struct
     ; always_show_command_line
     ; promote_install_files
     ; require_dune_project_file
-    ; ignore_lock_dir
     }
   ;;
 
@@ -254,12 +322,13 @@ module Options_implied_by_dash_p = struct
           ~docs
           ~docv:"PACKAGES"
           ~doc:
-            (sprintf
-               "Put $(b,dune) into a reproducible $(i,release) mode. Shorthand for \
-                $(b,%s). You should use this option for release builds. For instance, \
-                you must use this option in your $(i,<package>.opam) files. Except if \
-                you already use $(b,-p), as $(b,-p) implies this option."
-               (String.concat ~sep:" " shorthand_for)))
+            (Some
+               (sprintf
+                  "Put $(b,dune) into a reproducible $(i,release) mode. Shorthand for \
+                   $(b,%s). You should use this option for release builds. For instance, \
+                   you must use this option in your $(i,<package>.opam) files. Except if \
+                   you already use $(b,-p), as $(b,-p) implies this option."
+                  (String.concat ~sep:" " shorthand_for))))
   ;;
 
   let options =
@@ -275,12 +344,13 @@ module Options_implied_by_dash_p = struct
               ~docs
               ~docv:"PACKAGES"
               ~doc:
-                "Ignore stanzas referring to a package that is not in $(b,PACKAGES). \
-                 $(b,PACKAGES) is a comma-separated list of package names. Note that \
-                 this has the same effect as deleting the relevant stanzas from dune \
-                 files. It is mostly meant for releases. During development, it is \
-                 likely that what you want instead is to build a particular \
-                 $(b,<package>.install) target.")
+                (Some
+                   "Ignore stanzas referring to a package that is not in $(b,PACKAGES). \
+                    $(b,PACKAGES) is a comma-separated list of package names. Note that \
+                    this has the same effect as deleting the relevant stanzas from dune \
+                    files. It is mostly meant for releases. During development, it is \
+                    likely that what you want instead is to build a particular \
+                    $(b,<package>.install) target."))
       in
       match names with
       | None -> Only_packages.Clflags.No_restriction
@@ -290,19 +360,23 @@ module Options_implied_by_dash_p = struct
   ;;
 
   let dash_p =
+    let dash_p_implies = [ "--release"; "--pkg=disabled"; "--only-packages" ] in
     Term.with_used_args
       Arg.(
         value
-        & alias_opt (fun s -> [ "--release"; "--ignore-lock-dir"; "--only-packages"; s ])
+        & alias_opt (fun s -> dash_p_implies @ [ s ])
         & info
             [ "p"; "for-release-of-packages" ]
             ~docs
             ~docv:"PACKAGES"
             ~doc:
-              "Shorthand for $(b,--release --only-packages PACKAGE). You must use this \
-               option in your $(i,<package>.opam) files, in order to build only what's \
-               necessary when your project contains multiple packages as well as getting \
-               reproducible builds.")
+              (Some
+                 (sprintf
+                    "Shorthand for $(b,%s PACKAGE). You must use this option in your \
+                     $(i,<package>.opam) files, in order to build only what's necessary \
+                     when your project contains multiple packages as well as getting \
+                     reproducible builds."
+                    (String.concat ~sep:" " dash_p_implies))))
   ;;
 
   let term =
@@ -318,10 +392,11 @@ module Options_implied_by_dash_p = struct
             ~docs
             ~env:(Cmd.Env.info ~doc "DUNE_PROFILE")
             ~doc:
-              (Printf.sprintf
-                 "Select the build profile, for instance $(b,dev) or $(b,release). The \
-                  default is $(b,%s)."
-                 (Profile.to_string Profile.default)))
+              (Some
+                 (Printf.sprintf
+                    "Select the build profile, for instance $(b,dev) or $(b,release). \
+                     The default is $(b,%s)."
+                    (Profile.to_string Profile.default))))
     in
     match profile with
     | None -> t
@@ -336,7 +411,10 @@ let display_term =
        Arg.(
          value
          & flag
-         & info [ "verbose" ] ~docs:copts_sect ~doc:"Same as $(b,--display verbose)")
+         & info
+             [ "verbose" ]
+             ~docs:copts_sect
+             ~doc:(Some "Same as $(b,--display verbose)"))
      in
      Option.some_if verbose Dune_config.Display.verbose)
     Arg.(
@@ -349,10 +427,10 @@ let display_term =
       in
       value
       & opt (some (enum Display.all)) None
-      & info [ "display" ] ~docs:copts_sect ~docv:"MODE" ~doc)
+      & info [ "display" ] ~docs:copts_sect ~docv:"MODE" ~doc:(Some doc))
 ;;
 
-let shared_with_config_file =
+let shared_with_config_file ~allow_pkg_flag =
   let docs = copts_sect in
   let+ concurrency =
     let module Concurrency = Dune_config.Concurrency in
@@ -361,6 +439,10 @@ let shared_with_config_file =
         ( (fun s -> Result.map_error (Concurrency.of_string s) ~f:(fun s -> `Msg s))
         , fun pp x -> Format.pp_print_string pp (Concurrency.to_string x) )
     in
+    let doc =
+      "Run no more than $(i,JOBS) commands simultaneously. $(i,JOBS) must be a positive \
+       integer or $(b,auto) to auto-detect the number of cores (the default)."
+    in
     Arg.(
       value
       & opt (some arg) None
@@ -368,11 +450,11 @@ let shared_with_config_file =
           [ "j" ]
           ~docs
           ~docv:"JOBS"
-          ~doc:"Run no more than $(i,JOBS) commands simultaneously.")
+          ~env:(Cmd.Env.info ~doc "DUNE_JOBS")
+          ~doc:(Some doc))
   and+ sandboxing_preference =
     let all =
-      List.map Dune_engine.Sandbox_mode.all_except_patch_back_source_tree ~f:(fun s ->
-        Dune_engine.Sandbox_mode.to_string s, s)
+      List.map Sandbox_mode.cli_options ~f:(fun s -> Sandbox_mode.to_string s, s)
     in
     Arg.(
       value
@@ -384,16 +466,17 @@ let shared_with_config_file =
                ~doc:"Sandboxing mode to use by default. (see --sandbox)"
                "DUNE_SANDBOX")
           ~doc:
-            (Printf.sprintf
-               "Set sandboxing mode. Some actions require a certain sandboxing mode, so \
-                they will ignore this setting. The allowed values are: %s."
-               (String.concat
-                  ~sep:", "
-                  (List.map
-                     Dune_engine.Sandbox_mode.all_except_patch_back_source_tree
-                     ~f:Dune_engine.Sandbox_mode.to_string))))
+            (Some
+               (Printf.sprintf
+                  "Set sandboxing mode. Some actions require a certain sandboxing mode, \
+                   so they will ignore this setting. The allowed values are: %s."
+                  (String.concat
+                     ~sep:", "
+                     (List.map
+                        Sandbox_mode.all_except_patch_back_source_tree
+                        ~f:Sandbox_mode.to_string)))))
   and+ terminal_persistence =
-    let modes = Dune_config.Terminal_persistence.all in
+    let modes = Terminal_persistence.all in
     let doc =
       let f s = fst s |> Printf.sprintf "$(b,%s)" in
       Printf.sprintf
@@ -404,7 +487,7 @@ let shared_with_config_file =
     Arg.(
       value
       & opt (some (enum modes)) None
-      & info [ "terminal-persistence" ] ~docs ~docv:"MODE" ~doc)
+      & info [ "terminal-persistence" ] ~docs ~docv:"MODE" ~doc:(Some doc))
   and+ display = display_term
   and+ cache_enabled =
     let doc =
@@ -416,7 +499,7 @@ let shared_with_config_file =
     Arg.(
       value
       & opt (some (enum Dune_config.Cache.Toggle.all)) None
-      & info [ "cache" ] ~docs ~env:(Cmd.Env.info ~doc "DUNE_CACHE") ~doc)
+      & info [ "cache" ] ~docs ~env:(Cmd.Env.info ~doc "DUNE_CACHE") ~doc:(Some doc))
   and+ cache_storage_mode =
     let doc =
       Printf.sprintf
@@ -431,7 +514,7 @@ let shared_with_config_file =
           [ "cache-storage-mode" ]
           ~docs
           ~env:(Cmd.Env.info ~doc "DUNE_CACHE_STORAGE_MODE")
-          ~doc)
+          ~doc:(Some doc))
   and+ cache_check_probability =
     let doc =
       Printf.sprintf
@@ -447,32 +530,48 @@ let shared_with_config_file =
           [ "cache-check-probability" ]
           ~docs
           ~env:(Cmd.Env.info ~doc "DUNE_CACHE_CHECK_PROBABILITY")
-          ~doc)
+          ~doc:(Some doc))
   and+ action_stdout_on_success =
     Arg.(
       value
-      & opt (some (enum Dune_config.Action_output_on_success.all)) None
+      & opt (some (enum Action_types.Action_output_on_success.all)) None
       & info
           [ "action-stdout-on-success" ]
           ~doc:
-            "Specify how to deal with the standard output of actions when they succeed. \
-             Possible values are: $(b,print) to just print it to Dune's output, \
-             $(b,swallow) to completely ignore it and $(b,must-be-empty) to enforce that \
-             the action printed nothing. With $(b,must-be-empty), Dune will consider \
-             that the action failed if it printed something to its standard output. The \
-             default is $(b,print).")
+            (Some
+               "Specify how to deal with the standard output of actions when they \
+                succeed. Possible values are: $(b,print) to just print it to Dune's \
+                output, $(b,swallow) to completely ignore it and $(b,must-be-empty) to \
+                enforce that the action printed nothing. With $(b,must-be-empty), Dune \
+                will consider that the action failed if it printed something to its \
+                standard output. The default is $(b,print)."))
   and+ action_stderr_on_success =
     Arg.(
       value
-      & opt (some (enum Dune_config.Action_output_on_success.all)) None
+      & opt (some (enum Action_types.Action_output_on_success.all)) None
       & info
           [ "action-stderr-on-success" ]
           ~doc:
-            "Same as $(b,--action-stdout-on-success) but for standard error instead of \
-             standard output. A good default for large mono-repositories is \
-             $(b,--action-stdout-on-success=swallow \
-             --action-stderr-on-success=must-be-empty). This ensures that a successful \
-             build has a \"clean\" empty output.")
+            (Some
+               "Same as $(b,--action-stdout-on-success) but for standard error instead \
+                of standard output. A good default for large mono-repositories is \
+                $(b,--action-stdout-on-success=swallow \
+                --action-stderr-on-success=must-be-empty). This ensures that a \
+                successful build has a \"clean\" empty output."))
+  and+ pkg_enabled =
+    if allow_pkg_flag
+    then
+      Arg.(
+        value
+        & opt (some (enum Dune_config.Pkg_enabled.(all Cli))) None
+        & info
+            [ "pkg" ]
+            ~docs
+            ~doc:
+              (Some
+                 "Enable or disable package management. The default behaviour depends on \
+                  whether a lock directory exists."))
+    else Term.const None
   in
   { Dune_config.Partial.display
   ; concurrency
@@ -487,113 +586,45 @@ let shared_with_config_file =
   ; action_stdout_on_success
   ; action_stderr_on_success
   ; project_defaults = None
+  ; pkg_enabled
   ; experimental = None
   }
 ;;
 
-module Cache_debug_flags = Dune_engine.Cache_debug_flags
-
-let cache_debug_flags_term : Cache_debug_flags.t Term.t =
-  let initial =
-    { Cache_debug_flags.shared_cache = false
-    ; workspace_local_cache = false
-    ; fs_cache = false
-    }
-  in
-  let all_layers =
-    [ ("shared", fun r -> { r with Cache_debug_flags.shared_cache = true })
-    ; ( "workspace-local"
-      , fun r -> { r with Cache_debug_flags.workspace_local_cache = true } )
-    ; ("fs", fun r -> { r with Cache_debug_flags.fs_cache = true })
-    ]
-  in
-  let no_layers = [], Fun.id in
-  let combine_layers =
-    List.fold_right ~init:no_layers ~f:(fun (names, value) (acc_names, acc_value) ->
-      names @ acc_names, fun x -> acc_value (value x))
-  in
-  let all_layer_names = String.concat ~sep:"," (List.map ~f:fst all_layers) in
-  let layers_conv =
-    let parser s =
-      let parse_one s =
-        match
-          List.find_map all_layers ~f:(fun (name, value) ->
-            match String.equal name s with
-            | true -> Some ([ name ], value)
-            | false -> None)
-        with
-        | None -> ksprintf (fun s -> Error (`Msg s)) "Invalid cache layer name: %S" s
-        | Some x -> Ok x
-      in
-      String.split s ~on:','
-      |> List.map ~f:parse_one
-      |> Result.List.all
-      |> Result.map ~f:combine_layers
-    in
-    let printer ppf (names, _value) =
-      Format.pp_print_string ppf (String.concat ~sep:"," names)
-    in
-    Arg.conv ~docv:"CACHE-LAYERS" (parser, printer)
-  in
-  let+ _names, value =
-    Arg.(
-      value
-      & opt layers_conv no_layers
-      & info
-          [ "debug-cache" ]
-          ~docs:copts_sect
-          ~doc:
-            (sprintf
-               "Show debug messages on cache misses for the given cache layers. Value is \
-                a comma-separated list of cache layer names. All available cache layers: \
-                %s."
-               all_layer_names))
-  in
-  value initial
-;;
-
 module Builder = struct
   type t =
-    { debug_dep_path : bool
-    ; debug_backtraces : bool
-    ; debug_artifact_substitution : bool
-    ; debug_load_dir : bool
-    ; debug_digests : bool
+    { no_build : No_build.t
+    ; debug_dep_path : bool
     ; debug_package_logs : bool
     ; wait_for_filesystem_clock : bool
     ; only_packages : Only_packages.Clflags.t
     ; capture_outputs : bool
     ; diff_command : string option
-    ; promote : Dune_engine.Clflags.Promote.t option
+    ; promote : Clflags.Promote.t option
     ; ignore_promoted_rules : bool
     ; force : bool
     ; no_print_directory : bool
-    ; ignore_lock_dir : bool
     ; store_orig_src_dir : bool
     ; default_target : Arg.Dep.t (* For build & runtest only *)
     ; watch : Dune_rpc_impl.Watch_mode_config.t
-    ; print_metrics : bool
-    ; dump_memo_graph_file : Path.External.t option
-    ; dump_memo_graph_format : Graph.File_format.t
-    ; dump_memo_graph_with_timing : bool
     ; dump_gc_stats : Path.External.t option
     ; always_show_command_line : bool
     ; promote_install_files : bool
-    ; file_watcher : Dune_engine.Scheduler.Run.file_watcher
-    ; workspace_config : Dune_rules.Workspace.Clflags.t
-    ; cache_debug_flags : Dune_engine.Cache_debug_flags.t
-    ; report_errors_config : Dune_engine.Report_errors_config.t
+    ; file_watcher : Scheduler.Run.file_watcher
+    ; workspace_config : Workspace.Clflags.t
+    ; report_errors_config : Report_errors_config.t
     ; separate_error_messages : bool
     ; stop_on_first_error : bool
     ; require_dune_project_file : bool
     ; watch_exclusions : string list
     ; build_dir : string
     ; root : string option
-    ; stats_trace_file : string option
-    ; stats_trace_extended : bool
+    ; trace_file : [ `Default | `User_specified of string ] option
     ; allow_builds : bool
     ; default_root_is_cwd : bool
-    ; log_file : Dune_util.Log.File.t
+    ; target_exec : string option
+    ; action_runner : bool
+    ; sandbox_actions : bool
     }
 
   let root t = t.root
@@ -601,8 +632,7 @@ module Builder = struct
   let forbid_builds t = { t with allow_builds = false; no_print_directory = true }
   let default_root_is_cwd t = t.default_root_is_cwd
   let set_default_root_is_cwd t x = { t with default_root_is_cwd = x }
-  let set_log_file t x = { t with log_file = x }
-  let disable_log_file t = { t with log_file = No_log_file }
+  let disable_log_file t = { t with trace_file = None }
   let set_promote t v = { t with promote = Some v }
   let default_target t = t.default_target
 
@@ -621,9 +651,10 @@ module Builder = struct
     Buffer.contents b
   ;;
 
-  let term =
+  let make_term ~(trace : bool) ~allow_pkg_flag =
     let docs = copts_sect in
-    let+ config_from_command_line = shared_with_config_file
+    let+ no_build = No_build.term
+    and+ config_from_command_line = shared_with_config_file ~allow_pkg_flag
     and+ debug_dep_path =
       Arg.(
         value
@@ -632,33 +663,9 @@ module Builder = struct
             [ "debug-dependency-path" ]
             ~docs
             ~doc:
-              "In case of error, print the dependency path from the targets on the \
-               command line to the rule that failed.")
-    and+ debug_backtraces = debug_backtraces
-    and+ debug_artifact_substitution =
-      Arg.(
-        value
-        & flag
-        & info
-            [ "debug-artifact-substitution" ]
-            ~docs
-            ~doc:"Print debugging info about artifact substitution")
-    and+ debug_load_dir =
-      Arg.(
-        value
-        & flag
-        & info
-            [ "debug-load-dir" ]
-            ~docs
-            ~doc:"Print debugging info about directory loading")
-    and+ debug_digests =
-      Arg.(
-        value
-        & flag
-        & info
-            [ "debug-digests" ]
-            ~docs
-            ~doc:"Explain why Dune decides to re-digest some files")
+              (Some
+                 "In case of error, print the dependency path from the targets on the \
+                  command line to the rule that failed."))
     and+ debug_package_logs =
       let doc = "Always print the standard logs when building packages" in
       Arg.(
@@ -667,7 +674,7 @@ module Builder = struct
         & info
             [ "debug-package-logs" ]
             ~docs
-            ~doc
+            ~doc:(Some doc)
             ~env:(Cmd.Env.info ~doc "DUNE_DEBUG_PACKAGE_LOGS"))
     and+ no_buffer =
       let doc =
@@ -680,7 +687,7 @@ module Builder = struct
          interleaving. Additionally you should use $(b,--verbose) as well, to make sure \
          that commands are printed before they are being executed."
       in
-      Arg.(value & flag & info [ "no-buffer" ] ~docs ~docv:"DIR" ~doc)
+      Arg.(value & flag & info [ "no-buffer" ] ~docs ~docv:"DIR" ~doc:(Some doc))
     and+ workspace_file =
       let doc = "Use this specific workspace file instead of looking it up." in
       Arg.(
@@ -690,7 +697,7 @@ module Builder = struct
             [ "workspace" ]
             ~docs
             ~docv:"FILE"
-            ~doc
+            ~doc:(Some doc)
             ~env:(Cmd.Env.info ~doc "DUNE_WORKSPACE"))
     and+ promote =
       one_of
@@ -702,16 +709,17 @@ module Builder = struct
                  [ "auto-promote" ]
                  ~docs
                  ~doc:
-                   "Automatically promote files. This is similar to running $(b,dune \
-                    promote) after the build.")
+                   (Some
+                      "Automatically promote files. This is similar to running $(b,dune \
+                       promote) after the build."))
          in
-         Option.some_if auto Dune_engine.Clflags.Promote.Automatically)
+         Option.some_if auto Clflags.Promote.Automatically)
         (let+ disable =
            let doc = "Disable all promotion rules" in
            let env = Cmd.Env.info ~doc "DUNE_DISABLE_PROMOTION" in
-           Arg.(value & flag & info [ "disable-promotion" ] ~docs ~env ~doc)
+           Arg.(value & flag & info [ "disable-promotion" ] ~docs ~env ~doc:(Some doc))
          in
-         Option.some_if disable Dune_engine.Clflags.Promote.Never)
+         Option.some_if disable Clflags.Promote.Never)
     and+ force =
       Arg.(
         value
@@ -719,8 +727,9 @@ module Builder = struct
         & info
             [ "force"; "f" ]
             ~doc:
-              "Force actions associated to aliases to be re-executed even if their \
-               dependencies haven't changed.")
+              (Some
+                 "Force actions associated to aliases to be re-executed even if their \
+                  dependencies haven't changed."))
     and+ watch =
       let+ res =
         one_of
@@ -731,8 +740,9 @@ module Builder = struct
                & info
                    [ "watch"; "w" ]
                    ~doc:
-                     "Instead of terminating build after completion, wait continuously \
-                      for file changes.")
+                     (Some
+                        "Instead of terminating build after completion, wait \
+                         continuously for file changes."))
            in
            if watch then Some Dune_rpc_impl.Watch_mode_config.Eager else None)
           (let+ watch =
@@ -742,52 +752,15 @@ module Builder = struct
                & info
                    [ "passive-watch-mode" ]
                    ~doc:
-                     "Similar to [--watch], but only start a build when instructed \
-                      externally by an RPC.")
+                     (Some
+                        "Similar to [--watch], but only start a build when instructed \
+                         externally by an RPC."))
            in
            if watch then Some Dune_rpc_impl.Watch_mode_config.Passive else None)
       in
       match res with
       | None -> Dune_rpc_impl.Watch_mode_config.No
       | Some mode -> Yes mode
-    and+ print_metrics =
-      Arg.(
-        value
-        & flag
-        & info
-            [ "print-metrics" ]
-            ~docs
-            ~doc:"Print out various performance metrics after every build.")
-    and+ dump_memo_graph_file =
-      Arg.(
-        value
-        & opt (some string) None
-        & info
-            [ "dump-memo-graph" ]
-            ~docs
-            ~docv:"FILE"
-            ~doc:"Dump the dependency graph to a file after the build is complete.")
-    and+ dump_memo_graph_format =
-      Arg.(
-        value
-        & opt graph_format Gexf
-        & info
-            [ "dump-memo-graph-format" ]
-            ~docs
-            ~docv:"FORMAT"
-            ~doc:"Set the file format used by $(b,--dump-memo-graph)")
-    and+ dump_memo_graph_with_timing =
-      Arg.(
-        value
-        & flag
-        & info
-            [ "dump-memo-graph-with-timing" ]
-            ~docs
-            ~doc:
-              "Re-run each cached node in the Memo graph after building and include the \
-               run duration in the output of $(b,--dump-memo-graph). Since all nodes \
-               contain a cached value, each measurement will only account for a single \
-               node.")
     and+ dump_gc_stats =
       Arg.(
         value
@@ -796,7 +769,9 @@ module Builder = struct
             [ "dump-gc-stats" ]
             ~docs
             ~docv:"FILE"
-            ~doc:"Dump the garbage collector stats to a file after the build is complete.")
+            ~doc:
+              (Some
+                 "Dump the garbage collector stats to a file after the build is complete."))
     and+ { Options_implied_by_dash_p.root
          ; only_packages
          ; ignore_promoted_rules
@@ -806,15 +781,29 @@ module Builder = struct
          ; always_show_command_line
          ; promote_install_files
          ; require_dune_project_file
-         ; ignore_lock_dir
          }
       =
       Options_implied_by_dash_p.term
     and+ x =
+      let doc = "Cross-compile using this toolchain." in
       Arg.(
         value
         & opt (some Arg.context_name) None
-        & info [ "x" ] ~docs ~doc:"Cross-compile using this toolchain.")
+        & info [ "x" ] ~docs ~doc:(Some doc) ~env:(Cmd.Env.info ~doc "DUNE_CROSS_TARGET"))
+    and+ target_exec =
+      let doc =
+        "Wrapper command for running target binaries when cross-compiling. Format: \
+         TOOLCHAIN=CMD (e.g., 'windows=wine')."
+      in
+      Arg.(
+        value
+        & opt (some string) None
+        & info
+            [ "target-exec" ]
+            ~docs
+            ~docv:"TOOLCHAIN=CMD"
+            ~doc:(Some doc)
+            ~env:(Cmd.Env.info ~doc "DUNE_TARGET_EXEC"))
     and+ build_dir =
       let doc = "Specified build directory. _build if unspecified" in
       Arg.(
@@ -825,7 +814,7 @@ module Builder = struct
             ~docs
             ~docv:"FILE"
             ~env:(Cmd.Env.info ~doc "DUNE_BUILD_DIR")
-            ~doc)
+            ~doc:(Some doc))
     and+ diff_command =
       let doc =
         "Shell command to use to diff files. Use - to disable printing the diff."
@@ -833,8 +822,12 @@ module Builder = struct
       Arg.(
         value
         & opt (some string) None
-        & info [ "diff-command" ] ~docs ~env:(Cmd.Env.info ~doc "DUNE_DIFF_COMMAND") ~doc)
-    and+ stats_trace_file =
+        & info
+            [ "diff-command" ]
+            ~docs
+            ~env:(Cmd.Env.info ~doc "DUNE_DIFF_COMMAND")
+            ~doc:(Some doc))
+    and+ trace_file =
       Arg.(
         value
         & opt (some string) None
@@ -843,15 +836,9 @@ module Builder = struct
             ~docs
             ~docv:"FILE"
             ~doc:
-              "Output trace data in catapult format (compatible with chrome://tracing).")
-    and+ stats_trace_extended =
-      Arg.(
-        value
-        & flag
-        & info
-            [ "trace-extended" ]
-            ~docs
-            ~doc:"Output extended trace data (requires trace-file).")
+              (Some
+                 "Output trace data in catapult format (compatible with \
+                  chrome://tracing)."))
     and+ no_print_directory =
       Arg.(
         value
@@ -859,7 +846,7 @@ module Builder = struct
         & info
             [ "no-print-directory" ]
             ~docs
-            ~doc:"Suppress \"Entering directory\" messages.")
+            ~doc:(Some "Suppress \"Entering directory\" messages."))
     and+ store_orig_src_dir =
       let doc = "Store original source location in dune-package metadata." in
       Arg.(
@@ -869,8 +856,7 @@ module Builder = struct
             [ "store-orig-source-dir" ]
             ~docs
             ~env:(Cmd.Env.info ~doc "DUNE_STORE_ORIG_SOURCE_DIR")
-            ~doc)
-    and+ () = build_info
+            ~doc:(Some doc))
     and+ instrument_with =
       let doc =
         "Enable instrumentation by $(b,BACKENDS). $(b,BACKENDS) is a comma-separated \
@@ -885,7 +871,7 @@ module Builder = struct
             ~docs
             ~env:(Cmd.Env.info ~doc "DUNE_INSTRUMENT_WITH")
             ~docv:"BACKENDS"
-            ~doc)
+            ~doc:(Some doc))
     and+ file_watcher =
       let doc =
         "Mechanism to detect changes in the source. Automatic to make dune run an \
@@ -895,10 +881,9 @@ module Builder = struct
       Arg.(
         value
         & opt
-            (enum
-               [ "automatic", Dune_engine.Scheduler.Run.Automatic; "manual", No_watcher ])
+            (enum [ "automatic", Scheduler.Run.Automatic; "manual", No_watcher ])
             Automatic
-        & info [ "file-watcher" ] ~doc)
+        & info [ "file-watcher" ] ~doc:(Some doc))
     and+ watch_exclusions =
       let std_exclusions = Dune_config.standard_watch_exclusions in
       let doc =
@@ -915,7 +900,7 @@ module Builder = struct
         Arg.(
           value
           & opt_all (list ~sep:';' string) [ std_exclusions ]
-          & info [ "watch-exclusions" ] ~docs ~docv:"REGEX" ~doc)
+          & info [ "watch-exclusions" ] ~docs ~docv:"REGEX" ~doc:(Some doc))
       in
       Term.(const List.flatten $ arg)
     and+ wait_for_filesystem_clock =
@@ -925,54 +910,69 @@ module Builder = struct
         & info
             [ "wait-for-filesystem-clock" ]
             ~doc:
-              "Dune digest file contents for better incrementally. These digests are \
-               themselves cached. In some cases, Dune needs to drop some digest cache \
-               entries in order for things to be reliable. This option makes Dune wait \
-               for the file system clock to advance so that it doesn't need to drop \
-               anything. You should probably not care about this option; it is mostly \
-               useful for Dune developers to make Dune tests of the digest cache more \
-               reproducible.")
-    and+ cache_debug_flags = cache_debug_flags_term
+              (Some
+                 "Dune digest file contents for better incrementally. These digests are \
+                  themselves cached. In some cases, Dune needs to drop some digest cache \
+                  entries in order for things to be reliable. This option makes Dune \
+                  wait for the file system clock to advance so that it doesn't need to \
+                  drop anything. You should probably not care about this option; it is \
+                  mostly useful for Dune developers to make Dune tests of the digest \
+                  cache more reproducible."))
     and+ report_errors_config =
       Arg.(
         value
         & opt
             (enum
-               [ "early", Dune_engine.Report_errors_config.Early
+               [ "early", Report_errors_config.Early
                ; "deterministic", Deterministic
                ; "twice", Twice
                ])
-            Dune_engine.Report_errors_config.default
+            Report_errors_config.default
         & info
             [ "error-reporting" ]
             ~doc:
-              "Controls when the build errors are reported. $(b,early) reports errors as \
-               soon as they are discovered. $(b,deterministic) reports errors at the end \
-               of the build in a deterministic order. $(b,twice) reports each error \
-               twice: once as soon as the error is discovered and then again at the end \
-               of the build, in a deterministic order.")
+              (Some
+                 "Controls when the build errors are reported. $(b,early) reports errors \
+                  as soon as they are discovered. $(b,deterministic) reports errors at \
+                  the end of the build in a deterministic order. $(b,twice) reports each \
+                  error twice: once as soon as the error is discovered and then again at \
+                  the end of the build, in a deterministic order."))
     and+ separate_error_messages =
       Arg.(
         value
         & flag
         & info
             [ "display-separate-messages" ]
-            ~doc:"Separate error messages with a blank line.")
+            ~doc:(Some "Separate error messages with a blank line."))
     and+ stop_on_first_error =
       Arg.(
         value
         & flag
         & info
             [ "stop-on-first-error" ]
-            ~doc:"Stop the build as soon as an error is encountered.")
+            ~doc:(Some "Stop the build as soon as an error is encountered."))
+    and+ sandbox_actions =
+      Arg.(
+        value
+        & flag
+        & info
+            [ "sandbox-actions" ]
+            ~docs
+            ~doc:
+              (Some
+                 "Run spawned build processes in an external dune action runner wrapped \
+                  with bubblewrap on Linux or sandbox-exec on macOS."))
+    and+ action_runner =
+      Arg.(
+        value
+        & flag
+        & info
+            [ "action-runner" ]
+            ~docs
+            ~doc:(Some "Run spawned build processes in an external dune action runner."))
     in
-    if Option.is_none stats_trace_file && stats_trace_extended
-    then User_error.raise [ Pp.text "--trace-extended can only be used with --trace" ];
-    { debug_dep_path
-    ; debug_backtraces
-    ; debug_artifact_substitution
-    ; debug_load_dir
-    ; debug_digests
+    { no_build
+    ; debug_dep_path
     ; debug_package_logs
     ; wait_for_filesystem_clock
     ; only_packages
@@ -982,17 +982,9 @@ module Builder = struct
     ; ignore_promoted_rules
     ; force
     ; no_print_directory
-    ; ignore_lock_dir
     ; store_orig_src_dir
     ; default_target
     ; watch
-    ; print_metrics
-    ; dump_memo_graph_file =
-        Option.map
-          dump_memo_graph_file
-          ~f:Path.External.of_filename_relative_to_initial_cwd
-    ; dump_memo_graph_format
-    ; dump_memo_graph_with_timing
     ; dump_gc_stats =
         Option.map dump_gc_stats ~f:Path.External.of_filename_relative_to_initial_cwd
     ; always_show_command_line
@@ -1008,7 +1000,6 @@ module Builder = struct
         ; config_from_command_line
         ; config_from_config_file
         }
-    ; cache_debug_flags
     ; report_errors_config
     ; separate_error_messages
     ; stop_on_first_error
@@ -1016,32 +1007,115 @@ module Builder = struct
     ; watch_exclusions
     ; build_dir = Option.value ~default:default_build_dir build_dir
     ; root
-    ; stats_trace_file
-    ; stats_trace_extended
+    ; trace_file =
+        (match trace_file with
+         | Some s -> Some (`User_specified s)
+         | None -> if trace then Some `Default else None)
     ; allow_builds = true
     ; default_root_is_cwd = false
-    ; log_file = Default
+    ; target_exec
+    ; action_runner
+    ; sandbox_actions
     }
+  ;;
+
+  let term_no_trace_no_pkg = make_term ~trace:false ~allow_pkg_flag:false
+  let term = make_term ~trace:true ~allow_pkg_flag:true
+  let default = Term.eval_no_args_empty_env term
+
+  let equal
+        t
+        { no_build
+        ; debug_dep_path
+        ; debug_package_logs
+        ; wait_for_filesystem_clock
+        ; only_packages
+        ; capture_outputs
+        ; diff_command
+        ; promote
+        ; ignore_promoted_rules
+        ; force
+        ; no_print_directory
+        ; store_orig_src_dir
+        ; default_target
+        ; watch
+        ; dump_gc_stats
+        ; always_show_command_line
+        ; promote_install_files
+        ; file_watcher
+        ; workspace_config
+        ; report_errors_config
+        ; separate_error_messages
+        ; stop_on_first_error
+        ; require_dune_project_file
+        ; watch_exclusions
+        ; build_dir
+        ; root
+        ; trace_file
+        ; allow_builds
+        ; default_root_is_cwd
+        ; target_exec
+        ; action_runner
+        ; sandbox_actions
+        }
+    =
+    No_build.equal t.no_build no_build
+    && Bool.equal t.debug_dep_path debug_dep_path
+    && Bool.equal t.debug_package_logs debug_package_logs
+    && Bool.equal t.wait_for_filesystem_clock wait_for_filesystem_clock
+    && Only_packages.Clflags.equal t.only_packages only_packages
+    && Bool.equal t.capture_outputs capture_outputs
+    && Option.equal String.equal t.diff_command diff_command
+    && Option.equal Clflags.Promote.equal t.promote promote
+    && Bool.equal t.ignore_promoted_rules ignore_promoted_rules
+    && Bool.equal t.force force
+    && Bool.equal t.no_print_directory no_print_directory
+    && Bool.equal t.store_orig_src_dir store_orig_src_dir
+    && Arg.Dep.equal t.default_target default_target
+    && Dune_rpc_impl.Watch_mode_config.equal t.watch watch
+    && Option.equal Path.External.equal t.dump_gc_stats dump_gc_stats
+    && Bool.equal t.always_show_command_line always_show_command_line
+    && Bool.equal t.promote_install_files promote_install_files
+    && Scheduler.Run.file_watcher_equal t.file_watcher file_watcher
+    && Source.Workspace.Clflags.equal t.workspace_config workspace_config
+    && Report_errors_config.equal t.report_errors_config report_errors_config
+    && Bool.equal t.separate_error_messages separate_error_messages
+    && Bool.equal t.stop_on_first_error stop_on_first_error
+    && Bool.equal t.require_dune_project_file require_dune_project_file
+    && List.equal String.equal t.watch_exclusions watch_exclusions
+    && String.equal t.build_dir build_dir
+    && Option.equal String.equal t.root root
+    && Option.equal
+         (fun a b ->
+            match a, b with
+            | `Default, `Default -> true
+            | `User_specified a, `User_specified b -> String.equal a b
+            | _ -> false)
+         t.trace_file
+         trace_file
+    && Bool.equal t.allow_builds allow_builds
+    && Bool.equal t.default_root_is_cwd default_root_is_cwd
+    && Option.equal String.equal t.target_exec target_exec
+    && Bool.equal t.action_runner action_runner
+    && Bool.equal t.sandbox_actions sandbox_actions
   ;;
 end
 
 type t =
   { builder : Builder.t
   ; root : Workspace_root.t
-  ; rpc :
-      [ `Allow of Dune_lang.Dep_conf.t Dune_rpc_impl.Server.t Lazy.t | `Forbid_builds ]
-  ; stats : Dune_stats.t option
+  ; build_loop : Dune_engine.Build_loop.t
+  ; rpc : [ `Allow of Dune_rpc_impl.Server.t Lazy.t | `Forbid_builds ]
+  ; action_runner : Dune_engine.Action_runner.t option Lazy.t
   }
 
 let capture_outputs t = t.builder.capture_outputs
 let root t = t.root
+let build_loop t = t.build_loop
 let watch t = t.builder.watch
 let x t = t.builder.workspace_config.x
-let print_metrics t = t.builder.print_metrics
-let dump_memo_graph_file t = t.builder.dump_memo_graph_file
-let dump_memo_graph_format t = t.builder.dump_memo_graph_format
-let dump_memo_graph_with_timing t = t.builder.dump_memo_graph_with_timing
 let file_watcher t = t.builder.file_watcher
+let sandbox_actions t = t.builder.sandbox_actions
 let prefix_target t s = t.root.reach_from_root_prefix ^ s
 
 let rpc t =
@@ -1051,7 +1125,6 @@ let rpc t =
 ;;
 
 let watch_exclusions t = t.builder.watch_exclusions
-let stats t = t.stats
 
 (* To avoid needless recompilations under Windows, where the case of
    [Sys.getcwd] can vary between different invocations of [dune], normalize to
@@ -1072,6 +1145,17 @@ let normalize_path path =
       Path.External.of_string (Bytes.unsafe_to_string dst))
     else path)
   else path
+;;
+
+let source_path t path =
+  if Filename.is_relative path
+  then Path.Source.of_string (prefix_target t path)
+  else (
+    let root = Path.External.cwd () |> normalize_path |> Path.external_ in
+    match Path.drop_prefix ~prefix:root (Path.of_string path) with
+    | Some path -> Path.Source.of_local path
+    | None ->
+      User_error.raise [ Pp.text "Path is not a descendant of the workspace root." ])
 ;;
 
 let print_entering_message c =
@@ -1111,64 +1195,39 @@ let print_entering_message c =
               in
               loop ".." (Filename.dirname s)))
     in
-    Console.print [ Pp.verbatim (sprintf "Entering directory '%s'" dir) ];
-    at_exit (fun () ->
-      flush stdout;
-      Console.print [ Pp.verbatim (sprintf "Leaving directory '%s'" dir) ]))
+    Console.set_directory dir)
+;;
+
+let action_builder_of_rpc_request request =
+  let open Dune_engine.Action_builder.O in
+  Dune_engine.Action_builder.of_memo (Memo.of_thunk Util.setup) >>= request
+;;
+
+let rpc_request_action
+      ~(root : Workspace_root.t)
+      (kind : Dune_rpc_impl.Server.build_request)
+  =
+  action_builder_of_rpc_request (fun setup ->
+    match kind with
+    | Build targets ->
+      let root = { root with to_cwd = []; reach_from_root_prefix = "" } in
+      Target.interpret_targets root setup targets
+    | Runtest test_paths ->
+      Runtest_common.make_request ~scontexts:setup.scontexts ~to_cwd:[] ~test_paths)
 ;;
 
 (* CR-someday rleshchinskiy: The split between `build` and `init` seems quite arbitrary,
    we should probably refactor that at some point. *)
-let build (builder : Builder.t) =
-  let root =
-    Workspace_root.create_exn
-      ~default_is_cwd:builder.default_root_is_cwd
-      ~specified_by_user:builder.root
-  in
-  let stats =
-    Option.map builder.stats_trace_file ~f:(fun f ->
-      let stats =
-        Dune_stats.create
-          ~extended_build_job_info:builder.stats_trace_extended
-          (Out (open_out f))
-      in
-      Dune_stats.set_global stats;
-      stats)
-  in
-  let rpc =
-    if builder.allow_builds
-    then
-      `Allow
-        (lazy
-          (let registry =
-             match builder.watch with
-             | Yes _ -> `Add
-             | No -> `Skip
-           in
-           let lock_timeout =
-             match builder.watch with
-             | Yes Passive -> Some 1.0
-             | _ -> None
-           in
-           Dune_rpc_impl.Server.create
-             ~lock_timeout
-             ~registry
-             ~root:root.dir
-             ~handle:Dune_rules_rpc.register
-             ~watch_mode_config:builder.watch
-             ~parse_build:Dune_rules_rpc.parse_build
-             stats))
-    else `Forbid_builds
-  in
-  if builder.print_metrics then Dune_metrics.enable ();
-  { builder; root; rpc; stats }
+let build (root : Workspace_root.t) (builder : Builder.t) =
+  let build_loop = Dune_engine.Build_loop.create () in
+  { builder; root; build_loop; rpc = `Forbid_builds; action_runner = lazy None }
 ;;
 
 let maybe_init_cache (cache_config : Dune_cache.Config.t) =
   match cache_config with
   | Disabled -> cache_config
   | Enabled _ ->
-    (match Dune_cache_storage.Layout.create_cache_directories () with
+    (match Dune_cache.Layout.create_cache_directories () with
      | Ok () -> cache_config
      | Error (path, exn) ->
        User_warning.emit
@@ -1181,23 +1240,74 @@ let maybe_init_cache (cache_config : Dune_cache.Config.t) =
        Disabled)
 ;;
 
-let init (builder : Builder.t) =
-  let c = build builder in
+let action_runner_requested t =
+  t.builder.allow_builds && (t.builder.action_runner || t.builder.sandbox_actions)
+;;
+
+let action_runner t =
+  if action_runner_requested t
+  then (
+    match t.rpc with
+    | `Allow rpc -> ignore (Lazy.force rpc : Dune_rpc_impl.Server.t)
+    | `Forbid_builds -> Code_error.raise "action runners require the dune RPC server" []);
+  Lazy.force t.action_runner
+;;
+
+let init_with_root_and_rpc ~(root : Workspace_root.t) ~rpc_build (builder : Builder.t) =
+  Memo.set_incremental
+    (match builder.watch with
+     | No -> false
+     | Yes _ -> true);
+  let c = build root builder in
+  No_build.set c.builder.no_build;
   if c.root.dir <> Filename.current_dir_name then Sys.chdir c.root.dir;
   Path.set_root (normalize_path (Path.External.cwd ()));
   Path.Build.set_build_dir (Path.Outside_build_dir.of_string c.builder.build_dir);
-  (* Once we have the build directory set, initialise the logging. We can't do
-     this earlier, because the build log typically goes into [_build/log]. *)
-  Log.init () ~file:builder.log_file;
+  let () =
+    match builder.trace_file with
+    | None -> Log.init No_log_file
+    | Some trace_config ->
+      (match
+         (* For default location, try to acquire lock first to avoid corrupting
+           an existing trace from another dune process *)
+         match trace_config with
+         | `Default ->
+           (match Global_lock.lock () with
+            | Ok () -> `Create
+            | Error _ -> `Skip)
+         | `User_specified _ -> `Create
+       with
+       | `Skip -> Log.init No_log_file
+       | `Create ->
+         let trace =
+           match trace_config with
+           | `Default -> Path.build (Path.Build.relative Path.Build.root trace_file_name)
+           | `User_specified stats -> Path.of_filename_relative_to_initial_cwd stats
+         in
+         Path.parent trace |> Option.iter ~f:Path.mkdir_p;
+         (match trace_config with
+          | `Default ->
+            let path = Path.to_string trace in
+            (match Fpath.rename_exn path (path ^ ".old") with
+             | () -> ()
+             | exception Unix.Unix_error _ -> ())
+          | `User_specified _ -> ());
+         let stats = Dune_trace.Out.create (`Path trace) in
+         Dune_trace.set_global stats ~path:trace;
+         Dune_trace.Event.init
+           ~version:
+             (Build_info.V1.version () |> Option.map ~f:Build_info.V1.Version.to_string)
+         |> Dune_trace.always_emit;
+         Log.init
+           (Redirect (fun w -> Dune_trace.emit Log (fun () -> Dune_trace.Event.log w))))
+  in
   (* We need to print this before reading the workspace file, so that the editor
      can interpret errors in the workspace file. *)
   print_entering_message c;
-  Dune_rules.Workspace.Clflags.set c.builder.workspace_config;
+  Workspace.Clflags.set c.builder.workspace_config;
   let config =
     (* Here we make the assumption that this computation doesn't yield. *)
-    Fiber.run
-      (Memo.run (Dune_rules.Workspace.workspace_config ()))
-      ~iter:(fun () -> assert false)
+    Fiber.run (Memo.run (Workspace.workspace_config ())) ~iter:(fun () -> assert false)
   in
   let config =
     Dune_config.adapt_display
@@ -1212,9 +1322,9 @@ let init (builder : Builder.t) =
        | Yes _ -> true);
   Dune_engine.Execution_parameters.init
     (let open Memo.O in
-     let+ w = Dune_rules.Workspace.workspace () in
+     let+ w = Workspace.workspace () in
      Dune_engine.Execution_parameters.builtin_default
-     |> Dune_rules.Workspace.update_execution_parameters w);
+     |> Workspace.update_execution_parameters w);
   Dune_rules.Global.init ~capture_outputs:c.builder.capture_outputs;
   let cache_config =
     match config.cache_enabled with
@@ -1226,63 +1336,58 @@ let init (builder : Builder.t) =
         }
   in
   Log.info
-    [ Pp.textf
-        "Shared cache: %s"
-        (Dune_config.Cache.Toggle.to_string config.cache_enabled)
-    ];
+    "Shared cache enabled"
+    [ "cache_enabled", Dune_config.Cache.Toggle.to_dyn config.cache_enabled ];
   Log.info
-    [ Pp.textf
-        "Shared cache location: %s"
-        (Path.to_string Dune_cache_storage.Layout.root_dir)
+    "Shared cache location"
+    [ ( "root_dir"
+      , Dyn.string (Path.to_string (Lazy.force Dune_cache.Layout.build_cache_dir)) )
     ];
+  Dune_cache.Shared.config := maybe_init_cache cache_config;
   Dune_rules.Main.init
-    ~stats:c.stats
+    ~sandbox_actions:c.builder.sandbox_actions
     ~sandboxing_preference:config.sandboxing_preference
-    ~cache_config:(maybe_init_cache cache_config)
-    ~cache_debug_flags:c.builder.cache_debug_flags
     ();
   Only_packages.Clflags.set c.builder.only_packages;
   Report_error.print_memo_stacks := c.builder.debug_dep_path;
-  Dune_engine.Clflags.report_errors_config := c.builder.report_errors_config;
-  Dune_engine.Clflags.debug_backtraces c.builder.debug_backtraces;
-  Dune_rules.Clflags.debug_artifact_substitution := c.builder.debug_artifact_substitution;
-  Dune_engine.Clflags.debug_load_dir := c.builder.debug_load_dir;
-  Dune_engine.Clflags.debug_fs_cache := c.builder.cache_debug_flags.fs_cache;
-  Dune_digest.Clflags.debug_digests := c.builder.debug_digests;
-  Dune_rules.Clflags.debug_package_logs := c.builder.debug_package_logs;
-  Dune_digest.Clflags.wait_for_filesystem_clock := c.builder.wait_for_filesystem_clock;
-  Dune_engine.Clflags.capture_outputs := c.builder.capture_outputs;
-  Promote.Clflags.diff_command := c.builder.diff_command;
-  Dune_engine.Clflags.promote := c.builder.promote;
-  Dune_engine.Clflags.force := c.builder.force;
-  Dune_engine.Clflags.stop_on_first_error := c.builder.stop_on_first_error;
-  Dune_rules.Clflags.store_orig_src_dir := c.builder.store_orig_src_dir;
-  Dune_rules.Clflags.promote_install_files := c.builder.promote_install_files;
-  Dune_engine.Clflags.always_show_command_line := c.builder.always_show_command_line;
-  Dune_rules.Clflags.ignore_promoted_rules := c.builder.ignore_promoted_rules;
-  Dune_rules.Clflags.ignore_lock_dir := c.builder.ignore_lock_dir;
-  Dune_rules.Clflags.on_missing_dune_project_file
+  Clflags.report_errors_config := c.builder.report_errors_config;
+  Clflags.debug_package_logs := c.builder.debug_package_logs;
+  Clflags.wait_for_filesystem_clock := c.builder.wait_for_filesystem_clock;
+  Clflags.capture_outputs := c.builder.capture_outputs;
+  Clflags.diff_command := c.builder.diff_command;
+  Clflags.promote := c.builder.promote;
+  Clflags.force := c.builder.force;
+  Clflags.stop_on_first_error := c.builder.stop_on_first_error;
+  Clflags.store_orig_src_dir := c.builder.store_orig_src_dir;
+  Clflags.promote_install_files := c.builder.promote_install_files;
+  Clflags.always_show_command_line := c.builder.always_show_command_line;
+  Clflags.ignore_promoted_rules := c.builder.ignore_promoted_rules;
+  Clflags.on_missing_dune_project_file
   := if c.builder.require_dune_project_file then Error else Warn;
-  (Dune_engine.Clflags.can_go_in_shared_cache_default
+  (Clflags.can_go_in_shared_cache_default
    := match config.cache_enabled with
       | Disabled | Enabled_except_user_rules -> false
       | Enabled -> true);
+  (match c.builder.target_exec with
+   | None -> Clflags.target_exec := None
+   | Some spec ->
+     let toolchain, wrapper_cmd =
+       match String.lsplit2 spec ~on:'=' with
+       | Some (tc, cmd) -> tc, cmd
+       | None -> User_error.raise [ Pp.textf "--target-exec: invalid format" ]
+     in
+     let parts =
+       String.split wrapper_cmd ~on:' '
+       |> List.filter ~f:(fun s -> not (String.is_empty s))
+     in
+     (match parts with
+      | [] ->
+        User_error.raise [ Pp.textf "--target-exec: wrapper command cannot be empty" ]
+      | prog :: args -> Clflags.target_exec := Some (toolchain, prog, args)));
   Log.info
-    [ Pp.textf
-        "Workspace root: %s"
-        (Path.to_absolute_filename Path.root |> String.maybe_quoted)
-    ];
-  Dune_console.separate_messages c.builder.separate_error_messages;
-  Option.iter c.stats ~f:(fun stats ->
-    if Dune_stats.extended_build_job_info stats
-    then
-      (* Communicate config settings as an instant event here. *)
-      let open Chrome_trace in
-      let args = [ "build_dir", `String (Path.Build.to_string Path.Build.root) ] in
-      let ts = Event.Timestamp.of_float_seconds (Unix.gettimeofday ()) in
-      let common = Event.common_fields ~cat:[ "config" ] ~name:"config" ~ts () in
-      let event = Event.instant ~args common in
-      Dune_stats.emit stats event);
+    "Workspace root"
+    [ "root", Dyn.string (Path.to_absolute_filename Path.root |> String.maybe_quoted) ];
+  Console.separate_messages c.builder.separate_error_messages;
   (* Setup hook for printing GC stats to a file *)
   at_exit (fun () ->
     match c.builder.dump_gc_stats with
@@ -1293,7 +1398,60 @@ let init (builder : Builder.t) =
       let stat = Gc.stat () in
       let path = Path.external_ file in
       Dune_util.Gc.serialize ~path stat);
+  let where = lazy (Dune_rpc_impl.Where.default ()) in
+  let action_runner =
+    lazy
+      (if action_runner_requested c
+       then Some (Action_runner.create ~config ~sandbox_actions:c.builder.sandbox_actions)
+       else None)
+  in
+  let rpc =
+    if c.builder.allow_builds
+    then
+      `Allow
+        (lazy
+          (let rpc_build =
+             lazy
+               (match rpc_build with
+                | `Disabled -> Dune_rpc_impl.Server.Disabled
+                | `Enabled ->
+                  Dune_rpc_impl.Server.Enabled
+                    { build_loop = c.build_loop; build_action = rpc_request_action ~root })
+           in
+           let registry, build =
+             match c.builder.watch with
+             | Yes _ -> `Add, Lazy.force rpc_build
+             | No -> `Skip, Dune_rpc_impl.Server.Disabled
+           in
+           Dune_rpc_impl.Server.create
+             ~registry
+             ~root:root.dir
+             ~build
+             ~where:(Lazy.force where)
+             ~action_runner:(Lazy.force action_runner)
+             c.builder.watch))
+    else `Forbid_builds
+  in
+  let c = { c with rpc; action_runner } in
   c, config
+;;
+
+let init_with_root ~root (builder : Builder.t) =
+  init_with_root_and_rpc ~root ~rpc_build:`Disabled builder
+;;
+
+let create_root (builder : Builder.t) =
+  Workspace_root.create_exn
+    ~from:Filename.current_dir_name
+    ~default_is_cwd:builder.default_root_is_cwd
+    ~specified_by_user:builder.root
+    ()
+;;
+
+let init (builder : Builder.t) = init_with_root ~root:(create_root builder) builder
+
+let init_build (builder : Builder.t) =
+  init_with_root_and_rpc ~root:(create_root builder) ~rpc_build:`Enabled builder
 ;;
 
 let footer =
@@ -1334,6 +1492,25 @@ let help_secs =
   ]
 ;;
 
+(* Adapted from
+   https://github.com/ocaml/opam/blob/fbbe93c3f67034da62d28c8666ec6b05e0a9b17c/src/client/opamArg.ml#L759 *)
+let command_alias ?orig_name cmd term name =
+  let orig =
+    match orig_name with
+    | Some s -> s
+    | None -> Cmd.name cmd
+  in
+  let doc = Printf.sprintf "An alias for $(b,%s)." orig in
+  let man =
+    [ `S "DESCRIPTION"
+    ; `P (Printf.sprintf "$(mname)$(b, %s) is an alias for $(mname)$(b, %s)." name orig)
+    ; `P (Printf.sprintf "See $(mname)$(b, %s --help) for details." orig)
+    ; `Blocks help_secs
+    ]
+  in
+  Cmd.v (Cmd.info name ~docs:"COMMAND ALIASES" ~doc ~man) term
+;;
+
 let envs =
   Cmd.Env.
     [ info
@@ -1346,8 +1523,8 @@ let envs =
         ~doc:"If different than $(b,0), ANSI colors should be enabled no matter what."
         "CLICOLOR_FORCE"
     ; info
+        ~doc:"If set, determines the location of all the different caches used by dune."
         "DUNE_CACHE_ROOT"
-        ~doc:"If set, determines the location of the machine-global shared cache."
     ]
 ;;
 

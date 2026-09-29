@@ -6,21 +6,20 @@ open Lwt.Syntax
 open Dune_rpc.V1
 open Dune_rpc_lwt.V1
 
-let _XDG_STATE_HOME = "XDG_STATE_HOME"
-let xdg_state_dir = Temp.create Dir ~prefix:"lwt" ~suffix:"dune"
-let () = Unix.putenv _XDG_STATE_HOME (Stdune.Path.to_absolute_filename xdg_state_dir)
+let _XDG_DATA_HOME = Env.Var.of_string "XDG_DATA_HOME"
+let _XDG_RUNTIME_DIR = Env.Var.of_string "XDG_RUNTIME_DIR"
+
+let xdg_env =
+  let data_dir = Temp.create Dir ~prefix:"lwt" ~suffix:"dune" in
+  let data_dir = Stdune.Path.to_absolute_filename data_dir in
+  Env.initial
+  |> Env.remove ~var:_XDG_RUNTIME_DIR
+  |> Env.add ~var:_XDG_DATA_HOME ~value:data_dir
+;;
 
 let connect ~root_dir =
   let build_dir = Filename.concat root_dir "_build" in
-  let env =
-    let env =
-      Env.add
-        Env.initial
-        ~var:_XDG_STATE_HOME
-        ~value:(Stdune.Path.to_absolute_filename xdg_state_dir)
-    in
-    Env.get env
-  in
+  let env var = Env.get xdg_env (Env.Var.of_string var) in
   let* res = Where.get ~env ~build_dir in
   match res with
   | Error e -> Lwt.fail e
@@ -47,6 +46,7 @@ let connect ~root_dir =
 
 let build_watch ~root_dir =
   Lwt_process.open_process_none
+    ~env:(Env.to_unix xdg_env |> Array.of_list)
     ~stdin:`Close
     ~stderr:`Dev_null
     ( "dune"
@@ -81,7 +81,7 @@ let run_with_timeout f =
 let initial_cwd = Sys.getcwd ()
 
 let%expect_test "run and connect" =
-  let initialize = Initialize.create ~id:(Id.make (Csexp.Atom "test")) in
+  let initialize = Request.Initialize.create ~id:(Request.Id.make (Csexp.Atom "test")) in
   Sys.chdir initial_cwd;
   Lwt_main.run
     (let* root_dir = Lwt_io.create_temp_dir () in
@@ -133,6 +133,52 @@ let%expect_test "run and connect" =
     received ping. shutting down.
     dune build finished with 0
     success |}]
+;;
+
+let with_unix_socket_server f =
+  let* dir = Lwt_io.create_temp_dir () in
+  let server = Lwt_unix.socket Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+  Lwt.finalize
+    (fun () ->
+       let socket_path = Filename.concat dir "socket" in
+       let* () = Lwt_unix.bind server (Unix.ADDR_UNIX socket_path) in
+       Lwt_unix.listen server 1;
+       f ~socket_path ~server)
+    (fun () -> Lwt_unix.close server)
+;;
+
+let%expect_test "closing output channel leaves input usable" =
+  Sys.chdir initial_cwd;
+  Lwt_main.run
+    (with_unix_socket_server (fun ~socket_path ~server ->
+       let server_conn =
+         let buffer = Bytes.create 1 in
+         let* client, _ = Lwt_unix.accept server in
+         let* (_ : int) = Lwt_unix.read client buffer 0 1 in
+         Lwt_unix.close client
+       in
+       let* input, output = connect_chan (`Unix socket_path) in
+       let* () = Lwt_io.close output in
+       let* () = server_conn in
+       let* res = Lwt_io.read_char_opt input in
+       printfn "input eof: %b" (Option.is_none res);
+       Lwt_io.close input));
+  [%expect {| input eof: true |}]
+;;
+
+let%expect_test "closing input channel closes output channel" =
+  Sys.chdir initial_cwd;
+  Lwt_main.run
+    (with_unix_socket_server (fun ~socket_path ~server ->
+       let server_conn =
+         let* client, (_ : Unix.sockaddr) = Lwt_unix.accept server in
+         Lwt_unix.close client
+       in
+       let* input, output = connect_chan (`Unix socket_path) in
+       let* () = Lwt_io.close input in
+       printfn "output closed: %b" (Lwt_io.is_closed output);
+       server_conn));
+  [%expect {| output closed: true |}]
 ;;
 
 module Logger = struct

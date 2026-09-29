@@ -1,4 +1,4 @@
-let var = "PATH"
+let var = Env.Var._PATH
 
 let cons ?(var = var) env ~dir =
   Env.update env ~var ~f:(fun _PATH -> Some (Bin.cons_path dir ~_PATH))
@@ -18,7 +18,30 @@ let path env =
 ;;
 
 let extend_env_concat_path a b =
-  let a_including_b's_path = cons_multi a ~dirs:(path b) in
-  let b_without_path = Env.remove b ~var in
-  Env.extend_env a_including_b's_path b_without_path
+  if Env.is_empty b
+  then a
+  else (
+    match Env.get b var with
+    | None -> Env.extend_env a b
+    | Some path ->
+      let a_including_b's_path = cons_multi a ~dirs:(Bin.parse_path path) in
+      let b_without_path = Env.remove b ~var in
+      Env.extend_env a_including_b's_path b_without_path)
+;;
+
+let system_shell_exn =
+  let cmd, arg, os = if Sys.win32 then "cmd", "/c", " on Windows" else "sh", "-c", "" in
+  let bin = lazy (Bin.which ~path:(path Env.initial) cmd) in
+  fun ~needed_to ->
+    match Lazy.force bin with
+    | Some path -> path, arg
+    | None ->
+      User_error.raise
+        [ Pp.textf
+            "I need %s to %s but I couldn't find it :(\nWho doesn't have %s%s?!"
+            cmd
+            needed_to
+            cmd
+            os
+        ]
 ;;

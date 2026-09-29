@@ -16,11 +16,7 @@ let of_opam_url loc url =
   | `Git ->
     let+ rev =
       let* rev_store = Rev_store.get in
-      OpamUrl.resolve url ~loc rev_store
-      >>= (function
-       | Error _ as e -> Fiber.return e
-       | Ok s -> OpamUrl.fetch_revision url ~loc s rev_store)
-      >>| User_error.ok_exn
+      OpamUrl.resolve_and_fetch_revision url ~loc rev_store >>| User_error.ok_exn
     in
     Git rev
   | `Archive ->
@@ -33,17 +29,7 @@ let of_opam_url loc url =
     Source.fetch_archive_cached (loc, url)
     >>= (function
      | Error message_opt ->
-       let message =
-         Option.value
-           ~default:
-             (User_message.make
-                [ Pp.textf
-                    "Failed to retrieve source archive from: %s"
-                    (OpamUrl.to_string url)
-                ])
-           message_opt
-       in
-       raise (User_error.E message)
+       raise (User_error.E (Source.archive_fetch_error url message_opt))
      | Ok archive ->
        let achive_path_string = Path.to_string archive in
        let target =
@@ -70,8 +56,9 @@ let read t file =
     let+ () = Fiber.return () in
     let file = Path.append_local dir file in
     (match Io.read_file ~binary:true file with
-     | s -> Some s
-     | exception Unix.Unix_error (ENOENT, _, _) -> None)
+     | Ok s -> Some s
+     | Error (Unix.Unix_error (ENOENT, _, _)) -> None
+     | Error exn -> raise exn)
 ;;
 
 let stat t path =
@@ -79,7 +66,7 @@ let stat t path =
   match t with
   | Path dir ->
     let path = Path.append_local dir path in
-    (match (Path.stat_exn path).st_kind with
+    (match (Unix.stat (Path.to_string path)).st_kind with
      | S_REG -> `File
      | S_DIR -> `Dir
      | _ -> `Absent_or_unrecognized
@@ -99,7 +86,7 @@ let stat t path =
           if
             Rev_store.File.Set.exists files ~f:(fun file ->
               let path = Rev_store.File.path file in
-              String.equal basename (Path.Local.basename path))
+              Filename.equal basename (Path.Local.basename path))
           then `File
           else `Absent_or_unrecognized))
 ;;
@@ -123,7 +110,9 @@ let readdir t dir =
            | S_REG -> Some `File
            | S_DIR -> Some `Dir
            | S_LNK ->
-             (match (Path.stat_exn (Path.relative dir name)).st_kind with
+             (match
+                (Unix.stat (Path.to_string (Path.relative_fname dir name))).st_kind
+              with
               | S_REG -> Some `File
               | S_DIR -> Some `Dir
               | _ -> None)

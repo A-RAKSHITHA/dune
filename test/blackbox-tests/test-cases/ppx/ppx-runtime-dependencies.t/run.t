@@ -1,11 +1,7 @@
 ----------------------------------------------------------------------------------
 Handling ppx_runtime_libraries dependencies correctly
 
-  $ cat >sdune <<'EOF'
-  > #!/usr/bin/env bash
-  > DUNE_SANDBOX=symlink dune "$@"
-  > EOF
-  $ chmod +x sdune
+  $ make_sandboxed_dune
 
 ----------------------------------------------------------------------------------
 * Incorrect cycle detection due to ppx_runtime_libraries (TODO: fix this bug!)
@@ -114,7 +110,6 @@ not been marked with (kind ppx_rewriter).
                         ^
   Error: Ppx dependency on a non-ppx library "b". If "b" is in fact a ppx
   rewriter library, it should have (kind ppx_rewriter) in its dune file.
-  -> required by _build/default/bin/.main.eobjs/byte/dune__exe__Main.cmi
   -> required by _build/default/bin/.main.eobjs/native/dune__exe__Main.cmx
   -> required by _build/default/bin/main.exe
   [1]

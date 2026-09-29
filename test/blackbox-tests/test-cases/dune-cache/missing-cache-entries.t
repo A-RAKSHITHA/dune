@@ -9,9 +9,7 @@ Check that Dune cache can cope with missing file/metadata entries.
   > (cache-duplication copy)
   > (cache-transport direct)
   > EOF
-  $ cat > dune-project <<EOF
-  > (lang dune 2.1)
-  > EOF
+  $ make_dune_project 2.1
   $ cat > dune <<EOF
   > (rule
   >   (deps source)
@@ -70,3 +68,19 @@ Selectively delete just one of the set of targets.
   twin-a-contents
   $ cat _build/default/twin-b
   twin-b-contents
+
+The metadata reader reports a missing file as not found.
+
+  $ dune internal cache-metadata missing-metadata
+  Error: cache metadata not found:
+  $TESTCASE_ROOT/missing-metadata
+  [1]
+
+An existing directory is not a missing file. Report the actual IO error.
+Populate it to avoid the binary reader's empty-file fast path.
+
+  $ mkdir metadata-directory
+  $ touch metadata-directory/entry
+  $ dune internal cache-metadata metadata-directory
+  Error: Unix.Unix_error(Unix.EISDIR, "read", "")
+  [1]

@@ -1,5 +1,3 @@
-  $ . ../helpers.sh
-
 Here we test the translation and implementation of global opam variables. OS specific
 variables can be found in `opam-var-os.t`.
 
@@ -15,15 +13,17 @@ variables can be found in `opam-var-os.t`.
   > solve testpkg
   Solution for dune.lock:
   - testpkg.0.0.1
-  $ cat dune.lock/testpkg.pkg
+  $ cat ${default_lock_dir}/testpkg.0.0.1.pkg
   (version 0.0.1)
   
   (build
-   (progn
-    (run echo %{jobs})
-    (run echo %{make})
-    (run echo %{user})
-    (run echo %{group})))
+   (all_platforms
+    ((action
+      (progn
+       (run echo %{jobs})
+       (run echo %{make})
+       (run echo %{user})
+       (run echo %{group}))))))
 
 
 - The implementation of %{user} uses Unix.getlogin which doesn't work in our Linux CI job.
@@ -43,6 +43,6 @@ Therefore we modify the lockfile here to remove these from the opam file:
 The value for "jobs" should always be 1.
 
   $ GROUP="$(id -gn)"
-  > build_pkg testpkg 2>&1 | sed "s/$GROUP/GROUP/g"
+  > build_pkg testpkg 2>&1 | dune_cmd subst "$GROUP" 'GROUP'
   1
   GROUP

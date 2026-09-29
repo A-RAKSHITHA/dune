@@ -1,5 +1,4 @@
 open Import
-open Action_builder
 
 module Alias_status = struct
   module T = struct
@@ -21,7 +20,7 @@ module Alias_status = struct
   include Monoid.Make (T)
 end
 
-let alias a = dep (Dep.alias a)
+let alias a = Action_builder.dep (Dep.alias a)
 
 module Alias_build_info = struct
   type t =
@@ -40,7 +39,7 @@ module Alias_build_info = struct
 end
 
 let dep_on_alias_build_info_if_exists alias =
-  let open O in
+  let open Action_builder.O in
   Load_rules.load_dir ~dir:(Path.build (Alias.dir alias))
   |> Action_builder.of_memo
   >>= function
@@ -62,8 +61,8 @@ let dep_on_alias_build_info_if_exists alias =
 module Alias_rec (Traverse : sig
     val traverse
       :  Path.Build.t
-      -> f:(path:Path.Build.t -> Alias_build_info.t t)
-      -> Alias_status.t t
+      -> f:(path:Path.Build.t -> Alias_build_info.t Action_builder.t)
+      -> Alias_status.t Action_builder.t
   end) =
 struct
   open Traverse

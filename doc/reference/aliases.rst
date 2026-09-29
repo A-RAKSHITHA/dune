@@ -68,8 +68,11 @@ Some aliases are defined and managed by Dune itself:
 
        aliases/all
        aliases/default
+       aliases/revdep
+       aliases/opam
        aliases/install
        aliases/pkg-install
+       aliases/empty
 
   .. grid-item::
 
@@ -81,6 +84,7 @@ Some aliases are defined and managed by Dune itself:
        aliases/runtest
        aliases/fmt
        aliases/lint
+       aliases/unused-libs
 
   .. grid-item::
 

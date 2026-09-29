@@ -1,5 +1,13 @@
-  $ . ./helpers.sh
+Test that the solver environment associate with lockdirs is respected by the
+solver.
+
   $ mkrepo
+
+This test is specialized to non-portable lockdirs. For an analogous test of
+portable-lockdirs where different packages or packgae versions are available on
+different platforms, see the tests "portable-lockdirs-partial-solve" and
+"portable-lockdirs-platform-dependant-version".
+  $ export DUNE_CONFIG__PORTABLE_LOCK_DIR=disabled
 
 Set up two build contexts: a default one for linux and another for macos.
   $ cat >dune-workspace <<EOF
@@ -15,7 +23,7 @@ Set up two build contexts: a default one for linux and another for macos.
   >  (solver_env
   >   (os macos)))
   > (context
-  >  (default)) 
+  >  (default))
   > (context
   >  (default
   >   (name macos)
@@ -101,9 +109,9 @@ version will be chosen on macos as that's the only version available on macos.
   Solution for dune.macos.lock:
   - macos-sometimes.0.0.2
 
-A warning will be printed as the undefined-var.0.0.1 package has an undefined
-variable in its `available` filter. The undefined-var.0.0.2 package has a valid
-`available` filter but is only available on linux.
+An undefined variable makes undefined-var.0.0.1 unavailable.
+undefined-var.0.0.2 has a valid `available` filter but is only available on
+linux.
   $ solve undefined-var
   Solution for dune.lock:
   - undefined-var.0.0.2
@@ -117,8 +125,8 @@ variable in its `available` filter. The undefined-var.0.0.2 package has a valid
         undefined-var.0.0.1: Availability condition not satisfied
   [1]
 
-Warnings will be printed and no solution will be found as the availability
-filter resolves to a string instead of to a boolean.
+Non-boolean availability filters make their package versions unavailable, so
+no solution will be found.
   $ solve availability-string
   Error: Unable to solve dependencies for the following lock directories:
   Lock directory dune.lock:

@@ -7,6 +7,12 @@ type checked =
   | In_source_dir of Path.Source.t
   | External of Path.External.t
 
+let find_in_path_exn prog =
+  match Bin.which ~path:(Env_path.path Env.initial) prog with
+  | Some path -> path
+  | None -> User_error.raise [ Pp.textf "unable to find %s in PATH" prog ]
+;;
+
 let check_path contexts =
   let contexts =
     Dune_engine.Context_name.Map.of_list_map_exn contexts ~f:(fun c -> Context.name c, c)
@@ -52,4 +58,49 @@ let check_path contexts =
               In_private_context
                 (Path.Build.append_source Dune_rules.Private_context.t.build_dir path)
             else In_build_dir (context_exn ctx, path)))
+;;
+
+let restore_cwd_and_execve (root : Workspace_root.t) prog args env =
+  let prog = if Filename.is_relative prog then Filename.concat root.dir prog else prog in
+  Proc.restore_cwd_and_execve prog args ~env
+;;
+
+let setup () =
+  let scheduler = Scheduler.t () in
+  let previous_status = ref None in
+  Console.Status_line.set
+    (Live
+       (fun () ->
+         match !Build_system.state with
+         | Initializing
+         | Restarting_current_build
+         | Build_succeeded__now_waiting_for_changes
+         | Build_failed__now_waiting_for_changes -> Pp.nop
+         | Building
+             { Build_system.Progress.number_of_rules_validated = done_
+             ; number_of_rules_discovered = total
+             ; number_of_rules_failed = failed
+             } ->
+           let running = Scheduler.running_jobs_count scheduler in
+           (match !previous_status with
+            | Some (done_0, total0, failed0, running0, status)
+              when done_ = done_0
+                   && total = total0
+                   && failed = failed0
+                   && running = running0 -> status
+            | None | Some _ ->
+              let status =
+                Pp.verbatim
+                  (sprintf
+                     "Done: %u%% (%u/%u, %u left%s) (jobs: %u)"
+                     (if total = 0 then 0 else done_ * 100 / total)
+                     done_
+                     total
+                     (total - done_)
+                     (if failed = 0 then "" else sprintf ", %u failed" failed)
+                     running)
+              in
+              previous_status := Some (done_, total, failed, running, status);
+              status)));
+  Dune_rules.Main.get ()
 ;;

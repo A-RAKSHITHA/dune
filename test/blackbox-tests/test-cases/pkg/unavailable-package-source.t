@@ -1,7 +1,5 @@
 Demonstrate what happens when we try to fetch from a source that doesn't exist:
 
-  $ . ./helpers.sh
-
   $ make_lockdir
 
   $ runtest() {
@@ -14,14 +12,21 @@ Demonstrate what happens when we try to fetch from a source that doesn't exist:
   > }
 
 Local file system
-  $ runtest "(copy \"$PWD/dummy\")" 2>&1 | sed "s#$(pwd)#PWD#" | sed '/ *^\^*$/d' | sed '\#^File "dune.lock/foo.pkg", line 2, characters#d'
+  $ runtest "(copy \"$PWD/dummy\")" 2>&1 \
+  >  | dune_cmd subst "$PWD" 'PWD' \
+  >  | dune_cmd delete ' *\^\^*$' \
+  >  | dune_cmd delete '^File ".*dune.lock/foo.pkg", line 2, characters'
   2 | (source (copy "PWD/dummy"))
   Error:
   PWD/dummy
   does not exist
+  [1]
 
 Git
-  $ runtest "(fetch (url \"git+file://$PWD/dummy\"))" 2>&1 | sed "s#$(pwd)#PWD#"
+  $ runtest "(fetch (url \"git+file://$PWD/dummy\"))" 2>&1 \
+  > | dune_cmd subst "$PWD" 'PWD' \
+  > | sanitize_pkg_digest foo.dev \
+  > | dune_cmd subst '/url/[a-f0-9]+' '/url/DIGEST'
   fatal: 'PWD/dummy' does not appear to be a git repository
   fatal: Could not read from remote repository.
   
@@ -29,16 +34,21 @@ Git
   and the repository exists.
   Error: Failed to run external command:
   'git ls-remote "file://PWD/dummy"'
-  -> required by _build/_private/default/.pkg/foo/source
-  -> required by _build/_private/default/.pkg/foo/target
+  -> required by _build/_fetch/url/DIGEST/dir
+  -> required by
+     _build/_private/default/.pkg/foo.dev-DIGEST_HASH/source
+  -> required by
+     _build/_private/default/.pkg/foo.dev-DIGEST_HASH/target
   Hint: Check that this Git URL in the project configuration is correct:
   "file://PWD/dummy"
+  [1]
 
 HTTP
 
-  $ runtest "(fetch (url \"https://0.0.0.0:35000\"))" 2>&1 | sed -ne '/Error:/,$ p' | sed -e 's/".*"/"<PATH>"/'
-  Error:
-  failed to unpack archive downloaded from https://0.0.0.0:35000
-  reason:
-  unable to extract "<PATH>"
-  
+  $ runtest "(fetch (url \"https://0.0.0.0:35000\"))" 2>&1 \
+  >  | dune_cmd print-from 'Error:' \
+  >  | dune_cmd print-until '^Reason' \
+  >  | dune_cmd subst "'[0-9]*'" 'X'
+  Error: failed to extract 'download'
+  Reason: 'tar' failed with non-zero exit code X and output:
+  [1]

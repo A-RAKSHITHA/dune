@@ -1,4 +1,5 @@
 open Import
+module Ocaml_flags = Dune_lang.Ocaml_flags
 
 module Backend = struct
   let name = Sub_system_name.of_string "inline_tests.backend"
@@ -71,26 +72,40 @@ module Mode_conf = struct
       | Jsoo of Js_of_ocaml.Mode.t
       | Native
       | Best
-
-    let compare x y =
-      match x, y with
-      | Byte, Byte -> Eq
-      | Byte, _ -> Lt
-      | _, Byte -> Gt
-      | Jsoo m, Jsoo m' -> Js_of_ocaml.Mode.compare m m'
-      | Jsoo _, _ -> Lt
-      | _, Jsoo _ -> Gt
-      | Native, Native -> Eq
-      | Native, _ -> Lt
-      | _, Native -> Gt
-      | Best, Best -> Eq
-    ;;
-
-    let to_dyn = Dyn.opaque
   end
 
   include T
+
+  let repr =
+    Repr.variant
+      "inline-tests-mode-conf"
+      [ Repr.case0 "byte" ~test:(function
+          | Byte -> true
+          | Jsoo _ | Native | Best -> false)
+      ; Repr.case0 "js" ~test:(function
+          | Jsoo JS -> true
+          | Byte | Jsoo Wasm | Native | Best -> false)
+      ; Repr.case0 "wasm" ~test:(function
+          | Jsoo Wasm -> true
+          | Byte | Jsoo JS | Native | Best -> false)
+      ; Repr.case0 "native" ~test:(function
+          | Native -> true
+          | Byte | Jsoo _ | Best -> false)
+      ; Repr.case0 "best" ~test:(function
+          | Best -> true
+          | Byte | Jsoo _ | Native -> false)
+      ]
+  ;;
+
+  include Repr.Poly (struct
+      type nonrec t = t
+
+      let repr = repr
+    end)
+
   open Dune_lang.Decoder
+
+  let to_dyn = Repr.to_dyn repr
 
   let to_string = function
     | Byte -> "byte"
@@ -101,11 +116,22 @@ module Mode_conf = struct
   ;;
 
   let decode =
-    enum [ "byte", Byte; "js", Jsoo JS; "native", Native; "best", Best ]
-    <|> sum [ "wasm", Syntax.since Stanza.syntax (3, 17) >>> return (Jsoo Wasm) ]
+    enum'
+      [ "byte", return Byte
+      ; "js", return (Jsoo JS)
+      ; "native", return Native
+      ; "best", return Best
+      ; "wasm", Syntax.since Stanza.syntax (3, 17) >>> return (Jsoo Wasm)
+      ]
   ;;
 
-  module O = Comparable.Make (T)
+  module O = Comparable.Make (struct
+      type nonrec t = T.t
+
+      let compare = compare
+      let to_dyn = Repr.to_dyn repr
+    end)
+
   module Map = O.Map
 
   module Set = struct
@@ -128,6 +154,7 @@ module Tests = struct
     ; executable_link_flags : Ordered_set_lang.Unexpanded.t
     ; backend : (Loc.t * Lib_name.t) option
     ; libraries : (Loc.t * Lib_name.t) list
+    ; arguments : (Loc.t * Lib_name.t) list
     ; enabled_if : Blang.t
     }
 
@@ -159,6 +186,12 @@ module Tests = struct
                    ocaml_flags, link_flags))
        and+ backend = field_o "backend" (located Lib_name.decode)
        and+ libraries = field "libraries" (repeat (located Lib_name.decode)) ~default:[]
+       and+ arguments =
+         field
+           "arguments"
+           (Dune_lang.Syntax.since Dune_lang.Oxcaml.syntax (0, 1)
+            >>> repeat (located Lib_name.decode))
+           ~default:[]
        and+ modes =
          field
            "modes"
@@ -174,6 +207,7 @@ module Tests = struct
        ; executable_link_flags
        ; backend
        ; libraries
+       ; arguments
        ; modes
        ; enabled_if
        })

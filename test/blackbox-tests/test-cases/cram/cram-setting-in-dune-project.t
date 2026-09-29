@@ -6,9 +6,7 @@ file and we enter a loop:
   $ mkdir test
   $ cd test
 
-  $ cat >dune-project<<EOF
-  > (lang dune 2.8)
-  > EOF
+  $ make_dune_project 2.8
 
   $ cat >dune<<EOF
   > (cram)
@@ -35,19 +33,25 @@ executed:
   $ echo "(cram enable)" >> dune-project
   $ dune runtest
   File "run.t", line 1, characters 0-0:
-  Error: Files _build/default/run.t and _build/default/run.t.corrected differ.
+  --- run.t
+  +++ run.t.corrected
+  @@ -1 +1,2 @@
+     $ echo "Hello, world!"
+  +  Hello, world!
   [1]
 
 With Dune 3.0 and later, we don't get an error since cram tests are enabled by
 default:
 
-  $ cat >dune-project<<EOF
-  > (lang dune 3.0)
-  > EOF
+  $ make_dune_project 3.0
 
   $ dune runtest
   File "run.t", line 1, characters 0-0:
-  Error: Files _build/default/run.t and _build/default/run.t.corrected differ.
+  --- run.t
+  +++ run.t.corrected
+  @@ -1 +1,2 @@
+     $ echo "Hello, world!"
+  +  Hello, world!
   [1]
 
 And if we disable them on purpose, we get an error message:

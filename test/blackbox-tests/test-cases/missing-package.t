@@ -1,9 +1,7 @@
 Demonstrate what happens when we try to attach a library to a package that
 doesn't exist:
 
-  $ cat >dune-project <<EOF
-  > (lang dune 3.13)
-  > EOF
+  $ make_dune_project 3.13
 
   $ cat >dune <<EOF
   > (library
@@ -44,9 +42,9 @@ Now we use another form instead of a library
   > EOF
 
   $ dune build @install
-  File "dune", line 4, characters 1-14:
+  File "dune", line 4, characters 10-13:
   4 |  (package foo))
-       ^^^^^^^^^^^^^
+                ^^^
   Error: The current scope doesn't define package "foo".
   The only packages for which you can declare elements to be installed in this
   directory are:
@@ -55,13 +53,11 @@ Now we use another form instead of a library
 
 Same thing but without packages in the project
 
-  $ cat >dune-project <<EOF
-  > (lang dune 3.13)
-  > EOF
+  $ make_dune_project 3.13
   $ dune build @install
-  File "dune", line 4, characters 1-14:
+  File "dune", line 4, characters 10-13:
   4 |  (package foo))
-       ^^^^^^^^^^^^^
+                ^^^
   Error: You cannot declare items to be installed without adding a
   <package>.opam file at the root of your project.
   To declare elements to be installed as part of package "foo", add a

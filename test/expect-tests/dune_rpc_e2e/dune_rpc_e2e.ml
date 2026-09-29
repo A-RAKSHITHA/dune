@@ -1,15 +1,14 @@
 open Stdune
 open Fiber.O
-module Scheduler = Dune_engine.Scheduler
-module Dune_rpc = Dune_rpc_private
+open Dune_scheduler
+module Dune_rpc = Dune_rpc.Private
 module Request = Dune_rpc.Public.Request
 module Diagnostic = Dune_rpc.Diagnostic
-module Client = Dune_rpc_client.Client
-module Session = Csexp_rpc.Session
+module Client = Rpc.Client
 
 (* enable to debug process stdout/stderr *)
 let debug = false
-let () = if debug then Dune_util.Log.init ~file:(Out_channel stderr) ()
+let () = if debug then Log.init Stderr
 
 let dune_prog =
   lazy
@@ -20,7 +19,7 @@ let dune_prog =
 let init_chan ~root_dir =
   let build_dir = Filename.concat root_dir "_build" in
   let once () =
-    let env = Env.get Env.initial in
+    let env var = Env.get Env.initial (Env.Var.of_string var) in
     match Dune_rpc_impl.Where.Where.get ~env ~build_dir with
     | Error exn -> Exn.raise exn
     | Ok None -> Fiber.return None
@@ -34,7 +33,7 @@ let init_chan ~root_dir =
     let* res = once () in
     match res with
     | Some res -> Fiber.return res
-    | None -> Scheduler.sleep ~seconds:0.2 >>= loop
+    | None -> Scheduler.sleep (Time.Span.of_secs 0.05) >>= loop
   in
   loop ()
 ;;
@@ -93,23 +92,30 @@ let read_lines in_ =
 let run ?env ~prog ~argv () =
   let stdout_i, stdout_w = Unix.pipe ~cloexec:true () in
   let stderr_i, stderr_w = Unix.pipe ~cloexec:true () in
+  let stdout_w = Fd.unsafe_of_unix_file_descr stdout_w in
+  let stderr_w = Fd.unsafe_of_unix_file_descr stderr_w in
   let pid =
-    let argv = prog :: argv in
-    let env = Option.map ~f:Spawn.Env.of_list env in
+    let args = Array.Immutable.of_list argv in
+    let env = Option.map env ~f:(fun env -> Env.of_unix (Array.of_list env)) in
     Spawn.spawn
       ~prog
-      ~argv
+      ~argv0:prog
+      ~args
       ~stdout:stdout_w
       ~stderr:stderr_w
       ~stdin:(Lazy.force Dev_null.in_)
       ?env
       ()
-    |> Pid.of_int
   in
-  Unix.close stdout_w;
-  Unix.close stderr_w;
+  Fd.close stdout_w;
+  Fd.close stderr_w;
   ( pid
-  , (let+ proc = Scheduler.wait_for_process ~timeout_seconds:3.0 pid in
+  , (let+ proc =
+       Scheduler.wait_for_process
+         ~timeout:(Time.Span.of_secs 3.0)
+         ~is_process_group_leader:false
+         pid
+     in
      if proc.status <> Unix.WEXITED 0
      then (
        let name =
@@ -148,7 +154,7 @@ let dune_build client what =
       what
       (match res with
        | Success -> "succeeded"
-       | Failure -> "failed")
+       | Failure _ -> "failed")
 ;;
 
 let with_dune_watch ?watch_mode_args ?env f =
@@ -174,9 +180,8 @@ let with_dune_watch ?watch_mode_args ?env f =
 ;;
 
 let config =
-  Dune_engine.Clflags.display := Quiet;
+  Clflags.display := Quiet;
   { Scheduler.Config.concurrency = 1
-  ; stats = None
   ; print_ctrl_c_warning = false
   ; watch_exclusions = []
   }
@@ -195,5 +200,5 @@ let run run =
     ~finally:(fun () -> Sys.chdir cwd)
     ~f:(fun () ->
       Sys.chdir (Path.to_string dir);
-      Scheduler.Run.go config run ~timeout_seconds:5.0 ~on_event:(fun _ _ -> ()))
+      Scheduler.Run.go config run ~timeout:(Time.Span.of_secs 5.0))
 ;;

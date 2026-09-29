@@ -2,8 +2,6 @@ include ListLabels
 
 type 'a t = 'a list
 
-let map ~f t = rev (rev_map ~f t)
-
 let is_empty = function
   | [] -> true
   | _ -> false
@@ -25,7 +23,7 @@ let rev_filter_map l ~f =
   loop [] l
 ;;
 
-let filter_map l ~f = rev (rev_filter_map l ~f)
+let filter_map l ~f = ListLabels.filter_map ~f l
 let filter_opt l = filter_map ~f:Fun.id l
 
 let filteri l ~f =
@@ -202,7 +200,14 @@ let rec equal eq xs ys =
   | _, _ -> false
 ;;
 
-let hash f xs = Stdlib.Hashtbl.hash (map ~f xs)
+let hash f xs =
+  let rec loop acc = function
+    | [] -> acc
+    | x :: xs -> loop (Hash.feed acc (f x)) xs
+  in
+  loop (Hash.create ()) xs |> Hash.hash
+;;
+
 let cons x xs = x :: xs
 
 (* copy&paste from [base] *)
@@ -273,3 +278,11 @@ let rec partition_three xs ~f =
      | `Middle y -> xs, y :: ys, zs
      | `Right z -> xs, ys, z :: zs)
 ;;
+
+module Assoc = struct
+  let rec find_exn xs x ~equal =
+    match xs with
+    | [] -> raise Not_found
+    | (x', y) :: xs -> if equal x x' then y else find_exn xs x ~equal
+  ;;
+end

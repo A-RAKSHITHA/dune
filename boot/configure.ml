@@ -18,7 +18,11 @@ let out =
 ;;
 
 let default_toggles : (string * [ `Disabled | `Enabled ]) list =
-  [ "toolchains", `Enabled; "pkg_build_progress", `Disabled; "lock_dev_tool", `Disabled ]
+  [ "toolchains", `Enabled
+  ; "lock_dev_tool", `Disabled
+  ; "bin_dev_tools", `Disabled
+  ; "portable_lock_dir", `Enabled
+  ]
 ;;
 
 let toggles = ref default_toggles
@@ -92,15 +96,20 @@ let () =
       , toggle "toolchains"
       , " Enable the toolchains behaviour, allowing dune to install the compiler in a \
          user-wide directory." )
-    ; ( "--pkg-build-progress"
-      , toggle "pkg_build_progress"
-      , " Enable the displaying of package build progress.\n\
-        \      This flag is experimental and shouldn't be relied on by packagers." )
     ; ( "--lock-dev-tool"
       , toggle "lock_dev_tool"
       , " Enable ocamlformat dev-tool, allows 'dune fmt' to build ocamlformat and use \
-         it, independently from the project depenedencies .\n\
+         it, independently from the project dependencies.\n\
         \      This flag is experimental and shouldn't be relied on by packagers." )
+    ; ( "--bin-dev-tools"
+      , toggle "bin_dev_tools"
+      , " Enable obtaining dev-tools binarys from the binary package opam repository. \
+         Allows fast installation of dev-tools. \n\
+        \      This flag is experimental and shouldn't be relied on by packagers." )
+    ; ( "--portable-lock-dir"
+      , toggle "portable_lock_dir"
+      , "Generate portable lock dirs. If this feature is disabled then lock dirs will be \
+         specialized to the machine where they are generated." )
     ]
   in
   let anon s = bad "Don't know what to do with %s" s in
@@ -108,7 +117,7 @@ let () =
   (match !libexecdir with
    | None -> libexecdir := !library_destdir
    | Some _ -> ());
-  let oc = open_out out in
+  let oc = open_out_bin out in
   let pr fmt = fprintf oc (fmt ^^ "\n") in
   pr "let library_path = %s\n" ((list string) !library_path);
   pr "let roots : string option Install.Roots.t =";

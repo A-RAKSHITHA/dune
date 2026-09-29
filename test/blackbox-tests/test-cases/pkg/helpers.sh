@@ -1,122 +1,627 @@
 export XDG_CACHE_HOME="$PWD/.cache"
 
+# Set the default platform for the purposes of solving dependencies so that the
+# output of tests is platform-independent.
+export DUNE_CONFIG__OS=linux
+export DUNE_CONFIG__ARCH=x86_64
+export DUNE_CONFIG__OS_FAMILY=debian
+export DUNE_CONFIG__OS_DISTRIBUTION=ubuntu
+export DUNE_CONFIG__OS_VERSION=24.11
+export DUNE_CONFIG__SYS_OCAML_VERSION=5.4.0+fake
+
 dune="dune"
 
 pkg_root="_build/_private/default/.pkg"
 
+default_lock_dir="dune.lock"
+source_lock_dir="${default_lock_dir}"
+mock_packages="mock-opam-repository/packages"
+
+# this needs to be a function, because it might be called from a subdir
+default_repo_path() {
+  echo "file://$(pwd)/mock-opam-repository"
+}
+
+# Prints the directory containing the package target and source dirs within the
+# _build directory.
+get_build_pkg_dir() {
+  local package_name=$1
+  local digest
+  digest=$($dune pkg print-digest "$package_name")
+  local status=$?
+  if [ "$status" -eq "0" ]; then
+    echo "$pkg_root/$digest"
+  else
+    return 1
+  fi
+}
+
 build_pkg() {
-  $dune build $pkg_root/$1/target/
+  local pkg=$1
+  local prefix
+  prefix="$(get_build_pkg_dir "$pkg")"
+  local status=$?
+  if [ "$status" -eq "0" ]; then
+    $dune build "$prefix/target"
+  else
+    return 1
+  fi
 }
 
 show_pkg() {
-  find $pkg_root/$1 | sort | sed "s#$pkg_root/$1##"
-}
-
-strip_sandbox() {
-  sed -E 's#[^ ]*.sandbox/[^/]+#$SANDBOX#g'
+  local pkg=$1
+  local prefix
+  prefix="$(get_build_pkg_dir "$pkg")"
+  find "$prefix" | sort | dune_cmd subst "$prefix" ""
 }
 
 show_pkg_targets() {
-  find $pkg_root/$1/target | sort | sed "s#$pkg_root/$1/target##"
+  local pkg=$1
+  local prefix
+  prefix="$(get_build_pkg_dir "$pkg")/target"
+  find "$prefix" | sort | dune_cmd subst "$prefix" ""
 }
 
 show_pkg_cookie() {
-  $dune internal dump $pkg_root/$1/target/cookie
+  local pkg=$1
+  $dune internal dump "$(get_build_pkg_dir "$pkg")/target/cookie" 2>&1 | censor
 }
-
-mock_packages="mock-opam-repository/packages"
 
 mkrepo() {
   mkdir -p $mock_packages
 }
 
 mkpkg() {
-  name=$1
+  local name=$1
+  local version
   if [ "$#" -eq "1" ]
   then
     version="0.0.1"
   else
     version="$2"
   fi
-  mkdir -p $mock_packages/$name/$name.$version
-  echo 'opam-version: "2.0"' > $mock_packages/$name/$name.$version/opam
-  cat >>$mock_packages/$name/$name.$version/opam
+  mkdir -p "$mock_packages/$name/$name.$version"
+  echo 'opam-version: "2.0"' > "$mock_packages/$name/$name.$version/opam"
+  cat >> "$mock_packages/$name/$name.$version/opam"
+}
+
+make_committed_mock_repo_package() {
+  local package="$1"
+  local version="$2"
+
+  mkrepo
+  mkpkg "$package" "$version" <<-'EOF'
+	EOF
+  (
+    cd mock-opam-repository || exit 1
+    git init --quiet
+    git add -A
+    git commit --quiet -m "Initial commit"
+  )
+}
+
+make_foo_tarball() {
+  local implementation="$1"
+
+  mkdir foo
+  cat > foo/dune-project <<-'EOF'
+	(lang dune 3.13)
+	(package (name foo))
+	EOF
+  printf '%s\n' "$implementation" > foo/foo.ml
+  cat > foo/dune <<-'EOF'
+	(library
+	 (public_name foo))
+	EOF
+  tar cf foo.tar foo
+  rm -rf foo
+}
+
+make_foo_tarball_package() {
+  : "${PORT:?}"
+
+  mkpkg foo <<- EOF
+	build: [
+	  ["dune" "subst"] {dev}
+	  [
+	    "dune"
+	    "build"
+	    "-p"
+	    name
+	    "-j"
+	    jobs
+	    "@install"
+	    "@runtest" {with-test}
+	    "@doc" {with-doc}
+	  ]
+	]
+	url {
+	 src: "http://0.0.0.0:${PORT}"
+	 checksum: [
+	  "md5=$(md5sum foo.tar | cut -f1 -d' ')"
+	 ]
+	}
+	EOF
+}
+
+make_bar_executable_depends_foo_project() {
+  cat > dune-project <<-'EOF'
+	(lang dune 3.13)
+	(package
+	 (name bar)
+	 (depends foo))
+	EOF
+  cat > bar.ml <<-'EOF'
+	let () = print_endline Foo.foo
+	EOF
+  cat > dune <<-'EOF'
+	(executable
+	 (public_name bar)
+	 (libraries foo))
+	EOF
+}
+
+make_project_pinned_to_foo() {
+  cat >dune-project <<- EOF
+	(lang dune 3.13)
+	(pin
+	 (url "file://$PWD/_foo")
+	 (package (name foo)))
+	(package
+	 (name main)
+	 (depends foo))
+	EOF
+}
+
+make_platform_dependent_bar_package() {
+  mkpkg bar <<-'EOF'
+	build: [
+	  ["mkdir" "-p" share "%{lib}%/%{name}%"]
+	  ["touch" "%{lib}%/%{name}%/META"] # needed for dune to recognize this as a library
+	]
+	depends: [
+	  "foo" {= "1" & os = "linux"}
+	  "foo" {= "2" & os = "macos"}
+	]
+	EOF
+}
+
+make_x_depends_bar_project() {
+  cat > dune-project <<-'EOF'
+	(lang dune 3.18)
+	(package
+	 (name x)
+	 (depends bar))
+	EOF
+  cat > x.ml <<-'EOF'
+	let () = print_endline "Hello, World!"
+	EOF
+  cat > dune <<-'EOF'
+	(executable
+	 (public_name x)
+	 (libraries foo))
+	EOF
+}
+
+make_lockdir_validation_packages() {
+  mkpkg a 0.0.1 <<-'EOF'
+	depends: [ "c" "d" ]
+	EOF
+  mkpkg b 0.0.1 <<-'EOF'
+	EOF
+  mkpkg b 0.0.2 <<-'EOF'
+	EOF
+  mkpkg c <<-'EOF'
+	depends: [ "e" ]
+	EOF
+  mkpkg d <<-'EOF'
+	EOF
+  mkpkg e <<-'EOF'
+	EOF
+}
+
+make_lockdir_validation_project() {
+  local version="${1:?}"
+
+  cat >dune-project <<- EOF
+	(lang dune ${version})
+	(package (name foo) (depends a (b (>= 0.0.2))))
+	(package (name bar) (depends foo c))
+	EOF
+}
+
+make_bar_depends_foo_project() {
+  cat > dune-project <<-'EOF'
+	(lang dune 3.10)
+	
+	(package
+	 (name bar)
+	 (depends foo))
+	EOF
+  cat > dune <<-'EOF'
+	EOF
+}
+
+make_external_mypkg_lib_source() {
+  local implementation="$1"
+
+  mkdir external_sources
+  cat >external_sources/dune-project <<-'EOF'
+	(lang dune 3.11)
+	(package (name mypkg))
+	EOF
+  cat >external_sources/dune <<-'EOF'
+	(library
+	 (public_name mypkg.lib)
+	 (name test_lib))
+	EOF
+  printf '%s\n' "$implementation" > external_sources/test_lib.ml
+}
+
+make_executable_script_pkg() {
+  local pkg="$1"
+  local script="$2"
+
+  make_lockpkg "$pkg" <<- EOF
+	(build (run ${script}))
+	(version dev)
+	EOF
+  local files="${source_lock_dir}/${pkg}.files"
+  local exec_path="${files}/${script}"
+  mkdir -p "${files}"
+  touch "${exec_path}"
+  chmod a+x "${exec_path}"
+  cat > "${exec_path}"
+}
+
+make_fetch_cache_project() {
+  tar cf test.tar "$@"
+  echo test.tar > fake-curls
+  local src_checksum
+  src_checksum=$(md5sum test.tar | cut -f1 -d' ')
+  make_lockpkg test <<- EOF
+	(version 0.0.1)
+	(source
+	 (fetch
+	  (url http://localhost:1)
+	  (checksum md5=${src_checksum})))
+	EOF
+  cat > dune-project <<-'EOF'
+	(lang dune 3.17)
+	(package (name my) (depends test) (allow_empty))
+	EOF
+}
+
+make_with_patch_package() {
+  mkpkg with-patch <<- EOF
+	EOF
+
+  fname1="foo.patch"
+  fname2="dir/bar.patch"
+  opam_repo="$mock_packages/with-patch/with-patch.0.0.1"
+  mkdir -p "$opam_repo/files/dir"
+  cat >"$opam_repo/files/$fname1" <<-'EOF'
+	foo
+	EOF
+  cat >"$opam_repo/files/$fname2" <<-'EOF'
+	bar
+	EOF
+}
+
+append_wrong_to_right_patch() {
+  local patch="$1"
+  local target="${2:-foo.ml}"
+
+  mkdir -p "$(dirname "$patch")"
+  if [ -s "$patch" ]; then
+    printf '
+' >> "$patch"
+  fi
+  cat >> "$patch" <<- EOF
+	diff --git a/${target} b/${target}
+	index b69a69a5a..ea988f6bd 100644
+	--- a/${target}
+	+++ b/${target}
+	@@ -1,1 +1,1 @@
+	-This is wrong
+	+This is right
+	EOF
+}
+
+write_wrong_to_right_patch() {
+  local patch="$1"
+  local target="${2:-foo.ml}"
+
+  mkdir -p "$(dirname "$patch")"
+  : > "$patch"
+  append_wrong_to_right_patch "$patch" "$target"
+}
+
+mk_ocaml() {
+  local version="$1"
+  local major
+  major=$(echo "$version" | cut -d. -f1)
+  local minor
+  minor=$(echo "$version" | cut -d. -f2)
+  local patch
+  patch=$(echo "$version" | cut -d. -f3)
+  local next
+  next=$((patch + 1))
+  local constraint="{>= \"$major.$minor.$patch~\" & < \"$major.$minor.$next~\"}"
+
+  mkpkg ocaml "$version" <<- EOF
+	depends: [
+	  "ocaml-base-compiler" $constraint |
+	  "ocaml-variants" $constraint
+	]
+	EOF
+
+  mkpkg ocaml-base-compiler "$version" <<- EOF
+	depends: [
+	  "ocaml-compiler" $constraint
+	]
+	flags: compiler
+	conflict-class: "ocaml-core-compiler"
+	EOF
+
+  mkpkg ocaml-variants "$version" <<- EOF
+	depends: [
+	  "ocaml-compiler" {= "$version"}
+	]
+	flags: compiler
+	conflict-class: "ocaml-core-compiler"
+	EOF
+
+  mkpkg ocaml-compiler "$version" <<- EOF
+	depends: [
+	  "ocaml" {= "$version" & post}
+	]
+	EOF
+}
+
+set_pkg_to () {
+  local value="${1}"
+  if grep "(pkg .*)" dune-workspace > /dev/null; then
+    dune_cmd substitute "(pkg .*)" "(pkg ${value})" dune-workspace
+  else
+    echo "(pkg ${value})" >> dune-workspace
+  fi
+}
+
+enable_pkg() {
+  set_pkg_to "enabled"
+}
+
+disable_pkg() {
+  set_pkg_to "disabled"
+}
+
+unset_pkg() {
+  dune_cmd delete "\(pkg" dune-workspace
 }
 
 add_mock_repo_if_needed() {
   # default, but can be overridden, e.g. if git is required
-  repo="${1:-file://$(pwd)/mock-opam-repository}"
+  local repo
+  if [ "$#" -eq "0" ]; then
+    repo=$(default_repo_path)
+  else
+    repo="$1"
+  fi
 
   if [ ! -e dune-workspace ]
   then
-      cat >dune-workspace <<EOF
-(lang dune 3.10)
-(lock_dir
- (repositories mock))
-(repository
- (name mock)
- (url "${repo}"))
-EOF
+      cat >dune-workspace <<- EOF
+	(lang dune 3.20)
+	(lock_dir
+	 (repositories mock))
+	(repository
+	 (name mock)
+	 (url "${repo}"))
+	EOF
   else
-    if ! grep '(name mock)' > /dev/null dune-workspace
+    if ! grep '(name mock)' dune-workspace > /dev/null
     then
       # add the repo definition
-      cat >>dune-workspace <<EOF
-(repository
- (name mock)
- (url "${repo}"))
-EOF
+      cat >>dune-workspace <<- EOF
+	(repository
+	 (name mock)
+	 (url "${repo}"))
+	EOF
  
-      # reference the repo
-      if grep -s '(repositories'
+      # reference the repo - only add lock_dir if no existing lock_dir references mock
+      if ! grep '(repositories' dune-workspace | grep 'mock' > /dev/null
       then
-        sed -i '' -e 's/(repositories \(.*\))/(repositories mock \1)/' dune-workspace
-      else
-        cat >>dune-workspace <<EOF
-(lock_dir
- (repositories mock))
-EOF
+        cat >>dune-workspace <<- EOF
+	(lock_dir
+	 (repositories mock))
+	EOF
       fi
   
     fi
   fi
 }
 
+create_mock_repo() {
+  # Always create a fresh workspace with mock repository configuration
+  local repo="${1:-file://$(pwd)/mock-opam-repository}"
+  cat >dune-workspace <<- EOF
+	(lang dune 3.20)
+	(lock_dir
+	 (repositories mock))
+	(repository
+	 (name mock)
+	 (url "${repo}"))
+	EOF
+}
+
+create_mock_repo_with_doc_workspace() {
+  cat >dune-workspace <<- EOF
+	(lang dune 3.20)
+	(pkg enabled)
+	(lock_dir
+	 (repositories mock)
+	 (solver_env
+	  (with-doc true)))
+	(repository
+	 (name mock)
+	 (url "$PWD/mock-opam-repository"))
+	EOF
+}
+
+setup_dev_tool_workspace() {
+  : "${dev_tool_lock_dir:?}"
+  cat > dune-workspace <<- EOF
+	(lang dune 3.20)
+	(lock_dir
+	 (path "${dev_tool_lock_dir}")
+	 (repositories mock))
+	(lock_dir
+	 (repositories mock))
+	(repository
+	 (name mock)
+	 (url "file://$(pwd)/mock-opam-repository"))
+	(pkg enabled)
+	EOF
+}
+
+make_mock_dev_tool_package() {
+  local pkg="$1"
+  local exe="$2"
+  local message="$3"
+
+  mkpkg "${pkg}" <<- EOF
+	install: [
+	  [ "sh" "-c" "echo '#!/bin/sh' > %{bin}%/${exe}" ]
+	  [ "sh" "-c" "echo 'echo ${message}' >> %{bin}%/${exe}" ]
+	  [ "sh" "-c" "chmod a+x %{bin}%/${exe}" ]
+	]
+	EOF
+}
+
 make_lockpkg() {
-  local dir="dune.lock"
-  mkdir -p $dir
-  local f="$dir/$1.pkg"
-  cat >$f
+  local pkg="$1"
+  mkdir -p "${source_lock_dir}"
+  local f="${source_lock_dir}/$pkg.pkg"
+  cat > "$f"
+}
+
+append_to_lockpkg() {
+  local pkg="${1}"
+  cat >> "${source_lock_dir}/${pkg}.pkg"
+}
+
+make_lockpkg_file() {
+  local pkg="${1}"
+  local filename="${2}"
+  mkdir -p "${source_lock_dir}/${pkg}.files"
+  cat > "${source_lock_dir}/${pkg}.files/${filename}"
+}
+
+dune_pkg_lock_normalized() {
+  local out
+  local processed
+  out="$(mktemp)"
+  if dune pkg lock "$@" 2>> "${out}"; then
+    processed="$(mktemp)"
+    if [ "${DUNE_CONFIG__PORTABLE_LOCK_DIR:-}" = "disabled" ]; then
+      cp "${out}" "${processed}"
+    else
+        awk '/Solution/{printf"%s:\n",$0;f=0};f{print};/Dependencies.*:/{f=1}' "${out}" \
+        | dune_cmd subst '\(none\)' '(no dependencies to lock)' \
+        > "${processed}"
+    fi
+    cat "${processed}"
+  else
+    processed="$(mktemp)"
+    dune_cmd delete-between \
+      'The dependency solver failed to find a solution for the requested platforms:' \
+      '\.\.\.with this error:' \
+      < "${out}" \
+      > "${processed}"
+    cat "${processed}"
+    return 1
+  fi
 }
 
 solve_project() {
   cat >dune-project
-  add_mock_repo_if_needed
-  dune pkg lock $@
+  local repo
+  repo=$(default_repo_path)
+  add_mock_repo_if_needed "$repo"
+  dune_pkg_lock_normalized "$@"
+}
+
+build_single_package() {
+  local pkg="${1}"
+
+  solve_project <<EOF
+(lang dune 3.11)
+(package
+ (name x)
+ (depends
+  ${pkg}))
+EOF
+  build_pkg "${pkg}"
 }
 
 make_lockdir() {
-  mkdir -p dune.lock
-  cat >dune.lock/lock.dune <<EOF
-(lang package 0.1)
-(repositories (complete true))
-EOF
+  mkdir -p "${source_lock_dir}"
+  cat > "${source_lock_dir}"/lock.dune <<- EOF
+	(lang package 0.1)
+	(repositories (complete true))
+	EOF
+}
+
+make_named_package_project() {
+  local name="$1"
+  local version="$2"
+  shift 2
+  cat > dune-project <<- EOF
+	(lang dune ${version})
+	(package
+	 (name ${name})
+	 (allow_empty)
+	 (depends $@))
+	EOF
+}
+
+make_package_project() {
+  local version="$1"
+  shift
+  make_named_package_project x "${version}" "$@"
 }
 
 make_project() {
-  cat <<EOF
-(lang dune 3.11)
- (package
-  (name x)
-  (allow_empty)
-  (depends $@))
-EOF
+  cat <<- EOF
+	(lang dune 3.20)
+	 (package
+	  (name x)
+	  (allow_empty)
+	  (depends $@))
+	EOF
 }
 
 print_source() {
-  cat dune.lock/$1.pkg | sed -n "/source/,//p" | sed "s#$PWD#PWD#g" | tr '\n' ' '| tr -s " "
+  dune_cmd print-from 'source' \
+	  < "${default_lock_dir}"/"$1".pkg \
+  | dune_cmd print-until '^$' \
+  | dune_cmd subst "$PWD" "PWD" \
+  | tr '\n' ' ' \
+  | tr -s " " \
+  | dune_cmd subst '\s$' ''
 }
 
 solve() {
-  make_project $@ | solve_project
+  make_project "$@" | solve_project dune.lock
+}
+
+# Pass a string of the form PACKAGE_NAME.PACKAGE_VERSION and replaces the
+# hashes in all package digests matching the specified package with
+# "DIGEST_HASH". Use this for packages whose lockfiles have different contents
+# on different machines, such as lockfiles generated by expanding the "$PWD"
+# variable.
+sanitize_pkg_digest() {
+  local pkg_name_and_version="${1}"
+  dune_cmd subst "$pkg_name_and_version-[0-9a-f]*" "$pkg_name_and_version-DIGEST_HASH"
 }

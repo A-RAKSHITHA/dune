@@ -1,14 +1,12 @@
 (** [Ordered_set_lang.t] is a sexp-based representation for an ordered list of
     strings, with some set like operations. *)
 
-open Stdune
-open Dune_sexp
+open Import
 
 type t
 
 include module type of Ordered_set_lang_intf
 
-val of_atoms : loc:Loc.t -> string list -> t
 val decode : t Decoder.t
 
 (** Return the location of the set. [loc standard] returns [None] *)
@@ -47,12 +45,15 @@ module Unexpanded : sig
   val loc : t -> Loc.t option
   val equal : t -> t -> bool
 
-  include Dune_sexp.Conv.S with type t := t
+  include Conv.S with type t := t
 
   val encode : t -> Dune_sexp.t list
+
+  val decode_since_expanded
+    :  since_expanded:Syntax.Version.t
+    -> (t, Decoder.values) Decoder.parser
+
   val standard : t
-  val of_strings : pos:string * int * int * int -> string list -> t
-  val include_single : context:Univ_map.t -> pos:string * int * int * int -> string -> t
 
   val field
     :  ?check:unit Decoder.t

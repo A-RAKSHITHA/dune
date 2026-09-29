@@ -1,0 +1,22 @@
+(cram
+ (applies_to
+  clicolor-force-inline-tests-github6607.t
+  reason-expect.t
+  concurrent-fail.t)
+ (deps
+  (package ppx_expect)))
+
+(cram
+ (applies_to reason-expect.t)
+ (deps %{bin:refmt}))
+
+(cram
+ (applies_to clicolor-force-inline-tests-github6607.t)
+ (deps
+  (package stdune)
+  (package dyn)
+  (package ordering)
+  (package pp)
+  (package top-closure)
+  (package csexp)
+  (package fs-io)))

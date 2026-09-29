@@ -12,7 +12,8 @@ DEV_DEPS := \
 core_bench \
 patdiff
 
-TEST_OCAMLVERSION := 5.1.1
+TEST_OCAMLVERSION := 5.5.0
+# When updating this version, don't forget to also bump the number in the docs.
 
 -include Makefile.dev
 
@@ -22,11 +23,21 @@ help:
 
 .PHONY: bootstrap
 bootstrap:
+	rm -rf _boot
 	$(MAKE) -B $(BIN)
+
+.PHONY: test-bootstrap
+test-bootstrap:
+	rm -rf _test_boot
+	@ocaml boot/bootstrap.ml --boot-dir _test_boot
+
+.PHONY: test-bootstrap-script
+test-bootstrap-script:
+	@ocamlc -i boot/bootstrap.ml
 
 .PHONY: release
 release: $(BIN)
-	@$(BIN) build @install -p dune --profile dune-bootstrap
+	@$(BIN) build dune.install -p dune --profile dune-bootstrap
 
 $(BIN):
 	@ocaml boot/bootstrap.ml
@@ -59,10 +70,6 @@ install-ocamlformat:
 dev-deps:
 	opam install -y . --deps-only --with-dev-setup
 
-.PHONY: coverage-deps
-coverage-deps:
-	opam install -y bisect_ppx
-
 .PHONY: dev-deps-sans-melange
 dev-deps-sans-melange: dev-deps
 
@@ -75,9 +82,14 @@ dev-switch:
 	else \
 		opam switch create -y . $(TEST_OCAMLVERSION) --no-install ; \
 	fi
+	opam pin add -y . -n --with-version=dev
 	opam install -y . --deps-only --with-test --with-dev-setup
 	$(MAKE) install-ocamlformat
 	opam install -y $(DEV_DEPS)
+
+.PHONY: index
+index: $(BIN)
+	$(BIN) build @ocaml-index
 
 .PHONY: test
 test: $(BIN)
@@ -92,29 +104,39 @@ test-js: $(BIN)
 test-wasm: $(BIN)
 	DUNE_WASM_TEST=enable $(BIN) build @runtest-wasm
 
-test-coq: $(BIN)
-	DUNE_COQ_TEST=enable $(BIN) build @runtest-coq
+.PHONY: test-rocq
+test-rocq: $(BIN)
+	DUNE_ROCQ_TEST=enable $(BIN) build @runtest-rocq
+
+.PHONY: test-rocq-native
+test-rocq-native: $(BIN)
+	DUNE_ROCQ_TEST=enable DUNE_ROCQ_NATIVE_TEST=enable $(BIN) build @runtest-rocq-native
 
 test-melange: $(BIN)
 	$(BIN) build @runtest-melange
 
 test-all: $(BIN)
-	$(BIN) build @runtest @runtest-js @runtest-coq @runtest-melange
+	DUNE_ROCQ_TEST=enable $(BIN) build @runtest @runtest-js @runtest-rocq @runtest-melange
 
-test-all-sans-melange: $(BIN)
-	$(BIN) build @runtest @runtest-js @runtest-coq
-
-test-coverage: $(BIN)
-	- $(BIN) build --instrument-with bisect_ppx --force @runtest
-	bisect-ppx-report send-to Coveralls
+test-ox: $(BIN)
+	$(BIN) runtest test/blackbox-tests/test-cases/oxcaml
 
 .PHONY: check
 check: $(BIN)
 	@$(BIN) build @check
 
+.PHONY: start
+start: $(BIN)
+	@[ -e start/dune ] || $(BIN) init start-file
+	@$(BIN) build @start/build -w
+
 .PHONY: fmt
 fmt: $(BIN)
 	@$(BIN) fmt
+
+.PHONY: fmt-preview
+fmt-preview: $(BIN)
+	@$(BIN) fmt --preview
 
 .PHONY: promote
 promote: $(BIN)
@@ -163,13 +185,16 @@ dune: $(BIN)
 opam-release: dev
 	$(BIN) exec -- $(MAKE) dune-release
 
+# Set DUNE_RELEASE_YES_FLAG=true to force dune-release to run with the --yes flag
+# Avoiding the need for interaction
+DUNE_RELEASE_YES_FLAG := $(if $(filter true,$(DUNE_RELEASE_YES)),--yes)
 dune-release:
-	dune-release tag
+	dune-release tag $(DUNE_RELEASE_YES_FLAG)
 	dune-release distrib --skip-build --skip-lint --skip-tests
 # See https://github.com/ocamllabs/dune-release/issues/206
-	DUNE_RELEASE_DELEGATE=github-dune-release-delegate dune-release publish distrib --verbose
-	dune-release opam pkg
-	dune-release opam submit
+	DUNE_RELEASE_DELEGATE=github-dune-release-delegate dune-release publish --verbose $(if $(filter prerelease,$(RELEASE_KIND)),--prerelease) $(DUNE_RELEASE_YES_FLAG)
+	dune-release opam pkg $(DUNE_RELEASE_YES_FLAG)
+	dune-release opam submit $(DUNE_RELEASE_YES_FLAG)
 
 .PHONY: docker-build-image
 docker-build-image:

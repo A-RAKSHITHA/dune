@@ -6,9 +6,10 @@ open Import
 
     - Build artifacts currently available in the build directory.
 
-    - A database [_build/.db] that maps rule digests to their target digests.
+    - The rule records in the workspace cache [_build/.db], which map rule
+      digests to their target digests.
 
-    The database makes it possible to decide if the build directory contains up
+    These records make it possible to decide if the build directory contains up
     to date results for a given rule. *)
 module Workspace_local : sig
   (** Check if the workspace-local cache contains up-to-date results for a rule
@@ -23,14 +24,14 @@ module Workspace_local : sig
 
   (** Add a new record to the rule database. *)
   val store
-    :  head_target:Path.Build.t
+    :  targets:Digest.t Targets.Produced.t
+    -> head_target:Path.Build.t
     -> rule_digest:Digest.t
     -> dynamic_deps_stages:(Dep.Set.t * Digest.t) list
     -> targets_digest:Digest.t
     -> unit
-end
 
-(** The shared cache is a separate directory that contains historical build
-    artifacts produced in different workspaces. To restore results from the
-    shared cache, Dune copes or hardlinks them into the build directory. *)
-module Shared : Dune_cache.Shared.S
+  val remove : Targets.Validated.t -> unit
+  val remove_target : Path.Build.t -> unit
+  val remove_subtree : Path.Build.t -> unit
+end

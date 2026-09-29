@@ -1,17 +1,5 @@
-open Stdune
-open Dune_sexp
-open Dune_config
-include Config.Toggle
-
-let enabled : t -> bool = function
-  | `Enabled -> true
-  | `Disabled -> false
-;;
-
-let of_bool = function
-  | true -> `Enabled
-  | false -> `Disabled
-;;
+open Import
+include Stdune.Toggle
 
 let all = [ "enable", `Enabled; "disable", `Disabled ]
 

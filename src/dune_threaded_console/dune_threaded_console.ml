@@ -1,7 +1,7 @@
+open Import
 include Dune_threaded_console_intf
-open Stdune
 
-let make ~frames_per_second (module Base : S) : (module Dune_console.Backend) =
+let make ~frames_per_second (module Base : S) : (module Console.Backend) =
   let module T = struct
     let mutex = Mutex.create ()
     let finish_cv = Condition.create ()
@@ -15,46 +15,47 @@ let make ~frames_per_second (module Base : S) : (module Dune_console.Backend) =
       }
     ;;
 
+    let terminal_signal_mask = ref None
+
     let finish () =
-      Mutex.lock mutex;
-      state.dirty <- true;
-      state.finish_requested <- true;
-      while not state.finished do
-        Condition.wait finish_cv mutex
-      done;
-      Mutex.unlock mutex
+      Mutex.protect mutex (fun () ->
+        state.dirty <- true;
+        state.finish_requested <- true;
+        while not state.finished do
+          Condition.wait finish_cv mutex
+        done;
+        Option.iter !terminal_signal_mask ~f:Terminal_signals.restore;
+        terminal_signal_mask := None)
     ;;
 
     let print_user_message m =
-      Mutex.lock mutex;
-      state.dirty <- true;
-      Queue.push state.messages m;
-      Mutex.unlock mutex
+      Mutex.protect mutex (fun () ->
+        state.dirty <- true;
+        Queue.push state.messages m)
     ;;
 
     let set_status_line sl =
-      Mutex.lock mutex;
-      state.dirty <- true;
-      state.status_line <- sl;
-      Mutex.unlock mutex
+      Mutex.protect mutex (fun () ->
+        state.dirty <- true;
+        state.status_line <- sl)
     ;;
 
     let print_if_no_status_line _msg = ()
 
     let reset () =
-      Mutex.lock mutex;
-      state.dirty <- true;
-      Queue.clear state.messages;
-      state.status_line <- None;
-      Exn.protect ~f:Base.reset ~finally:(fun () -> Mutex.unlock mutex)
+      Mutex.protect mutex (fun () ->
+        state.dirty <- true;
+        Queue.clear state.messages;
+        state.status_line <- None;
+        Base.reset ())
     ;;
 
     let reset_flush_history () =
-      Mutex.lock mutex;
-      state.dirty <- true;
-      Queue.clear state.messages;
-      state.status_line <- None;
-      Exn.protect ~f:Base.reset_flush_history ~finally:(fun () -> Mutex.unlock mutex)
+      Mutex.protect mutex (fun () ->
+        state.dirty <- true;
+        Queue.clear state.messages;
+        state.status_line <- None;
+        Base.reset_flush_history ())
     ;;
 
     type source =
@@ -65,22 +66,28 @@ let make ~frames_per_second (module Base : S) : (module Dune_console.Backend) =
 
     let start () =
       Base.start ();
-      Dune_engine.Scheduler.spawn_thread
+      terminal_signal_mask := Some (Terminal_signals.block ());
+      Scheduler.spawn_thread ~name:"console"
       @@ fun () ->
-      Dune_util.Terminal_signals.unblock ();
-      let last = ref (Unix.gettimeofday ()) in
-      let frame_rate = 1. /. float_of_int frames_per_second in
+      Terminal_signals.unblock ();
+      let last = ref (Time.now ()) in
+      let frame_rate = Time.Span.of_secs (1. /. float_of_int frames_per_second) in
       let cleanup exn =
         state.finished <- true;
         Option.iter exn ~f:(fun exn ->
-          Dune_util.Log.info [ Pp.text "Console failed"; Exn_with_backtrace.pp exn ]);
+          Log.warn "Console failed" [ "error", Exn_with_backtrace.to_dyn exn ]);
         (match Exn_with_backtrace.try_with Base.finish with
          | Ok () -> ()
          | Error exn ->
            (* we can't log to console because we are cleaning it up and we
               borked it *)
-           Dune_util.Log.log (fun () ->
-             [ Pp.text "Error cleaning up console"; Exn_with_backtrace.pp exn ]));
+           Log.log (fun () ->
+             Log.Message.create
+               `Warn
+               "threaded console error"
+               [ "error", Exn_with_backtrace.to_dyn exn
+               ; "message", Dyn.string "Error cleaning up console"
+               ]));
         Condition.broadcast finish_cv;
         Mutex.unlock mutex
       in
@@ -117,10 +124,12 @@ let make ~frames_per_second (module Base : S) : (module Dune_console.Backend) =
              state.dirty <- false);
           Mutex.unlock mutex;
           let new_time =
-            let now = Unix.gettimeofday () in
+            let now = Time.now () in
             let time_budget =
-              let elapsed = now -. !last in
-              if elapsed >= frame_rate then 0. else frame_rate -. elapsed
+              let elapsed = Time.diff now !last in
+              if elapsed >= frame_rate
+              then Time.Span.zero
+              else Time.Span.diff frame_rate elapsed
             in
             match Base.handle_user_events ~now ~time_budget mutex state with
             | time -> time
@@ -149,6 +158,11 @@ let make ~frames_per_second (module Base : S) : (module Dune_console.Backend) =
         Mutex.lock mutex;
         cleanup (Some exn)
     ;;
+
+    let start () =
+      let (_ : Thread.t) = start () in
+      ()
+    ;;
   end
   in
   (module T)
@@ -158,7 +172,7 @@ let progress ~frames_per_second =
   make
     ~frames_per_second
     (module struct
-      include (val Dune_console.Backend.progress_no_flush)
+      include (val Console.Backend.progress_no_flush)
 
       let render (state : state) =
         while not (Queue.is_empty state.messages) do
@@ -172,8 +186,8 @@ let progress ~frames_per_second =
          the next loop iteration. Because it doesn't react to user input, it cannot
          modify the UI state, and as a consequence doesn't need the mutex. *)
       let handle_user_events ~now ~time_budget (_ : Mutex.t) (_ : state) =
-        Unix.sleepf time_budget;
-        now +. time_budget
+        Unix.sleepf (Time.Span.to_secs time_budget);
+        Time.add now time_budget
       ;;
     end)
 ;;

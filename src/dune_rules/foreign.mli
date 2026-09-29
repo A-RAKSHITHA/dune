@@ -105,7 +105,6 @@ module Stubs : sig
     :  loc:Loc.t
     -> language:Foreign_language.t
     -> names:Ordered_set_lang.t
-    -> mode:Mode.Select.t
     -> flags:Ordered_set_lang.Unexpanded.t
     -> t
 
@@ -121,14 +120,13 @@ module Source : sig
     | Stubs of Stubs.t
     | Ctypes of Ctypes_field.t
 
-  type t = private
-    { kind : kind
-    ; path : Path.Build.t
-    }
+  type t
 
+  val kind : t -> kind
   val language : t -> Foreign_language.t
   val mode : t -> Mode.Select.t
   val path : t -> Path.Build.t
+  val include_dirs : t -> Stubs.Include_dir.t list
 
   (** The name of the corresponding object file; for example, [name] for a
       source file [some/path/name.cpp] of [name_mode] if the stub is

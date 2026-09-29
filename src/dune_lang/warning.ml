@@ -1,7 +1,5 @@
-open Stdune
-open Dune_config
+open Import
 module Stringlike = Dune_util.Stringlike
-module Syntax = Dune_sexp.Syntax
 
 module Name = struct
   include String
@@ -21,7 +19,7 @@ end
 type t =
   { name : Name.t
   ; since : Syntax.Version.t (* The version where this warning was introduced. *)
-  ; default : Syntax.Version.t -> Config.Toggle.t
+  ; default : Syntax.Version.t -> Toggle.t
     (* Decide the version where this warning should be enabled. This is
      needed because some warnings were introduced before this module
      existed *)
@@ -46,23 +44,23 @@ let make ~default ~name ~since =
 ;;
 
 module Settings = struct
-  type nonrec t = (t * Config.Toggle.t) list
+  type nonrec t = (t * Toggle.t) list
 
   let empty = []
   let to_dyn = Dyn.opaque
 
-  let decode : t Dune_sexp.Decoder.t =
+  let decode : t Decoder.t =
     let all_warnings =
       lazy
         (frozen := true;
          Table.values all)
     in
-    let open Dune_sexp.Decoder in
+    let open Decoder in
     let warning w =
       Syntax.since Stanza.syntax w.since
       >>> string
       |> map_validate ~f:(fun s ->
-        match Config.Toggle.of_string s with
+        match Toggle.of_string s with
         | Ok s -> Ok (w, s)
         | Error s -> Error (User_message.make [ Pp.text s ]))
     in

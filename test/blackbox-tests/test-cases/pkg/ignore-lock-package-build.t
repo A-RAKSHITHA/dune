@@ -2,11 +2,8 @@ When building a project with -p we should ignore the lock directory. This is so
 that packages with lockdirs in their source archive can be built by opam
 without using locked dependencies.
 
-  $ . ./helpers.sh
-
   $ make_lockdir
-
-  $ cat >dune.lock/test.pkg <<EOF
+  $ make_lockpkg test <<EOF
   > (build
   >  (run echo "I have not been ignored."))
   > EOF

@@ -24,6 +24,23 @@ Examples:
    (dirs :standard \ test* foo*) ;; exclude all dirs that start with test or foo
 
 Dune will not scan a directory that isn't included in this stanza. Any contained
-``dune`` (or other special) files won't be interpreted either and will be
-treated as raw data. It is however possible to depend on files inside ignored
-subdirectories.
+``dune`` (or other special) files won't be interpreted either. It is still
+possible to depend on a specific file inside an excluded subdirectory by naming
+that file explicitly, but Dune won't discover files there by traversing the
+subdirectory.
+
+Use :doc:`/reference/dune/data_only_dirs` when Dune should ignore ``dune`` files
+inside a subdirectory but still treat the subdirectory's files as source files
+for dependency discovery. A data-only directory must still be included by
+``dirs``; if ``dirs`` excludes it, it is ignored rather than data-only.
+
+.. warning::
+
+  Directory names should not contain any trailing slashes.
+
+If you want to exclude a subdirectory, such as `foo/bar`, you need to use the
+:doc:`/reference/dune/subdir` stanza:
+
+.. code:: dune
+
+  (subdir foo (dirs :standard \ bar)) ;; exclude foo/bar

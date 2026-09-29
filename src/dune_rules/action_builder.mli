@@ -1,4 +1,5 @@
 open Import
+open Action_types
 
 include
   module type of Dune_engine.Action_builder
@@ -34,9 +35,6 @@ val path_set : Path.Set.t -> unit t
     extra value. *)
 val dyn_memo_deps : (Dep.Set.t * 'a) Memo.t -> 'a t
 
-(** Record dynamic dependencies *)
-val dyn_paths : ('a * Path.t list) t -> 'a t
-
 val dyn_paths_unit : Path.t list t -> unit t
 
 (** [lines_of path] returns a description that when run will return the contents
@@ -47,6 +45,7 @@ val lines_of : Path.t -> string list t
 val read_sexp : Path.t -> Dune_sexp.Ast.t t
 
 val symlink_dir : src:Path.t -> dst:Path.Build.t -> Action.Full.t With_targets.t
+val copy_dir : src:Path.t -> dst:Path.Build.t -> Action.Full.t With_targets.t
 val symlink : src:Path.t -> dst:Path.Build.t -> Action.Full.t With_targets.t
 val copy : src:Path.t -> dst:Path.Build.t -> Action.Full.t With_targets.t
 
@@ -55,19 +54,19 @@ val progn : Action.Full.t With_targets.t list -> Action.Full.t With_targets.t
 
 (** Create a file with the given contents. *)
 val write_file
-  :  ?perm:Action.File_perm.t
+  :  ?perm:File_perm.t
   -> Path.Build.t
   -> string
   -> Action.Full.t With_targets.t
 
 val write_file_dyn
-  :  ?perm:Action.File_perm.t
+  :  ?perm:File_perm.t
   -> Path.Build.t
   -> string t
   -> Action.Full.t With_targets.t
 
 val with_stdout_to
-  :  ?perm:Action.File_perm.t
+  :  ?perm:File_perm.t
   -> Path.Build.t
   -> Action.Full.t t
   -> Action.Full.t With_targets.t
@@ -98,7 +97,7 @@ val paths_matching_unit : loc:Loc.t -> File_selector.t -> unit t
 
 (** [env_var v] records [v] as an environment variable that is read by the
     action produced by the action builder. *)
-val env_var : string -> unit t
+val env_var : Env.Var.t -> unit t
 
 (** Add targets to an action builder, turning a target-less [Action_builder.t]
     into [With_targets.t]. *)

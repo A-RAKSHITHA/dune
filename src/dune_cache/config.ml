@@ -8,17 +8,35 @@ module Reproducibility_check = struct
     | Check_with_probability of float
     | Check
 
+  let repr =
+    Repr.variant
+      "reproducibility-check"
+      [ Repr.case0 "Skip" ~test:(function
+          | Skip -> true
+          | Check_with_probability _ | Check -> false)
+      ; Repr.case "Check_with_probability" Repr.float ~proj:(function
+          | Check_with_probability p -> Some p
+          | Skip | Check -> None)
+      ; Repr.case0 "Check" ~test:(function
+          | Check -> true
+          | Skip | Check_with_probability _ -> false)
+      ]
+  ;;
+
+  let equal a b =
+    match a, b with
+    | Skip, Skip | Check, Check -> true
+    | Check_with_probability a, Check_with_probability b -> Float.equal a b
+    | _, _ -> false
+  ;;
+
   let sample = function
     | Skip -> false
     | Check_with_probability p -> Random.float 1. < p
     | Check -> true
   ;;
 
-  let to_dyn = function
-    | Skip -> Dyn.Variant ("Skip", [])
-    | Check_with_probability p -> Dyn.Variant ("Check_with_probability", [ Dyn.Float p ])
-    | Check -> Dyn.Variant ("Check", [])
-  ;;
+  let to_dyn = Repr.to_dyn repr
 
   let check_with_probability ?loc p =
     let error () =
@@ -41,6 +59,6 @@ end
 type t =
   | Disabled
   | Enabled of
-      { storage_mode : Dune_cache_storage.Mode.t
+      { storage_mode : Mode.t
       ; reproducibility_check : Reproducibility_check.t
       }

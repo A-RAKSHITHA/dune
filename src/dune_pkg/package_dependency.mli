@@ -1,4 +1,4 @@
-open! Stdune
+open Stdune
 
 module Constraint : sig
   module Op : sig
@@ -24,6 +24,7 @@ type t = Dune_lang.Package_dependency.t =
 
 include module type of Dune_lang.Package_dependency with type t := t
 
+val opam_constraint : Constraint.t -> OpamParserTypes.FullPos.value
 val opam_depend : t -> OpamParserTypes.FullPos.value
 val to_opam_filtered_formula : t -> OpamTypes.filtered_formula
 

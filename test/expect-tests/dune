@@ -1,71 +1,36 @@
+;; Keep Git invocations independent of user and system configuration.
+
+(env
+ (_
+  (env-vars
+   (GIT_CONFIG_GLOBAL /dev/null)
+   (GIT_CONFIG_SYSTEM /dev/null))))
+
 (library
  (name dune_unit_tests)
- (modules :standard \ findlib_tests persistent_tests)
  (libraries
   ocaml_config
-  spawn
   dune_tests_common
   stdune
+  targets
   dune_util
   dune_engine
+  dune_scheduler
+  dune_threaded_console
   dune_rules
+  source
   fiber
   dune_lang
-  memo
-  test_scheduler
-  ;; This is because of the (implicit_transitive_deps false)
-  ;; in dune-project
-  ppx_expect.config
-  ppx_expect.config_types
-  base
-  ppx_inline_test.config)
- (inline_tests)
- (preprocess
-  (pps ppx_expect)))
-
-(library
- (name findlib_tests)
- (inline_tests
-  (deps
-   (source_tree ../unit-tests/findlib-db)
-   (source_tree ../unit-tests/toolchain.d)))
- (modules findlib_tests)
- (libraries
-  ocaml_config
   ocaml
-  dune_tests_common
-  stdune
-  dune_engine
-  dune_rules
-  dune_lang
-  dune_findlib
   memo
-  test_scheduler
+  unix
+  threads.posix
   ;; This is because of the (implicit_transitive_deps false)
   ;; in dune-project
   ppx_expect.config
   ppx_expect.config_types
   base
   ppx_inline_test.config)
- (preprocess
-  (pps ppx_expect)))
-
-(library
- (name persistent_tests)
- (modules persistent_tests)
  (inline_tests)
  (preprocess
-  (pps ppx_expect))
- (libraries
-  dune_util
-  dyn
-  stdune
-  dune_engine
-  dune_rules
-  dune_digest
-  ;; This is because of the (implicit_transitive_deps false)
-  ;; in dune-project
-  ppx_expect.config
-  ppx_expect.config_types
-  base
-  ppx_inline_test.config))
+  (pps ppx_expect)))

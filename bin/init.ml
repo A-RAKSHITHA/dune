@@ -70,16 +70,18 @@ let print_completion kind name =
 
 let path =
   let docv = "PATH" in
-  Arg.(value & pos 1 (some string) None & info [] ~docv)
+  (* CR-someday Alizter: document this option *)
+  Arg.(value & pos 1 (some string) None & info [] ~docv ~doc:None)
 ;;
 
 let context_cwd : Init_context.t Term.t =
-  let+ builder = Common.Builder.term
+  let+ builder = Common.Builder.term_no_trace_no_pkg
   and+ path = path in
   let builder = Common.Builder.set_default_root_is_cwd builder true in
-  let common, config = Common.init builder in
+  let _common, config = Common.init builder in
   let project_defaults = config.project_defaults in
-  Scheduler.go ~common ~config (fun () ->
+  (* CR-soon rgrinberg: remove pointless args *)
+  Scheduler_setup.no_build_no_rpc ~config (fun () ->
     Memo.run (Init_context.make path project_defaults))
 ;;
 
@@ -118,13 +120,13 @@ end
 let libraries =
   let docv = "LIBRARIES" in
   let doc = "A comma separated list of libraries on which the component depends" in
-  Arg.(value & opt (list atom_conv) [] & info [ "libs" ] ~docv ~doc)
+  Arg.(value & opt (list atom_conv) [] & info [ "libs" ] ~docv ~doc:(Some doc))
 ;;
 
 let pps =
   let docv = "PREPROCESSORS" in
   let doc = "A comma separated list of ppx preprocessors used by the component" in
-  Arg.(value & opt (list atom_conv) [] & info [ "ppx" ] ~docv ~doc)
+  Arg.(value & opt (list atom_conv) [] & info [ "ppx" ] ~docv ~doc:(Some doc))
 ;;
 
 let public : Public_name.t option Term.t =
@@ -136,13 +138,14 @@ let public : Public_name.t option Term.t =
   Arg.(
     value
     & opt ~vopt:(Some Public_name.Use_name) (some Public_name.conv) None
-    & info [ "public" ] ~docv ~doc)
+    & info [ "public" ] ~docv ~doc:(Some doc))
 ;;
 
 let common : Component.Options.Common.t Term.t =
   let+ name =
     let docv = "NAME" in
-    Arg.(required & pos 0 (some component_name_conv) None & info [] ~docv)
+    (* CR-someday Alizter: document this option *)
+    Arg.(required & pos 0 (some component_name_conv) None & info [] ~docv ~doc:None)
   and+ public = public
   and+ libraries = libraries
   and+ pps = pps in
@@ -153,7 +156,8 @@ let common : Component.Options.Common.t Term.t =
 let project_common : Component.Options.Common.t Term.t =
   let+ project_name =
     let docv = "NAME" in
-    Arg.(required & pos 0 (some project_name_conv) None & info [] ~docv)
+    (* CR-someday Alizter: document this option *)
+    Arg.(required & pos 0 (some project_name_conv) None & info [] ~docv ~doc:None)
   and+ libraries = libraries
   and+ pps = pps in
   let public = Dune_project_name.to_string_hum project_name in
@@ -177,7 +181,7 @@ let inline_tests : bool Term.t =
     "Whether to use inline tests. Only applicable for $(b,library) and $(b,project) \
      components."
   in
-  Arg.(value & flag & info [ "inline-tests" ] ~docv ~doc)
+  Arg.(value & flag & info [ "inline-tests" ] ~docv ~doc:(Some doc))
 ;;
 
 let opt_default ~default term = Term.(const (Option.value ~default) $ term)
@@ -229,7 +233,7 @@ let project =
   in
   let man = [] in
   Cmd.v (Cmd.info "project" ~doc ~man)
-  @@ let+ common_builder = Builder.term
+  @@ let+ common_builder = Builder.term_no_trace_no_pkg
      and+ path = path
      and+ common = project_common
      and+ inline_tests = inline_tests
@@ -245,7 +249,7 @@ let project =
          Arg.(
            value
            & opt (some (enum Component.Options.Project.Template.commands)) None
-           & info [ "kind" ] ~docv ~doc)
+           & info [ "kind" ] ~docv ~doc:(Some doc))
      and+ pkg =
        let docv = "PACKAGE_MANAGER" in
        let doc =
@@ -257,13 +261,14 @@ let project =
          Arg.(
            value
            & opt (some (enum Component.Options.Project.Pkg.commands)) None
-           & info [ "pkg" ] ~docv ~doc)
+           & info [ "pkg" ] ~docv ~doc:(Some doc))
      in
      let name =
        match common.public with
        | None -> Dune_lang.Atom.to_string common.name
        | Some public -> Dune_init.Public_name.to_string public
      in
+     check_module_name common.name;
      let context =
        let init_context = Init_context.make path in
        let root =
@@ -277,9 +282,11 @@ let project =
        in
        let builder = Builder.set_root common_builder root in
        let (_ : Fpath.mkdir_p_result) = Fpath.mkdir_p root in
-       let common, config = Common.init builder in
+       let _common, config = Common.init builder in
        let project_defaults = config.project_defaults in
-       Scheduler.go ~common ~config (fun () -> Memo.run @@ init_context project_defaults)
+       (* CR-soon rgrinberg: remove pointless args *)
+       Scheduler_setup.no_build_no_rpc ~config (fun () ->
+         Memo.run @@ init_context project_defaults)
      in
      Component.init
        (Project { context; common; options = { template; inline_tests; pkg } });
@@ -290,10 +297,11 @@ let group =
   let doc = "Command group for initializing Dune components." in
   let synopsis =
     Common.command_synopsis
-      [ "init proj NAME [PATH] [OPTION]... "
-      ; "init exec NAME [PATH] [OPTION]... "
-      ; "init lib NAME [PATH] [OPTION]... "
+      [ "init project NAME [PATH] [OPTION]... "
+      ; "init executable NAME [PATH] [OPTION]... "
+      ; "init library NAME [PATH] [OPTION]... "
       ; "init test NAME [PATH] [OPTION]... "
+      ; "init start-file [PATH]"
       ]
   in
   let man =
@@ -320,21 +328,24 @@ let group =
         [ ( {|Generate a project skeleton for an executable named `myproj' in a
             new directory named `myproj', depending on the bos library and
             using inline tests along with ppx_inline_test |}
-          , {|dune init proj myproj --libs bos --ppx ppx_inline_test --inline-tests|} )
+          , {|dune init project myproj --libs bos --ppx ppx_inline_test --inline-tests|} )
         ; ( {|Configure an executable component named `myexe' in a dune file in the
             current directory|}
-          , {|dune init exe myexe|} )
+          , {|dune init executable myexe|} )
         ; ( {|Configure a library component named `mylib' in a dune file in the ./src
             directory depending on the core and cmdliner libraries, the ppx_let
             and ppx_inline_test preprocessors, and declared as using inline
             tests|}
-          , {|dune init lib mylib src --libs core,cmdliner --ppx ppx_let,ppx_inline_test --inline-tests|}
+          , {|dune init library mylib src --libs core,cmdliner --ppx ppx_let,ppx_inline_test --inline-tests|}
           )
         ; ( {|Configure a test component named `mytest' in a dune file in the
             ./test directory that depends on `mylib'|}
           , {|dune init test mytest test --libs mylib|} )
+        ; {|Write the standard `start/dune` helper file|}, {|dune init start-file|}
         ]
     ]
   in
-  Cmd.group (Cmd.info "init" ~doc ~man) [ executable; project; library; test ]
+  Cmd.group
+    (Cmd.info "init" ~doc ~man)
+    [ executable; project; library; test; Start_file.command ]
 ;;

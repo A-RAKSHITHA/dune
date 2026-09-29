@@ -32,10 +32,7 @@ Then we create a workspace with some_package2
 
   $ mkdir proj1
   $ cd proj1
-  $ cat >dune-project <<EOF
-  > (lang dune 2.8)
-  > (package (name some_package2))
-  > EOF
+  $ make_dune_project_with_package 2.8 some_package2
   $ cat >dune <<EOF
   > (library
   >  (name lib1)
@@ -48,9 +45,7 @@ Then we try to build a library that uses some_package1 which in turn
 depends on the overlapping some_package2:
   $ mkdir proj2
   $ cd proj2
-  $ cat >dune-project <<EOF
-  > (lang dune 2.8)
-  > EOF
+  $ make_dune_project 2.8
   $ cat >dune <<EOF
   > (library
   >  (name bar)
@@ -106,7 +101,6 @@ We also make sure the error exists for executables:
     -> required by library "some_package1" in
        $TESTCASE_ROOT/use/../external/_build/install/default/lib/some_package1
   -> required by executable bar in proj2/dune:2
-  -> required by _build/default/proj2/.bar.eobjs/byte/dune__exe__Bar.cmi
   -> required by _build/default/proj2/.bar.eobjs/native/dune__exe__Bar.cmx
   -> required by _build/default/proj2/bar.exe
   [1]

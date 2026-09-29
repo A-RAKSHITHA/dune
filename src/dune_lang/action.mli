@@ -4,37 +4,24 @@
     Eventually, these are all desugared into [Action.t], which are actions
     executed by the build system. *)
 
-open Stdune
-open Dune_sexp
-open Dune_util.Action
+open Import
+open Stdune.Action_types
 
 module Action_plugin : sig
   val syntax : Syntax.t
 end
 
 module Diff : sig
-  open Diff
-
-  module Mode : sig
-    type t = Mode.t =
-      | Binary
-      | Text
-  end
-
-  type nonrec ('path, 'target) t = ('path, 'target) t =
-    { optional : bool
-    ; mode : Mode.t
-    ; file1 : 'path
-    ; file2 : 'target
-    }
-
   val decode
     :  'path Decoder.t
     -> 'target Decoder.t
     -> optional:bool
-    -> ('path, 'target) t Decoder.t
+    -> ('path, 'target) Action_types.Diff.t Decoder.t
 
-  val decode_binary : 'path Decoder.t -> 'target Decoder.t -> ('path, 'target) t Decoder.t
+  val decode_binary
+    :  'path Decoder.t
+    -> 'target Decoder.t
+    -> ('path, 'target) Action_types.Diff.t Decoder.t
 end
 
 module Outputs : sig
@@ -61,7 +48,7 @@ module File_perm : sig
     | Executable
 
   val suffix : t -> string
-  val to_unix_perm : t -> int
+  val to_unix_perm : t -> Permissions.Mode.t
 end
 
 module Env_update : sig
@@ -83,6 +70,7 @@ module Env_update : sig
 
   val map : 'a t -> f:('a -> 'b) -> 'b t
   val equal : ('a -> 'a -> bool) -> 'a t -> 'a t -> bool
+  val repr : 'a Repr.t -> 'a t Repr.t
   val to_dyn : 'a Dyn.builder -> 'a t Dyn.builder
   val decode : String_with_vars.t t Decoder.t
   val encode : String_with_vars.t t -> Dune_sexp.t
@@ -90,6 +78,7 @@ end
 
 type t =
   | Run of Slang.t list
+  | Runexec of Slang.t list
   | With_accepted_exit_codes of int Predicate_lang.t * t
   | Dynamic_run of String_with_vars.t * String_with_vars.t list
   | Chdir of String_with_vars.t * t
@@ -111,7 +100,7 @@ type t =
   | Bash of String_with_vars.t
   | Write_file of String_with_vars.t * File_perm.t * String_with_vars.t
   | Mkdir of String_with_vars.t
-  | Diff of (String_with_vars.t, String_with_vars.t) Diff.t
+  | Diff of (String_with_vars.t, String_with_vars.t) Action_types.Diff.t
   | No_infer of t
   | Pipe of Outputs.t * t list
   | Cram of String_with_vars.t
@@ -125,11 +114,16 @@ val encode : t Encoder.t
 val decode_dune_file : t Decoder.t
 val decode_pkg : t Decoder.t
 
-(** Raises User_error on invalid action. *)
-val validate : loc:Loc.t -> t -> unit
+val map
+  :  t
+  -> string_with_vars:(String_with_vars.t -> String_with_vars.t)
+  -> slang:(Slang.t -> Slang.t)
+  -> blang:(Slang.Blang.t -> Slang.Blang.t)
+  -> t
 
 val compare_no_locs : t -> t -> Ordering.t
 val equal_no_locs : t -> t -> bool
+val repr : t Repr.t
 val to_dyn : t -> Dyn.t
 val remove_locs : t -> t
 val equal : t -> t -> bool

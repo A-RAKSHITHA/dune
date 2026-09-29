@@ -1,8 +1,6 @@
 We try to use a project that has both opam files and a dune-project file. We
 should favor the dune metadata in such a case.
 
-  $ . ../helpers.sh
-
   $ mkrepo
   $ add_mock_repo_if_needed
 
@@ -28,22 +26,22 @@ should favor the dune metadata in such a case.
   > build: [ "echo" "bar" ]
   > EOF
 
-  $ dune pkg lock
+  $ dune_pkg_lock_normalized
   Solution for dune.lock:
   - bar.dev
   - foo.dev
 
-  $  cat dune.lock/bar.pkg | sed "/source/,//d"
+  $ dune_cmd delete-between 'source' '^$' < ${default_lock_dir}/bar.dev.pkg 
   (version dev)
   
-  (dune)
-  
+  (build
+   (all_platforms ((dune))))
   
   (dev)
-  $  cat dune.lock/foo.pkg | sed "/source/,//d"
+  $ dune_cmd delete-between 'source' '^$' < ${default_lock_dir}/foo.dev.pkg 
   (version dev)
   
-  (dune)
-  
+  (build
+   (all_platforms ((dune))))
   
   (dev)

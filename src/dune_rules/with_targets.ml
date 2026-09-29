@@ -1,5 +1,6 @@
 open Import
 module Action_builder = Dune_engine.Action_builder
+open Action_types
 include Dune_engine.Action_builder
 open O
 
@@ -26,21 +27,20 @@ let add t ~file_targets =
 ;;
 
 let add_directories t ~directory_targets =
-  { build = t.build
-  ; targets =
-      Targets.combine
-        t.targets
-        (Targets.create
-           ~dirs:(Path.Build.Set.of_list directory_targets)
-           ~files:Path.Build.Set.empty)
-  }
+  match directory_targets with
+  | [] -> t
+  | directory_targets ->
+    { build = t.build
+    ; targets =
+        Targets.combine
+          t.targets
+          (Targets.create
+             ~dirs:(Path.Build.Set.of_list directory_targets)
+             ~files:Path.Build.Set.empty)
+    }
 ;;
 
 let map { build; targets } ~f = { build = map build ~f; targets }
-
-let map2 x y ~f =
-  { build = map2 x.build y.build ~f; targets = Targets.combine x.targets y.targets }
-;;
 
 let both x y =
   { build = both x.build y.build; targets = Targets.combine x.targets y.targets }
@@ -60,17 +60,18 @@ end
 open O
 
 let all xs =
+  let rec collect builds targets = function
+    | [] -> builds, targets
+    | x :: xs -> collect (x.build :: builds) (Targets.combine x.targets targets) xs
+  in
   match xs with
   | [] -> return []
   | xs ->
-    let build, targets =
-      Stdune.List.fold_left xs ~init:([], Targets.empty) ~f:(fun (builds, targets) x ->
-        x.build :: builds, Targets.combine x.targets targets)
-    in
-    { build = all (Stdune.List.rev build); targets }
+    let builds, targets = collect [] Targets.empty xs in
+    { build = all (Stdune.List.rev builds); targets }
 ;;
 
-let write_file_dyn ?(perm = Action.File_perm.Normal) fn s =
+let write_file_dyn ?(perm = File_perm.Normal) fn s =
   add
     ~file_targets:[ fn ]
     (let+ s = s in

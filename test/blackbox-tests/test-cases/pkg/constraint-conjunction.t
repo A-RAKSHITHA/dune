@@ -1,7 +1,6 @@
 Exercise the solver on a package with a conjunction in its dependency
 constraints.
 
-  $ . ./helpers.sh
   $ mkrepo
 
   $ mkpkg a
@@ -17,7 +16,8 @@ constraints.
   - a.0.0.1
   - foo.0.0.1
 
-  $ cat dune.lock/foo.pkg
+  $ cat ${default_lock_dir}/foo.0.0.1.pkg
   (version 0.0.1)
   
-  (depends a)
+  (depends
+   (all_platforms (a)))

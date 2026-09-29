@@ -1,4 +1,3 @@
-open! Stdune
 open Import
 
 (* The path after the man section mangling done by opam-installer. This roughly
@@ -7,12 +6,15 @@ module Dst : sig
   type t
 
   val to_string : t -> string
-  val concat_all : t -> string list -> t
-  val add_prefix : string -> t -> t
-  val add_suffix : t -> string -> t
+  val local : t -> Path.Local.t
+  val append_local : t -> Path.Local.t -> t
+  val prepend_local : Path.Local.t -> t -> t
   val to_install_file : t -> src_basename:string -> section:Section.t -> string option
   val of_install_file : string option -> src_basename:string -> section:Section.t -> t
+
+  (* CR-someday rgrinberg: get rid of this function *)
   val explicit : string -> t
+  val maybe_add_exe : t -> t
   val compare : t -> t -> Ordering.t
   val infer : src_basename:string -> Section.t -> t
 
@@ -24,10 +26,11 @@ end = struct
   type t = string
 
   let to_string t = t
-  let concat_all t suffixes = List.fold_left suffixes ~init:t ~f:Filename.concat
-  let add_prefix p t = Filename.concat p t
-  let add_suffix t p = Filename.concat t p
-  let explicit t = t
+  let local t = Path.Local.of_string t
+  let append_local t l = Filename.concat t (Path.Local.to_string l)
+  let prepend_local l t = Path.Local.to_string (Path.Local.relative l t)
+  let explicit s = s
+  let maybe_add_exe t = Bin.add_exe t
   let compare = String.compare
 
   let man_subdir s =
@@ -73,74 +76,33 @@ end = struct
   let install_path t section p = Path.relative (Paths.get t section) (to_string p)
 end
 
-type kind =
-  [ `File
-  | `Directory
-  | `Source_tree
-  ]
-
-type 'src t =
+type ('src, 'kind) t =
   { src : 'src
-  ; kind : kind
+  ; kind : 'kind
   ; dst : Dst.t
   ; section : Section.t
   ; optional : bool
   }
 
+let has_extension filename ext =
+  let extension =
+    Stdlib.Filename.extension filename |> Filename.Extension.Or_empty.of_string_exn
+  in
+  Filename.Extension.Or_empty.check extension ext
+;;
+
 let map_dst t ~f = { t with dst = f t.dst }
 
-let to_dyn { src; kind; dst; section; optional } =
+let to_dyn =
+  fun dyn_of_kind f { src; kind; dst; section; optional } ->
   let open Dyn in
-  let dyn_of_kind = function
-    | `File -> String "file"
-    | `Directory -> String "directory"
-    | `Source_tree -> String "source_tree"
-  in
   record
-    [ "src", Path.Build.to_dyn src
+    [ "src", f src
     ; "kind", dyn_of_kind kind
     ; "dst", Dst.to_dyn dst
     ; "section", Section.to_dyn section
-    ; "optional", Dyn.Bool optional
+    ; "optional", Dyn.bool optional
     ]
-;;
-
-module Sourced = struct
-  type source =
-    | User of Loc.t
-    | Dune
-
-  type nonrec t =
-    { source : source
-    ; entry : Path.Build.t t
-    }
-
-  let create ?loc entry =
-    { source =
-        (match loc with
-         | None -> Dune
-         | Some loc -> User loc)
-    ; entry
-    }
-  ;;
-
-  let to_dyn { source; entry } =
-    let open Dyn in
-    let source_to_dyn = function
-      | Dune -> Variant ("Dune", [])
-      | User loc -> Variant ("User", [ Loc.to_dyn loc ])
-    in
-    Record [ "source", source_to_dyn source; "entry", to_dyn entry ]
-  ;;
-end
-
-let compare compare_src { optional; src; dst; section; kind } t =
-  let open Ordering.O in
-  let= () = Section.compare section t.section in
-  let= () = Dst.compare dst t.dst in
-  let= () = compare_src src t.src in
-  let= () = Bool.compare optional t.optional in
-  Poly.compare kind t.kind
 ;;
 
 let adjust_dst_gen =
@@ -156,7 +118,7 @@ let adjust_dst_gen =
   in
   fun ~(src_suffix : String_with_vars.known_suffix) ~dst ~section ->
     match dst with
-    | Some dst' when Filename.extension dst' = ".exe" -> Dst.explicit dst'
+    | Some dst' when has_extension dst' Filename.Extension.exe -> Dst.explicit dst'
     | _ ->
       let dst =
         match dst with
@@ -175,18 +137,21 @@ let adjust_dst_gen =
       let is_executable =
         let has_ext ext =
           match src_suffix with
-          | Full s -> String.is_suffix s ~suffix:ext
+          | Full s -> String.ends_with ~suffix:ext s
           | Partial { source_pform; suffix } ->
-            if String.is_suffix suffix ~suffix:ext
+            if String.ends_with ~suffix:ext suffix
             then true
-            else if String.is_suffix ext ~suffix
+            else if String.ends_with ~suffix ext
             then error source_pform
             else false
         in
         has_ext ".exe" || has_ext ".bc"
       in
-      if Sys.win32 && is_executable && Filename.extension (Dst.to_string dst) <> ".exe"
-      then Dst.explicit (Dst.to_string dst ^ ".exe")
+      let dst_has_exe = has_extension (Dst.to_string dst) Filename.Extension.exe in
+      if Sys.win32 && is_executable && not dst_has_exe
+      then
+        Dst.explicit
+          (Dst.to_string dst ^ Filename.Extension.to_string Filename.Extension.exe)
       else dst
 ;;
 
@@ -198,120 +163,247 @@ let adjust_dst' ~src ~dst ~section =
   adjust_dst_gen ~src_suffix:(Full (Path.to_string (Path.build src))) ~dst ~section
 ;;
 
-let make section ?dst ~kind src =
-  let dst = adjust_dst' ~src ~dst ~section in
-  { optional = false; src; dst; section; kind }
+let compare_entry
+      (type a)
+      (type b)
+      (compare_src : a -> a -> Ordering.t)
+      (compare_kind : b -> b -> Ordering.t)
+      { optional; src; dst; section; kind }
+      t
+  =
+  match Section.compare section t.section with
+  | (Lt | Gt) as ordering -> ordering
+  | Eq ->
+    (match Dst.compare dst t.dst with
+     | (Lt | Gt) as ordering -> ordering
+     | Eq ->
+       (match compare_src src t.src with
+        | (Lt | Gt) as ordering -> ordering
+        | Eq ->
+          (match Bool.compare optional t.optional with
+           | (Lt | Gt) as ordering -> ordering
+           | Eq -> compare_kind kind t.kind)))
 ;;
 
-let make_with_dst section dst ~kind ~src = { optional = false; src; dst; section; kind }
-let set_src t src = { t with src }
-let set_kind t kind = { t with kind }
 let relative_installed_path t ~paths = Dst.install_path paths t.section t.dst
 
-let add_install_prefix t ~paths ~prefix =
-  let opam_will_install_in_this_dir = Paths.get paths t.section in
-  let i_want_to_install_the_file_as =
-    relative_installed_path t ~paths
-    |> Path.as_in_source_tree_exn
-    |> Path.append_source prefix
-  in
-  let dst =
-    Path.reach i_want_to_install_the_file_as ~from:opam_will_install_in_this_dir
-  in
-  { t with dst = Dst.explicit dst }
-;;
+module Expanded = struct
+  type kind =
+    | File
+    | Directory
 
-let of_install_file ~optional ~src ~dst ~section =
-  { src
-  ; section
-  ; dst = Dst.of_install_file ~section ~src_basename:(Path.basename src) dst
-  ; kind = `File
-  ; optional
-  }
-;;
+  let repr_kind =
+    Repr.variant
+      "kind"
+      [ Repr.case0 "Directory" ~test:(function
+          | Directory -> true
+          | _ -> false)
+      ; Repr.case0 "File" ~test:(function
+          | File -> true
+          | _ -> false)
+      ]
+  ;;
 
-let dyn_of_kind =
-  let open Dyn in
-  function
-  | `File -> variant "File" []
-  | `Directory -> variant "Directory" []
-  | `Source_tree -> variant "Source_tree" []
-;;
+  include Repr.Poly (struct
+      type t = kind
 
-let to_dyn f { optional; src; kind; dst; section } =
-  let open Dyn in
-  record
-    [ "src", f src
-    ; "kind", dyn_of_kind kind
-    ; "dst", Dst.to_dyn dst
-    ; "section", Section.to_dyn section
-    ; "optional", Dyn.bool optional
-    ]
-;;
+      let repr = repr_kind
+    end)
 
-let group entries =
-  List.map entries ~f:(fun (entry : _ t) -> entry.section, entry)
-  |> Section.Map.of_list_multi
-;;
+  let compare_kind = compare
 
-let gen_install_file entries =
-  let buf = Buffer.create 4096 in
-  let pr fmt = Printf.bprintf buf (fmt ^^ "\n") in
-  Section.Map.iteri (group entries) ~f:(fun section entries ->
-    pr "%s: [" (Section.to_string section);
-    List.sort ~compare:(compare Path.compare) entries
-    |> List.iter ~f:(fun (e : Path.t t) ->
-      let src = Path.to_string e.src in
-      match
-        Dst.to_install_file ~src_basename:(Path.basename e.src) ~section:e.section e.dst
-      with
-      | None -> pr "  %S" src
-      | Some dst -> pr "  %S {%S}" src dst);
-    pr "]");
-  Buffer.contents buf
-;;
+  type nonrec 'src t = ('src, kind) t
 
-let load_install_file path local =
-  let open OpamParserTypes.FullPos in
-  let file = Io.with_lexbuf_from_file path ~f:Dune_pkg.Opam_file.parse in
-  let fail { filename = pos_fname; start; stop } msg =
-    let position_of_loc (pos_lnum, pos_cnum) =
-      { Lexing.pos_fname; pos_lnum; pos_bol = 0; pos_cnum }
+  let set_src t src = { t with src }
+
+  let add_install_prefix t ~paths ~prefix =
+    let opam_will_install_in_this_dir = Paths.get paths t.section in
+    let i_want_to_install_the_file_as =
+      relative_installed_path t ~paths
+      |> Path.as_in_source_tree_exn
+      |> Path.append_source prefix
     in
-    let start = position_of_loc start in
-    let stop = position_of_loc stop in
-    let loc = Loc.create ~start ~stop in
-    User_error.raise ~loc [ Pp.text msg ]
-  in
-  List.concat_map file.file_contents ~f:(function
-    | { pelem = Variable (section, files); pos } ->
-      (match Section.of_string section.pelem with
-       | None -> fail pos "Unknown install section"
-       | Some section ->
-         (match files with
-          | { pelem = List l; _ } ->
-            let install_file src dst =
-              let optional, src =
-                match String.drop_prefix src ~prefix:"?" with
-                | None -> false, src
-                | Some src -> true, src
+    let dst =
+      Path.reach i_want_to_install_the_file_as ~from:opam_will_install_in_this_dir
+    in
+    { t with dst = Dst.explicit dst }
+  ;;
+
+  let of_install_file ~optional ~src ~dst ~section =
+    { src
+    ; section
+    ; dst =
+        Dst.of_install_file
+          ~section
+          ~src_basename:(Path.basename src |> Filename.to_string)
+          dst
+    ; kind = File
+    ; optional
+    }
+  ;;
+
+  let group entries =
+    List.map entries ~f:(fun (entry : _ t) -> entry.section, entry)
+    |> Section.Map.of_list_multi
+  ;;
+
+  let gen_install_file entries =
+    let buf = Buffer.create 4096 in
+    let pr fmt = Printf.bprintf buf (fmt ^^ "\n") in
+    Section.Map.iteri (group entries) ~f:(fun section entries ->
+      pr "%s: [" (Section.to_string section);
+      List.sort ~compare:(compare_entry Path.compare compare_kind) entries
+      |> List.iter ~f:(fun (e : Path.t t) ->
+        let src = Path.to_string e.src in
+        match
+          Dst.to_install_file
+            ~src_basename:(Path.basename e.src |> Filename.to_string)
+            ~section:e.section
+            e.dst
+        with
+        | None -> pr "  %S" src
+        | Some dst -> pr "  %S {%S}" src dst);
+      pr "]");
+    Buffer.contents buf
+  ;;
+
+  let load_install_file path local =
+    let open OpamParserTypes.FullPos in
+    let file = Io.with_lexbuf_from_file path ~f:Dune_pkg.Opam_file.parse in
+    let fail { filename = pos_fname; start; stop } msg =
+      let position_of_loc (pos_lnum, pos_cnum) =
+        { Lexing.pos_fname; pos_lnum; pos_bol = 0; pos_cnum }
+      in
+      let start = position_of_loc start in
+      let stop = position_of_loc stop in
+      let loc = Loc.create ~start ~stop in
+      User_error.raise ~loc [ Pp.text msg ]
+    in
+    List.concat_map file.file_contents ~f:(function
+      | { pelem = Variable (section, files); pos } ->
+        (match Section.of_string section.pelem with
+         | None -> fail pos "Unknown install section"
+         | Some section ->
+           (match files with
+            | { pelem = List l; _ } ->
+              let install_file src dst =
+                let optional, src =
+                  match String.drop_prefix src ~prefix:"?" with
+                  | None -> false, src
+                  | Some src -> true, src
+                in
+                let src =
+                  if Filename.is_relative src
+                  then local (Path.Local.of_string src)
+                  else Path.external_ (Path.External.of_string src)
+                in
+                of_install_file ~optional ~src ~dst ~section
               in
-              let src =
-                if Filename.is_relative src
-                then local (Path.Local.of_string src)
-                else Path.external_ (Path.External.of_string src)
-              in
-              of_install_file ~optional ~src ~dst ~section
-            in
-            List.map l.pelem ~f:(function
-              | { pelem = String src; _ } -> install_file src None
-              | { pelem =
-                    Option
-                      ( { pelem = String src; _ }
-                      , { pelem = [ { pelem = String dst; _ } ]; _ } )
-                ; _
-                } -> install_file src (Some dst)
-              | { pelem = _; pos } -> fail pos "Invalid value in .install file")
-          | { pelem = _; pos } -> fail pos "Invalid value for install section"))
-    | { pelem = Section _; pos } -> fail pos "Sections are not allowed in .install file")
-;;
+              List.map l.pelem ~f:(function
+                | { pelem = String src; _ } -> install_file src None
+                | { pelem =
+                      Option
+                        ( { pelem = String src; _ }
+                        , { pelem = [ { pelem = String dst; _ } ]; _ } )
+                  ; _
+                  } -> install_file src (Some dst)
+                | { pelem = _; pos } -> fail pos "Invalid value in .install file")
+            | { pelem = _; pos } -> fail pos "Invalid value for install section"))
+      | { pelem = Section _; pos } -> fail pos "Sections are not allowed in .install file")
+  ;;
+end
+
+module Unexpanded = struct
+  type kind =
+    | File
+    | Directory
+    | Source_tree
+
+  let repr_kind =
+    Repr.variant
+      "kind"
+      [ Repr.case0 "File" ~test:(function
+          | File -> true
+          | _ -> false)
+      ; Repr.case0 "Directory" ~test:(function
+          | Directory -> true
+          | _ -> false)
+      ; Repr.case0 "Source_tree" ~test:(function
+          | Source_tree -> true
+          | _ -> false)
+      ]
+  ;;
+
+  include Repr.Poly (struct
+      type t = kind
+
+      let repr = repr_kind
+    end)
+
+  let compare_kind = compare
+
+  type nonrec t = (Path.Build.t, kind) t
+
+  let dyn_of_kind = Repr.to_dyn repr_kind
+  let to_dyn f t = to_dyn dyn_of_kind f t
+
+  let make section ?dst ~kind src =
+    let dst = adjust_dst' ~src ~dst ~section in
+    { optional = false; src; dst; section; kind }
+  ;;
+
+  let make_with_dst section dst ~kind ~src = { optional = false; src; dst; section; kind }
+
+  let expand : t -> Path.Build.t Expanded.t =
+    fun t ->
+    let kind =
+      match t.kind with
+      | File | Source_tree -> Expanded.File
+      | Directory -> Expanded.Directory
+    in
+    { t with kind }
+  ;;
+
+  let compare a b = compare_entry Path.Build.compare compare_kind a b
+end
+
+module Sourced = struct
+  type source =
+    | User of Loc.t
+    | Dune
+
+  type nonrec 'entry t =
+    { source : source
+    ; entry : 'entry
+    }
+
+  let create ?loc entry =
+    { source =
+        (match loc with
+         | None -> Dune
+         | Some loc -> User loc)
+    ; entry
+    }
+  ;;
+
+  let to_dyn =
+    let source_to_dyn = function
+      | Dune -> Dyn.variant "Dune" []
+      | User loc -> Dyn.variant "User" [ Loc.to_dyn loc ]
+    in
+    fun f { source; entry } ->
+      let open Dyn in
+      Record [ "source", source_to_dyn source; "entry", f Path.Build.to_dyn entry ]
+  ;;
+
+  module Unexpanded = struct
+    type nonrec t = Unexpanded.t t
+
+    let create = create
+    let to_dyn t = to_dyn Unexpanded.to_dyn t
+  end
+
+  module Expanded = struct
+    type nonrec t = Path.Build.t Expanded.t t
+  end
+end

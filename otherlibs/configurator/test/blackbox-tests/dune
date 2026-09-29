@@ -4,7 +4,7 @@
   (package dune-configurator)))
 
 (cram
- (applies_to pkg-config-quoting)
+ (applies_to pkg-config-quoting.t)
  (deps %{bin:pkg-config}))
 
 (cram

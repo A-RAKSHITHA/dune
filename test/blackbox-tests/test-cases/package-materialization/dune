@@ -1,0 +1,16 @@
+(cram
+ (applies_to
+  independent-roots.t
+  installed-foreign-object.t
+  installed-only-packages-fallback.t
+  installed-package.t
+  installed-unavailable-sublibrary.t
+  no-transitive-through-targets.t
+  ocamlfind.t
+  transitive-closure.t
+  virtual-without-default.t)
+ (deps %{bin:ocamlfind}))
+
+(cram
+ (applies_to installed-package.t)
+ (deps %{bin:cmp}))

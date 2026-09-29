@@ -12,7 +12,7 @@ val env : Env.Var.t -> t
 val universe : t
 val file_selector : File_selector.t -> t
 val alias : Alias.t -> t
-val compare : t -> t -> Ordering.t
+val repr : t Repr.t
 
 module Map : sig
   type dep := t
@@ -73,15 +73,18 @@ module Set : sig
 
   val of_files : Path.t list -> t
   val of_files_set : Path.Set.t -> t
-  val add_paths : t -> Path.Set.t -> t
-  val digest : t -> Digest.t
+  val digest : t -> Digest.Manual.t -> unit
 end
 
 module Facts : sig
   type dep := t
 
   (* There is an invariant that is not currently enforced: values correspond to
-     keys. For example, we can't have [Map.find (File f) = File_selector _]. *)
+     keys. For example, we can't have [Map.find (File f) = File_selector _].
+
+     It is also invalid for the same dependency to be associated with two
+     different facts. In particular, overlapping keys passed to [union] or
+     [union_all] must have equal facts. *)
   type t = Fact.t Map.t
 
   val singleton : dep -> Fact.t -> t
@@ -103,6 +106,6 @@ module Facts : sig
       directory. Needed for sandboxing *)
   val necessary_dirs_for_sandboxing : t -> Path.Build.Set.t
 
-  val digest : t -> env:Env.t -> Digest.t
+  val digest : t -> Digest.Manual.t -> env:Env.t -> unit
   val to_dyn : t -> Dyn.t
 end

@@ -34,11 +34,13 @@ module Archive = struct
 
     let lib_file archive_name ~dir ~ext_lib ~mode =
       let archive_name = add_mode_suffix mode archive_name in
+      let ext_lib = Filename.Extension.to_string ext_lib in
       Path.Build.relative dir (sprintf "%s%s%s" lib_file_prefix archive_name ext_lib)
     ;;
 
     let dll_file archive_name ~dir ~ext_dll ~mode =
       let archive_name = add_mode_suffix mode archive_name in
+      let ext_dll = Filename.Extension.to_string ext_dll in
       Path.Build.relative dir (sprintf "dll%s%s" archive_name ext_dll)
     ;;
   end
@@ -126,12 +128,12 @@ module Stubs = struct
     ; extra_deps : Dep_conf.t list
     }
 
-  let make ~loc ~language ~names ~mode ~flags =
-    { loc; language; names; mode; flags; include_dirs = []; extra_deps = [] }
+  let make ~loc ~language ~names ~flags =
+    { loc; language; names; flags; include_dirs = []; extra_deps = []; mode = All }
   ;;
 
   let syntax =
-    let name = "mode_specific_stubs" in
+    let name = Syntax.Name.parse "mode_specific_stubs" in
     let desc = "syntax extension for mode-specific foreign stubs" in
     Dune_lang.Syntax.create ~name ~desc [ (0, 1), `Since (3, 5) ]
   ;;
@@ -189,7 +191,7 @@ end
 module Objects = struct
   module Object_name = struct
     let decode = Dune_lang.Decoder.string
-    let filename t ~ext_obj = t ^ ext_obj
+    let filename t ~ext_obj = t ^ Filename.Extension.to_string ext_obj
 
     let build_path t ~error_loc ~ext_obj ~dir =
       Path.Build.relative ~error_loc dir (filename t ~ext_obj)
@@ -210,16 +212,14 @@ module Objects = struct
     | Ok _ -> t
     | Error (name, loc, loc') ->
       let main_message = sprintf "Duplicate object name: %s." name in
-      let annots =
+      let compound =
         let main = User_message.make ~loc [ Pp.text main_message ] in
         let related = [ User_message.make ~loc:loc' [ Pp.text "" ] ] in
-        User_message.Annots.singleton
-          Compound_user_error.annot
-          [ Compound_user_error.make ~main ~related ]
+        [ Compound_user_error.make ~main ~related ]
       in
       User_error.raise
         ~loc
-        ~annots
+        ~compound
         [ Pp.textf "%s Already appears at:" main_message
         ; Pp.textf "- %s" (Loc.to_file_colon_line loc')
         ]
@@ -251,6 +251,7 @@ module Source = struct
   ;;
 
   let path t = t.path
+  let kind t = t.kind
 
   let mode t =
     match t.kind with
@@ -258,11 +259,23 @@ module Source = struct
     | Ctypes _ -> All
   ;;
 
+  let include_dirs t =
+    match t.kind with
+    | Stubs stubs -> stubs.include_dirs
+    | Ctypes _ -> []
+  ;;
+
   let user_object_name t =
     t.path |> Path.Build.split_extension |> fst |> Path.Build.basename
   ;;
 
-  let object_name t = user_object_name t |> add_mode_suffix (mode t)
+  let object_name t =
+    user_object_name t
+    |> Filename.to_string
+    |> add_mode_suffix (mode t)
+    |> Filename.of_string_exn
+  ;;
+
   let make kind ~path = { kind; path }
 end
 
@@ -273,6 +286,7 @@ module Sources = struct
   let make t = t
 
   let object_files t ~dir ~ext_obj =
+    let ext_obj = Filename.Extension.to_string ext_obj in
     String.Map.to_list_map t ~f:(fun c _ -> Path.Build.relative dir (c ^ ext_obj))
   ;;
 

@@ -1,7 +1,5 @@
 Sources are traversed recursively (unlike pins)
 
-  $ . ../helpers.sh
-
   $ mkrepo
   $ add_mock_repo_if_needed
 
@@ -22,17 +20,9 @@ Sources are traversed recursively (unlike pins)
   > (package (name bar))
   > EOF
 
-  $ cat >dune-project <<EOF
-  > (lang dune 3.13)
-  > (pin
-  >  (url "file://$PWD/_foo")
-  >  (package (name foo)))
-  > (package
-  >  (name main)
-  >  (depends foo))
-  > EOF
+  $ make_project_pinned_to_foo
 
-  $ dune pkg lock
+  $ dune_pkg_lock_normalized
   Solution for dune.lock:
   - bar.dev
   - foo.dev

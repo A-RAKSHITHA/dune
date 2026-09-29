@@ -1,6 +1,5 @@
 The ocaml compiler needs to be marked inside the lock dir:
 
-  $ . ./helpers.sh
   $ mkrepo
 
 To mark it, we use `conflict-class: "ocaml-core-compiler"`
@@ -13,5 +12,5 @@ To mark it, we use `conflict-class: "ocaml-core-compiler"`
   Solution for dune.lock:
   - foocaml.0.0.1
 
-  $ grep ocaml dune.lock/lock.dune
+  $ grep ocaml ${default_lock_dir}/lock.dune
   (ocaml foocaml)

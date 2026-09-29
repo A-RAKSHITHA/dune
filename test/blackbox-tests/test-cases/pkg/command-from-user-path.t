@@ -1,7 +1,5 @@
 Make sure we can run exes from the user's PATH variable.
 
-  $ . ./helpers.sh
-
 Create a directory containing a shell script and add the directory to PATH.
   $ mkdir bin
   $ cat > bin/hello <<EOF
@@ -9,11 +7,11 @@ Create a directory containing a shell script and add the directory to PATH.
   > echo "Hello, World!"
   > EOF
   $ chmod a+x bin/hello
-  $ export PATH=$PATH:$PWD/bin
+  $ export PATH=$PWD/bin:$PATH
 
 Create a lockdir with a lockfile that runs the shell script in a build command.
   $ make_lockdir
-  $ cat >dune.lock/test.pkg <<'EOF'
+  $ make_lockpkg test <<EOF
   > (version 0.0.1)
   > (build (run hello))
   > EOF

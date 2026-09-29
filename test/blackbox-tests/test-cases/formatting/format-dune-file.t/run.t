@@ -200,9 +200,7 @@ Non 0 error code:
 
 Using the built-in action.
 
-  $ cat >dune-project <<EOF
-  > (lang dune 3.18)
-  > EOF
+  $ make_dune_project 3.18
 
   $ cat >dune <<EOF
   > (rule (with-stdout-to file (echo "(   a     c)")))
@@ -216,9 +214,7 @@ Using the built-in action.
 
 Version check.
 
-  $ cat >dune-project <<EOF
-  > (lang dune 3.17)
-  > EOF
+  $ make_dune_project 3.17
 
   $ dune build file.out
   File "dune", line 2, characters 0-45:
@@ -244,9 +240,7 @@ Version check.
 
 Behaviour when the dune file is not syntactically valid.
 
-  $ cat >dune-project <<EOF
-  > (lang dune 3.18)
-  > EOF
+  $ make_dune_project 3.18
 
   $ cat >dune <<EOF
   > (rule (with-stdout-to file (echo "xxx yyy (")))
@@ -259,3 +253,59 @@ Behaviour when the dune file is not syntactically valid.
                
   Error: unclosed parenthesis at end of input
   [1]
+
+If one does not specify the --version flag, then the version of the current Dune
+project is used (if any).
+
+  $ cat >test <<EOF
+  > (aaaaaaaaaaa bbbbbbbbbbbbb ccccccccccccccccc dddddddddddddddddd
+  > aaaaaaaaaaa bbbbbbbbbbbbb ccccccccccccccccc dddddddddddddddddd)
+  > EOF
+
+  $ make_dune_project 2.7
+
+  $ dune format-dune-file <test
+  (aaaaaaaaaaa bbbbbbbbbbbbb ccccccccccccccccc dddddddddddddddddd aaaaaaaaaaa
+    bbbbbbbbbbbbb ccccccccccccccccc dddddddddddddddddd)
+
+  $ make_dune_project 2.8
+
+  $ dune format-dune-file <test
+  (aaaaaaaaaaa
+   bbbbbbbbbbbbb
+   ccccccccccccccccc
+   dddddddddddddddddd
+   aaaaaaaaaaa
+   bbbbbbbbbbbbb
+   ccccccccccccccccc
+   dddddddddddddddddd)
+
+When a file is passed as an argument, the version used is that of the project
+owning the file (if any). Note that the workspace root when invoking Dune from
+within Dune is always the directory directly containing the file.
+
+  $ mkdir -p sub/sub
+  $ cat >sub/dune-project <<EOF
+  > (lang dune 2.8)
+  > EOF
+  $ cat >sub/sub/dune-project <<EOF
+  > (lang dune 2.7)
+  > EOF
+  $ cp test sub/
+  $ cp test sub/sub/
+
+  $ cd sub
+  $ dune format-dune-file sub/test
+  (aaaaaaaaaaa bbbbbbbbbbbbb ccccccccccccccccc dddddddddddddddddd aaaaaaaaaaa
+    bbbbbbbbbbbbb ccccccccccccccccc dddddddddddddddddd)
+
+  $ cd sub
+  $ dune format-dune-file ../test
+  (aaaaaaaaaaa
+   bbbbbbbbbbbbb
+   ccccccccccccccccc
+   dddddddddddddddddd
+   aaaaaaaaaaa
+   bbbbbbbbbbbbb
+   ccccccccccccccccc
+   dddddddddddddddddd)

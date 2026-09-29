@@ -1,8 +1,9 @@
-open Stdune
+open Import
 
 type t
 
 val hash : t -> int
+val repr : t Repr.t
 
 include Dune_util.Stringlike with type t := t
 

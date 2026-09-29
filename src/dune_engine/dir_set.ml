@@ -44,18 +44,8 @@ let create ~default ~here ~exceptions =
   else Nontrivial { here; default; exceptions }
 ;;
 
-let is_empty = function
-  | Empty -> true
-  | _ -> false
-;;
-
-let is_universal = function
-  | Universal -> true
-  | _ -> false
-;;
-
 let merge_exceptions a b ~default ~f =
-  String.Map.merge a.exceptions b.exceptions ~f:(fun _ x y ->
+  Filename.Map.merge a.exceptions b.exceptions ~f:(fun _ x y ->
     let x = Option.value x ~default:(trivial a.default) in
     let y = Option.value y ~default:(trivial b.default) in
     match default, f x y with
@@ -98,17 +88,6 @@ let rec negate x =
       }
 ;;
 
-let rec diff x y =
-  match x with
-  | Empty -> Empty
-  | Universal -> negate y
-  | Nontrivial nx ->
-    (match y with
-     | Empty -> x
-     | Universal -> Empty
-     | Nontrivial ny -> merge_nontrivial nx ny ~f_one:(fun a b -> a && not b) ~f_set:diff)
-;;
-
 let rec mem t dir =
   match t with
   | Empty -> false
@@ -135,7 +114,6 @@ let descend t child =
 ;;
 
 let union_all = List.fold_left ~init:empty ~f:union
-let inter_all = List.fold_left ~init:empty ~f:inter
 
 let of_subtree_gen =
   let rec loop subtree = function
@@ -179,7 +157,8 @@ let rec to_dyn =
       (((match here with
          | true -> [ ".", String "true" ]
          | false -> [])
-        @ Filename.Map.to_list_map exceptions ~f:(fun s t -> s, to_dyn t)
+        @ Filename.Map.to_list_map exceptions ~f:(fun s t ->
+          Filename.to_string s, to_dyn t)
         @
         match default with
         | false -> []
@@ -199,8 +178,4 @@ let toplevel_subdirs t =
   | Empty -> Finite Filename.Set.empty
   | Nontrivial t ->
     if t.default then Infinite else Finite (Filename.Set.of_keys t.exceptions)
-;;
-
-let of_list paths =
-  union_all (List.map paths ~f:(fun p -> singleton' (Path.Local_gen.explode p)))
 ;;
